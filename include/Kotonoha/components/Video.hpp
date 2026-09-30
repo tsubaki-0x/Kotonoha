@@ -22,7 +22,10 @@ public:
 
   Video(Kotonoha_time *timeManager);
 
-  bool Register(const char *path, Uint64 startTime, Uint64 endTime);
+  bool Register(const char *path, Uint64 startTime, Uint64 endTime,
+                bool useOrsFrameTimeline = false,
+                Uint64 orsStartFrame = 0,
+                Uint64 orsEndFrame = 0);
 
   static Kotonoha_Scene_Status Render(KOTONOHA_SCENE_CALL);
 

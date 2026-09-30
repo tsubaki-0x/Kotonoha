@@ -216,6 +216,22 @@ namespace Kotonoha {
 
 		if (firstFocus) {
 			UpdateCanvasSize(gameContext->window, gameContext->render);
+
+			// KTN-0001-R3:
+			// The background EventManager worker runs every ~50 ms. On scene
+			// entry the clock has only just started, so waiting for that worker
+			// can leave the first RenderCanvas() with no media registered.
+			// Prime the scene synchronously before its first presentation.
+			if (!eventManager->ProcessNow(gameContext)) {
+				SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+					"[KTN-0001-R3] Failed to prime scene before first render: %s",
+					scriptPath.c_str());
+			}
+			else {
+				SDL_Log("[KTN-0001-R3] First render primed: %s",
+					scriptPath.c_str());
+			}
+
 			firstFocus = false;
 		}
 

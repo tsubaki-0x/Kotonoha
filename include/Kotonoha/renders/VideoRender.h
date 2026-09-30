@@ -21,12 +21,33 @@ struct Kotonoha_videoData {
   struct Kotonoha_time *time;
   Uint64 startTime, endTime, lastTime, videoTime, frameTime;
   SDL_Texture *texture;
+
+  // KTN-0001-R6: PLAY_MOVIE-only timeline compatibility metadata.
+  bool useOrsFrameTimeline;
+  Uint64 orsStartFrame;
+  Uint64 orsEndFrame;
+
+  // Monotonic decoder instrumentation for the current media lifetime.
+  Uint64 decodedOrdinal;
+  Uint64 pendingOrdinal;
+  Uint64 pendingPtsMs;
+  Uint64 uploadedOrdinal;
+  Uint64 uploadedPtsMs;
+  bool hasPendingFrameMeta;
+  bool hasUploadedFrame;
+  bool debugTerminalLogged;
+
+  // KTN-0001-DIAG2: diagnostic-only state used to log transitions once.
+  int debugLastStatus;
 };
 
 struct Kotonoha_videoData *Kotonoha_VideoRenderInit(const char *filename,
                                                     struct Kotonoha_time *time,
                                                     Uint64 startTime,
-                                                    Uint64 endTime);
+                                                    Uint64 endTime,
+                                                    bool useOrsFrameTimeline,
+                                                    Uint64 orsStartFrame,
+                                                    Uint64 orsEndFrame);
 
 void Kotonoha_VideoRenderShutdown(struct Kotonoha_videoData **instance);
 

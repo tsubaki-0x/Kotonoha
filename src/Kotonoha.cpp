@@ -603,21 +603,66 @@ namespace Kotonoha {
 			}
 
 			if (gameContext.back && gameContext.scene > 0) {
-				if (!current->firstFocus)
+				const size_t previousScene = currentScene - 1;
+				Gameplay* previous = gameplays[previousScene];
+
+				if (previous != nullptr && !previous->firstFocus) {
+					previous->Reset(true);
+				}
+
+				if (previous != nullptr &&
+					current->drawCanvas != nullptr &&
+					previous->drawCanvas != nullptr) {
+					if (current->drawCanvas->TransferLastFrameTo(previous->drawCanvas)) {
+						SDL_Log("[KTN-0001] Retained frame transferred: scene %zu -> %zu",
+							currentScene, previousScene);
+					}
+				}
+
+				if (!current->firstFocus) {
 					current->Reset(true);
-				lastScene = gameContext.scene--;
+				}
+
+				gameContext.scene--;
+				lastScene = static_cast<size_t>(gameContext.scene);
 				gameContext.back = false;
 				continue;
 			}
 
 			const SDL_AppResult result = current->Main(&gameContext);
 			if (result != SDL_APP_CONTINUE || gameContext.next) {
-				if (!current->firstFocus)
+				const size_t nextScene = currentScene + 1;
+				Gameplay* next =
+					(nextScene < gameplays.size()) ? gameplays[nextScene] : nullptr;
+
+				// If the destination Gameplay was visited before, reset it BEFORE
+				// receiving the retained frame. Otherwise its Reset() would destroy
+				// the frame we are trying to preserve.
+				if (next != nullptr && !next->firstFocus) {
+					next->Reset(true);
+				}
+
+				if (next != nullptr &&
+					current->drawCanvas != nullptr &&
+					next->drawCanvas != nullptr) {
+					if (current->drawCanvas->TransferLastFrameTo(next->drawCanvas)) {
+						SDL_Log("[KTN-0001] Retained frame transferred: scene %zu -> %zu",
+							currentScene, nextScene);
+					}
+				}
+
+				if (!current->firstFocus) {
 					current->Reset(true);
+				}
+
 				gameContext.scene++;
 				gameContext.next = false;
 
 				if (static_cast<size_t>(gameContext.scene) < gameplays.size()) {
+					// Destination was already prepared above. Mark it as the active
+					// scene so the generic scene-change block does not reset it again
+					// and accidentally discard the retained frame.
+					lastScene = static_cast<size_t>(gameContext.scene);
 					continue;
 				}
 

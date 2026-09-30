@@ -37,6 +37,10 @@
         "harfbuzz"
       ]
     },
+    {
+      "name": "pkgconf",
+      "host": true
+    },
     "libass",
     "sdl3"
   ]

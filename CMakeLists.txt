@@ -15,6 +15,13 @@ file(GLOB SOURCES CONFIGURE_DEPENDS
     src/utils/*.c
 )
 
+if(ANDROID AND CMAKE_HOST_WIN32)
+    set(PKG_CONFIG_EXECUTABLE
+        "${VCPKG_INSTALLED_DIR}/${VCPKG_HOST_TRIPLET}/tools/pkgconf/pkgconf.exe"
+        CACHE FILEPATH "Host pkg-config executable" FORCE
+    )
+endif()
+
 find_package(PkgConfig REQUIRED)
 find_package(imgui CONFIG REQUIRED)
 find_package(SDL3 CONFIG REQUIRED)
@@ -31,9 +38,7 @@ if(ANDROID)
     find_package(FFMPEG REQUIRED)
     find_package(expat CONFIG REQUIRED)
 
-    pkg_check_modules(LIBASS REQUIRED
-        IMPORTED_TARGET GLOBAL libass
-    )
+    pkg_check_modules(LIBASS REQUIRED libass)
 
     add_library(SDL3 SHARED
         bundle.cpp
@@ -73,10 +78,20 @@ if(ANDROID)
     target_include_directories(Kotonoha PRIVATE
         "${KOTONOHA_INCLUDE_DIR}"
         ${FFMPEG_INCLUDE_DIRS}
+        ${LIBASS_INCLUDE_DIRS}
     )
 
     target_link_directories(Kotonoha PRIVATE
         ${FFMPEG_LIBRARY_DIRS}
+        ${LIBASS_LIBRARY_DIRS}
+    )
+
+    target_compile_options(Kotonoha PRIVATE
+        ${LIBASS_CFLAGS_OTHER}
+    )
+
+    target_link_options(Kotonoha PRIVATE
+        ${LIBASS_LDFLAGS_OTHER}
     )
 
     target_link_libraries(Kotonoha PRIVATE
@@ -84,7 +99,7 @@ if(ANDROID)
         SDL3_ttf
 
         ${FFMPEG_LIBRARIES}
-        PkgConfig::LIBASS
+        ${LIBASS_LIBRARIES}
         imgui::imgui
         expat::expat
 

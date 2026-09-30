@@ -17,6 +17,9 @@ struct CanvasItem {
   bool swapTexture;
   bool holdTexture;
 
+  // KTN-0001-DIAG2: last status returned by this render layer.
+  int debugLastStatus;
+
   void *userData;
 };
 
@@ -39,6 +42,11 @@ public:
 
   SDL_AppResult RenderCanvas(SDL_Window *window, SDL_Renderer *render,
                              struct Kotonoha_eventStack *eventQueu);
+
+  // Transfers ownership of the retained last-frame texture to another Canvas.
+  // Used during Gameplay transitions so the window does not flash black while
+  // the next scene is still preparing its first drawable frame.
+  bool TransferLastFrameTo(Canvas *target);
 
   int CanvasCount();
   void Reset();

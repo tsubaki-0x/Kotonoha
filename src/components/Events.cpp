@@ -46,6 +46,77 @@ namespace Kotonoha {
 			return upperStr;
 		}
 
+		// School Days ORS timestamps are authored as MM:SS:FF, with FF on a
+		// 24-fps timeline. The historical parser packs that as
+		// MM*60000 + SS*1000 + FF*10, which is NOT true milliseconds.
+		//
+		// The parser can also add +1 to event->start when it equals the
+		// previous event end. allowParserNudge reverses only that known +1.
+		static bool DecodeOrs24FpsTimestamp(
+			Uint64 packed,
+			bool allowParserNudge,
+			Uint64* normalizedPacked,
+			Uint64* frame1,
+			Uint64* msCeil,
+			bool* parserNudge) {
+			if (normalizedPacked == nullptr ||
+				frame1 == nullptr ||
+				msCeil == nullptr ||
+				parserNudge == nullptr) {
+				return false;
+			}
+
+			Uint64 candidate = packed;
+			bool nudge = false;
+
+			auto decodeCandidate = [](Uint64 value,
+				Uint64* outFrame1,
+				Uint64* outMsCeil) -> bool {
+				const Uint64 minutes = value / 60000;
+				const Uint64 rem = value % 60000;
+				const Uint64 seconds = rem / 1000;
+				const Uint64 tail = rem % 1000;
+
+				if (seconds >= 60 || (tail % 10) != 0) {
+					return false;
+				}
+
+				const Uint64 frameField = tail / 10;
+				if (frameField >= 24) {
+					return false;
+				}
+
+				const Uint64 zeroBased =
+					(minutes * 60 + seconds) * 24 + frameField;
+
+				*outFrame1 = zeroBased + 1;
+
+				// First integer millisecond that has reached this 24-fps
+				// frame boundary: ceil(zeroBased * 1000 / 24).
+				*outMsCeil = (zeroBased * 1000 + 23) / 24;
+				return true;
+			};
+
+			Uint64 decodedFrame = 0;
+			Uint64 decodedMs = 0;
+
+			if (!decodeCandidate(candidate, &decodedFrame, &decodedMs)) {
+				if (!allowParserNudge || candidate == 0 ||
+					!decodeCandidate(candidate - 1, &decodedFrame, &decodedMs)) {
+					return false;
+				}
+
+				candidate--;
+				nudge = true;
+			}
+
+			*normalizedPacked = candidate;
+			*frame1 = decodedFrame;
+			*msCeil = decodedMs;
+			*parserNudge = nudge;
+			return true;
+		}
+
 		static void DestroyEventManagerParams(void** parms) {
 			if (parms == nullptr) {
 				return;
@@ -224,13 +295,80 @@ namespace Kotonoha {
 			case PLAY_MOVIE:
 				if (event->data.play_movie->path != nullptr &&
 					SDL_strlen(event->data.play_movie->path) > 0) {
-					gameplay->video->Register(
+					const std::string moviePath =
 						BuildString(event->data.play_movie->path,
 							assetsPath,
-							useExtension ? ".WMV" : "")
-						.c_str(),
+							useExtension ? ".WMV" : "");
+
+					Uint64 sourceStartPacked = 0;
+					Uint64 sourceEndPacked = 0;
+					Uint64 startFrame = 0;
+					Uint64 endFrame = 0;
+					Uint64 startMs = 0;
+					Uint64 endMs = 0;
+					bool startNudge = false;
+					bool endNudge = false;
+
+					const bool startMapped = DecodeOrs24FpsTimestamp(
 						event->start,
-						event->end + 50);
+						true,
+						&sourceStartPacked,
+						&startFrame,
+						&startMs,
+						&startNudge);
+
+					const bool endMapped = DecodeOrs24FpsTimestamp(
+						event->end,
+						false,
+						&sourceEndPacked,
+						&endFrame,
+						&endMs,
+						&endNudge);
+
+					if (startMapped && endMapped && endFrame >= startFrame) {
+						SDL_Log(
+							"[KTN-TL][MAP] path=%s packedStart=%llu packedEnd=%llu "
+							"normalizedStart=%llu normalizedEnd=%llu "
+							"startFrame=%llu endFrame=%llu startMs=%llu endMs=%llu "
+							"startNudge=%d",
+							moviePath.c_str(),
+							(unsigned long long)event->start,
+							(unsigned long long)event->end,
+							(unsigned long long)sourceStartPacked,
+							(unsigned long long)sourceEndPacked,
+							(unsigned long long)startFrame,
+							(unsigned long long)endFrame,
+							(unsigned long long)startMs,
+							(unsigned long long)endMs,
+							startNudge ? 1 : 0);
+
+						gameplay->video->Register(
+							moviePath.c_str(),
+							startMs,
+							endMs,
+							true,
+							startFrame,
+							endFrame);
+					}
+					else {
+						// Prototype fallback: preserve the historical behavior
+						// when the source timestamp does not satisfy the proven
+						// MM:SS:FF@24 mapping. Do not extend compatibility
+						// semantics to unproven paths.
+						SDL_LogWarn(
+							SDL_LOG_CATEGORY_APPLICATION,
+							"[KTN-TL][MAP_FALLBACK] path=%s packedStart=%llu "
+							"packedEnd=%llu legacyEnd=%llu",
+							moviePath.c_str(),
+							(unsigned long long)event->start,
+							(unsigned long long)event->end,
+							(unsigned long long)(event->end + 50));
+
+						gameplay->video->Register(
+							moviePath.c_str(),
+							event->start,
+							event->end + 50);
+					}
 				}
 				break;
 
@@ -384,6 +522,8 @@ namespace Kotonoha {
 			throw std::runtime_error("Failed to allocate EventManager state");
 		}
 
+		eventManagerParams = parms;
+
 		SDL_LockMutex(gameCtx->taskLock);
 		auto* tasks =
 			static_cast<std::vector<std::tuple<SDL_ThreadFunction, void*>>*>(
@@ -392,6 +532,23 @@ namespace Kotonoha {
 		EventManager(parms);
 		tasks->emplace_back(EventManager, parms);
 		SDL_UnlockMutex(gameCtx->taskLock);
+	}
+
+	bool Event::ProcessNow(struct Kotonoha_Game* gameCtx) {
+		if (gameCtx == nullptr ||
+			gameCtx->taskLock == nullptr ||
+			eventManagerParams == nullptr) {
+			return false;
+		}
+
+		// Serialize with the 50 ms worker loop so the same EventManager task
+		// cannot be processed concurrently by the UI and worker threads.
+		SDL_LockMutex(gameCtx->taskLock);
+		const int result = EventManager(eventManagerParams);
+		SDL_UnlockMutex(gameCtx->taskLock);
+
+		SDL_Log("[KTN-0001-R3] EventManager primed synchronously");
+		return result >= 0;
 	}
 
 	bool Event::CheckEnd(void* gameplay) {
@@ -404,6 +561,7 @@ namespace Kotonoha {
 	}
 
 	Event::~Event() {
+		eventManagerParams = nullptr;
 		Kotonoha_OrsClean(&eventsFromScript);
 		if (eventMutex != nullptr) {
 			SDL_DestroyMutex(eventMutex);

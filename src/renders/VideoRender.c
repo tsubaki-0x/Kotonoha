@@ -4,6 +4,13 @@ static inline Uint64 u64_abs_diff(Uint64 a, Uint64 b) {
 	return (a > b) ? (a - b) : (b - a);
 }
 
+// School Days original controller uses a 1-based 24-fps scene timeline.
+// With integer millisecond host time, floor(ms*24/1000)+1 reaches a frame
+// on the first integer millisecond at/after its exact boundary.
+static inline Uint64 Kotonoha_OrsSceneMsToFrame(Uint64 sceneMs) {
+	return 1 + (sceneMs * 24) / 1000;
+}
+
 // Inicializa o contexto de hardware
 static bool initializeHwContext(struct Kotonoha_videoData* instance) {
 	instance->hwCtx =
@@ -87,11 +94,33 @@ static bool renderVideo(struct Kotonoha_videoData* instance, Uint64 currentTime)
 				instance->pFrame->pts,
 				instance->pFrame->pkt_dts);
 
-			if (framePtsMs < currentTime) {
+			const Uint64 ordinal = instance->decodedOrdinal++;
+			const bool accepted = framePtsMs >= currentTime;
+
+			if (instance->useOrsFrameTimeline) {
+				const Uint64 sceneMs = Kotonoha_timeGet(instance->time);
+				SDL_Log(
+					"[KTN-TL][DECODE] ticks=%llu video=%p sceneMs=%llu "
+					"sceneFrame=%llu ordinal=%llu ptsMs=%llu relMs=%llu accepted=%d",
+					(unsigned long long)SDL_GetTicks(),
+					(void*)instance,
+					(unsigned long long)sceneMs,
+					(unsigned long long)Kotonoha_OrsSceneMsToFrame(sceneMs),
+					(unsigned long long)ordinal,
+					(unsigned long long)framePtsMs,
+					(unsigned long long)currentTime,
+					accepted ? 1 : 0);
+			}
+
+			if (!accepted) {
+				instance->hasPendingFrameMeta = false;
 				av_frame_unref(instance->pFrame);
 				continue;
 			}
 
+			instance->pendingOrdinal = ordinal;
+			instance->pendingPtsMs = framePtsMs;
+			instance->hasPendingFrameMeta = true;
 			instance->videoTime = framePtsMs;
 			hasNewFrame = true;
 			break;
@@ -189,7 +218,10 @@ static AVFrame* getCpuReadableFrame(AVFrame* src) {
 struct Kotonoha_videoData* Kotonoha_VideoRenderInit(const char* filename,
 	struct Kotonoha_time* time,
 	Uint64 startTime,
-	Uint64 endTime) {
+	Uint64 endTime,
+	bool useOrsFrameTimeline,
+	Uint64 orsStartFrame,
+	Uint64 orsEndFrame) {
 	struct Kotonoha_videoData* videoInstance =
 		(struct Kotonoha_videoData*)SDL_calloc(1, sizeof(struct Kotonoha_videoData));
 	if (!videoInstance) {
@@ -209,6 +241,18 @@ struct Kotonoha_videoData* Kotonoha_VideoRenderInit(const char* filename,
 	videoInstance->endTime = endTime;
 	videoInstance->videoTime = 0;
 	videoInstance->lastTime = 0;
+
+	videoInstance->useOrsFrameTimeline = useOrsFrameTimeline;
+	videoInstance->orsStartFrame = orsStartFrame;
+	videoInstance->orsEndFrame = orsEndFrame;
+	videoInstance->decodedOrdinal = 0;
+	videoInstance->pendingOrdinal = 0;
+	videoInstance->pendingPtsMs = 0;
+	videoInstance->uploadedOrdinal = 0;
+	videoInstance->uploadedPtsMs = 0;
+	videoInstance->hasPendingFrameMeta = false;
+	videoInstance->hasUploadedFrame = false;
+	videoInstance->debugTerminalLogged = false;
 
 	bool inRange;
 	Sint64 diff;
@@ -261,6 +305,40 @@ enum Kotonoha_Scene_Status Kotonoha_VideoRenderProcess(void* userData,
 	if (!instance)
 		return KOTONOHA_SCENE_NULL;
 
+	// KTN-0001-R6:
+	// For mapped PLAY_MOVIE only, reproduce the observed original ordering:
+	// terminal timeline check happens before frame promotion/decode/upload.
+	// At currentFrame >= endFrame the previous uploaded texture remains the
+	// last valid image and Video::Render handles COMPLETE/DRAW_LAST.
+	if (instance->useOrsFrameTimeline) {
+		const Uint64 sceneMs = Kotonoha_timeGet(instance->time);
+		const Uint64 sceneFrame = Kotonoha_OrsSceneMsToFrame(sceneMs);
+
+		if (sceneFrame >= instance->orsEndFrame) {
+			if (!instance->debugTerminalLogged) {
+				SDL_Log(
+					"[KTN-TL][TERMINAL] ticks=%llu video=%p sceneMs=%llu "
+					"sceneFrame=%llu startFrame=%llu endFrame=%llu "
+					"decodedCount=%llu hasUploaded=%d uploadedOrdinal=%llu "
+					"uploadedPtsMs=%llu texture=%p",
+					(unsigned long long)SDL_GetTicks(),
+					(void*)instance,
+					(unsigned long long)sceneMs,
+					(unsigned long long)sceneFrame,
+					(unsigned long long)instance->orsStartFrame,
+					(unsigned long long)instance->orsEndFrame,
+					(unsigned long long)instance->decodedOrdinal,
+					instance->hasUploadedFrame ? 1 : 0,
+					(unsigned long long)instance->uploadedOrdinal,
+					(unsigned long long)instance->uploadedPtsMs,
+					(void*)instance->texture);
+				instance->debugTerminalLogged = true;
+			}
+
+			return KOTONOHA_SCENE_COMPLETE;
+		}
+	}
+
 	bool inRange;
 	Sint64 diff;
 	Uint64 currentTime = Kotonoha_timeGetFromEvent(
@@ -271,11 +349,32 @@ enum Kotonoha_Scene_Status Kotonoha_VideoRenderProcess(void* userData,
 
 	Kotonoha_VideoEnsureSync(instance, currentTime, false);
 
-	if (instance->pFrame == NULL && !renderVideo(instance, currentTime))
-		return KOTONOHA_SCENE_WAITING;
+	if (instance->pFrame == NULL && !renderVideo(instance, currentTime)) {
+		// KTN-0001-R5:
+		// The decoder can run out of a newer frame slightly before the ORS
+		// event end. If a valid SDL texture was already presented, keep that
+		// last frame visible instead of dropping the video layer.
+		if (instance->texture != NULL)
+			return KOTONOHA_SCENE_DRAW;
 
-	if (currentTime < instance->videoTime)
-		return KOTONOHA_SCENE_DRAW;
+		return KOTONOHA_SCENE_WAITING;
+	}
+
+	if (currentTime < instance->videoTime) {
+		// KTN-0001-R4:
+		// A frame can already be decoded while its PTS is still slightly in
+		// the future. Returning DRAW here is only valid when a drawable SDL
+		// texture from a previous presentation already exists.
+		//
+		// On the first frame of a new video, texture can still be NULL.
+		// Returning DRAW in that state makes Video::Render attempt to draw a
+		// NULL texture into a freshly-created Canvas target, which can expose
+		// a black frame between consecutive videos.
+		if (instance->texture != NULL)
+			return KOTONOHA_SCENE_DRAW;
+
+		return KOTONOHA_SCENE_WAITING;
+	}
 
 	if (instance->texture == NULL) {
 		instance->texture = SDL_CreateTexture(
@@ -293,7 +392,14 @@ enum Kotonoha_Scene_Status Kotonoha_VideoRenderProcess(void* userData,
 
 	if (instance->pFrame == NULL ||
 		instance->pFrame->pict_type == AV_PICTURE_TYPE_NONE) {
-		return KOTONOHA_SCENE_NULL;
+		// KTN-0001-R5:
+		// An allocated-but-empty AVFrame can mean there is no newer decoded
+		// frame right now. If an SDL texture already exists, it is still a
+		// valid last frame and should remain drawable.
+		if (instance->texture != NULL)
+			return KOTONOHA_SCENE_DRAW;
+
+		return KOTONOHA_SCENE_WAITING;
 	}
 
 	AVFrame* cpuFrame = getCpuReadableFrame(instance->pFrame);
@@ -334,8 +440,39 @@ enum Kotonoha_Scene_Status Kotonoha_VideoRenderProcess(void* userData,
 		return KOTONOHA_SCENE_FATAL_ERROR;
 	}
 
-	SDL_UpdateTexture(instance->texture, NULL,
-		pFrameRGB->data[0], pFrameRGB->linesize[0]);
+	if (!SDL_UpdateTexture(instance->texture, NULL,
+		pFrameRGB->data[0], pFrameRGB->linesize[0])) {
+		SDL_LogError(SDL_LOG_CATEGORY_ERROR,
+			"Failed to update video texture: %s\n", SDL_GetError());
+
+		av_free(buffer);
+		av_frame_free(&pFrameRGB);
+
+		if (cpuFrame != instance->pFrame)
+			av_frame_free(&cpuFrame);
+
+		return KOTONOHA_SCENE_FATAL_ERROR;
+	}
+
+	if (instance->hasPendingFrameMeta) {
+		instance->uploadedOrdinal = instance->pendingOrdinal;
+		instance->uploadedPtsMs = instance->pendingPtsMs;
+	}
+	instance->hasUploadedFrame = true;
+
+	if (instance->useOrsFrameTimeline) {
+		const Uint64 sceneMs = Kotonoha_timeGet(instance->time);
+		SDL_Log(
+			"[KTN-TL][UPLOAD] ticks=%llu video=%p sceneMs=%llu sceneFrame=%llu "
+			"ordinal=%llu ptsMs=%llu texture=%p",
+			(unsigned long long)SDL_GetTicks(),
+			(void*)instance,
+			(unsigned long long)sceneMs,
+			(unsigned long long)Kotonoha_OrsSceneMsToFrame(sceneMs),
+			(unsigned long long)instance->uploadedOrdinal,
+			(unsigned long long)instance->uploadedPtsMs,
+			(void*)instance->texture);
+	}
 
 	av_free(buffer);
 	av_frame_free(&pFrameRGB);
@@ -344,6 +481,7 @@ enum Kotonoha_Scene_Status Kotonoha_VideoRenderProcess(void* userData,
 		av_frame_free(&cpuFrame);
 
 	av_frame_free(&instance->pFrame);
+	instance->hasPendingFrameMeta = false;
 	instance->lastTime = currentTime;
 
 	return KOTONOHA_SCENE_DRAW;
