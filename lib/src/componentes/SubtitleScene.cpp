@@ -45,6 +45,16 @@ std::string literal(const std::string &text) {
   }
   return result;
 }
+
+std::string assEventText(const std::string &text) {
+  std::string result;
+  for (char ch : text) {
+    if (ch == '\r') continue;
+    if (ch == '\n') result += "\\N";
+    else result += ch;
+  }
+  return result;
+}
 } // namespace
 
 struct SubtitleScene::State {
@@ -127,7 +137,8 @@ void SubtitleScene::setCues(const std::vector<SubtitleCue> &cues, float fontSize
         style = names.front();
     }
     ass << "Dialogue: 0," << timestamp(cue.start) << ',' << timestamp(cue.end)
-        << ',' << style << ",,0,0,0,," << literal(cue.text)
+        << ',' << style << ",,0,0,0,,"
+        << (cue.assText ? assEventText(cue.text) : literal(cue.text))
         << '\n';
   }
   loadAss(ass.str());
@@ -167,7 +178,8 @@ void SubtitleScene::render(RendererRef renderer, float) {
       state->glyph.reset(SDL_CreateTexture(&renderer, SDL_PIXELFORMAT_RGBA32,
           SDL_TEXTUREACCESS_STREAMING, state->glyphWidth, state->glyphHeight));
       if (!state->glyph ||
-          !SDL_SetTextureBlendMode(state->glyph.get(), SDL_BLENDMODE_BLEND))
+          !SDL_SetTextureBlendMode(state->glyph.get(), SDL_BLENDMODE_BLEND) ||
+          !SDL_SetTextureScaleMode(state->glyph.get(), SDL_SCALEMODE_NEAREST))
         throw std::runtime_error(SDL_GetError());
     }
     const SDL_Rect region{0, 0, image->w, image->h};

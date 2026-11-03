@@ -1,6 +1,7 @@
 #include <Kotonoha/core/AssetProvider.hpp>
 #include <Kotonoha/core/Log.hpp>
 #include <Kotonoha/media/MediaDecoder.hpp>
+#include <Kotonoha/media/TextureAlpha.hpp>
 #include <Kotonoha/media/upscaling/Upscaler.hpp>
 
 #include <cmath>
@@ -21,6 +22,18 @@ SDL_IOStream *memoryStream(const std::vector<Uint8> &bytes) {
     throw std::runtime_error(SDL_GetError());
   return stream;
 }
+
+void prepareLinearSurface(SDL_Surface *surface) {
+  if (!surface || surface->format != SDL_PIXELFORMAT_RGBA32)
+    return;
+  const bool lock = SDL_MUSTLOCK(surface);
+  if (lock && !SDL_LockSurface(surface))
+    return;
+  prepareStraightAlphaForLinearFiltering(
+      static_cast<Uint8 *>(surface->pixels), surface->w, surface->h, surface->pitch);
+  if (lock)
+    SDL_UnlockSurface(surface);
+}
 } // namespace
 
 AssetProvider::AssetProvider() = default;
@@ -31,6 +44,10 @@ std::vector<std::string> AssetProvider::list(const std::string &) const {
 }
 
 std::string AssetProvider::localPath(const std::string &) const { return {}; }
+
+std::unique_ptr<AssetStream> AssetProvider::openStream(const std::string &) const {
+  return {};
+}
 
 SurfacePtr AssetProvider::loadSurface(const std::string &id) const {
   const auto bytes = read(id);
@@ -84,7 +101,20 @@ SDL_Texture &AssetProvider::texture(RendererRef renderer,
   }
   if (auto found = textures.find(id); found != textures.end())
     return *found->second;
-  const SurfacePtr surface = loadSurface(id);
+  return stageTexture(renderer, id, loadSurface(id));
+}
+
+SDL_Texture &AssetProvider::stageTexture(RendererRef renderer,
+                                         const std::string &id,
+                                         SurfacePtr surface) {
+  if (textureRenderer != &renderer) {
+    textures.clear();
+    textureRenderer = &renderer;
+  }
+  if (auto found = textures.find(id); found != textures.end())
+    return *found->second;
+  if (!surface) throw std::invalid_argument("Staged asset surface is empty");
+  prepareLinearSurface(surface.get());
   TexturePtr created(SDL_CreateTextureFromSurface(&renderer, surface.get()));
   if (!created)
     throw std::runtime_error("Cannot upload picture " + id + ": " +
@@ -112,6 +142,7 @@ SDL_Texture &AssetProvider::texture(RendererRef renderer, const std::string &id,
     created = upscaling->scaled(texture(renderer, id), scale);
   } else {
     const SurfacePtr source = loadSurface(id);
+    prepareLinearSurface(source.get());
     SurfacePtr resized(SDL_ScaleSurface(
         source.get(), std::max(1, int(std::lround(source->w * scale))),
         std::max(1, int(std::lround(source->h * scale))),
@@ -134,6 +165,7 @@ SurfacePtr AssetProvider::surface(RendererRef renderer, const std::string &id,
   if (!std::isfinite(scale) || scale <= 0)
     throw std::invalid_argument("Surface scale must be positive");
   const SurfacePtr source = loadSurface(id);
+  prepareLinearSurface(source.get());
   if (upscaling)
     return upscaling->scaled(*source, scale);
   (void)renderer;

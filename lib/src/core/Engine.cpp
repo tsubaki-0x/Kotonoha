@@ -5,6 +5,7 @@
 #include <Kotonoha/core/UI.hpp>
 #include <Kotonoha/debug/DebugOverlay.hpp>
 #include <Kotonoha/mcp/MCPServer.hpp>
+#include <Kotonoha/mobile/AndroidDisplay.hpp>
 #include <Kotonoha/script/TimelinePlayer.hpp>
 
 #include <algorithm>
@@ -103,8 +104,9 @@ Engine::Engine(Runtime &run, EngineOptions options)
     settingsPath = EngineSettings::defaultPath(runtime.identify);
   const bool storedSettings =
       !settingsPath.empty() && std::filesystem::exists(settingsPath);
+  settingsLoadedFromDisk = storedSettings;
   if (storedSettings)
-    settings = EngineSettings::load(settingsPath);
+    settings = EngineSettings::load(settingsPath, settings);
   // A fresh window follows the game viewport aspect (default height kept).
   const SDL_Point view = runtime.viewport();
   if (view.x <= 0 || view.y <= 0)
@@ -244,6 +246,22 @@ void Engine::applyWindowSettings(const EngineSettings &value) {
   check(SDL_GetRenderVSync(renderer.get(), &vsync), "Get VSync");
   if (vsync != (value.vsync ? 1 : 0))
     check(SDL_SetRenderVSync(renderer.get(), value.vsync ? 1 : 0), "Set VSync");
+#if defined(__ANDROID__) || defined(ANDROID)
+  // Android physical refresh selection is a Window/Surface preference and is
+  // not reliably represented by SDL's desktop fullscreen mode API. Re-apply
+  // the persisted physical tuple after the SDL window exists.
+  if (value.fullscreenWidth > 0 && value.fullscreenHeight > 0 &&
+      value.refreshRate > 0.0f) {
+    const auto modes = AndroidEnumerateDisplayModes();
+    const auto match = std::find_if(modes.begin(), modes.end(), [&](const auto &mode) {
+      return mode.width == value.fullscreenWidth &&
+             mode.height == value.fullscreenHeight &&
+             std::abs(mode.refreshRate - value.refreshRate) < 0.05f;
+    });
+    if (match != modes.end() && !AndroidRequestDisplayMode(match->modeId))
+      throw std::runtime_error("Request Android display mode failed");
+  }
+#endif
 }
 
 void Engine::applySettings(const EngineSettings &value, bool persist) {
@@ -381,6 +399,7 @@ SDL_AppResult Engine::Event(EventPtr event) {
     return SDL_APP_CONTINUE;
   if (event->type == SDL_EVENT_QUIT)
     return SDL_APP_SUCCESS;
+  runtime.devInputProcessed(*event);
   synchronizeTimeline();
   const bool debugConsumed = debug->handleEvent(*event);
   if (debugConsumed) {
@@ -391,8 +410,18 @@ SDL_AppResult Engine::Event(EventPtr event) {
   SDL_Event screenEvent = *event;
   if (!SDL_ConvertEventToRenderCoordinates(renderer.get(), &screenEvent))
     throw std::runtime_error(SDL_GetError());
-  const bool consumed =
+  bool consumed =
       !settingsMenu->isOpen() && runtime.onScreenEvent(screenEvent);
+  if (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+      event->type == SDL_EVENT_MOUSE_BUTTON_UP) {
+    const Uint32 buttonMask = SDL_BUTTON_MASK(event->button.button);
+    if (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+      if (consumed) screenCapturedMouseButtons |= buttonMask;
+    } else {
+      consumed = consumed || (screenCapturedMouseButtons & buttonMask) != 0;
+      screenCapturedMouseButtons &= ~buttonMask;
+    }
+  }
   configureRenderSpace(RenderSpace::Novel);
   if (event->type == SDL_EVENT_KEY_DOWN && !event->key.repeat &&
       (event->key.key == SDLK_F11 ||
@@ -434,10 +463,54 @@ SDL_AppResult Engine::Iterate() {
   synchronizeTimeline();
   if (mcp && !mcp->pump())
     return SDL_APP_SUCCESS;
-  runtime.update();
+  if (!runtime.devPauseRequested() || runtime.devConsumeStep()) runtime.update();
+  else runtime.devIdle();
   debug->update();
+
+  // Clear the native output first so the letterbox outside the fitted Novel
+  // presentation remains deterministic even when the Novel itself is rendered
+  // into a reduced intermediate target.
   SDL_SetRenderDrawColor(renderer.get(), 0, 0, 0, 0);
   SDL_RenderClear(renderer.get());
+
+  const SDL_Point novelView = runtime.viewport();
+  const bool scaledNovel = settings.renderScale < 0.9999f;
+  const bool ownedNovel = scaledNovel || runtime.useOwnedNarrativeTarget();
+  if (ownedNovel) {
+    SDL_FRect presentation{};
+    if (!SDL_GetRenderLogicalPresentationRect(renderer.get(), &presentation))
+      throw std::runtime_error(SDL_GetError());
+    const int targetWidth = std::max(
+        1, static_cast<int>(std::lround(presentation.w * settings.renderScale)));
+    const int targetHeight = std::max(
+        1, static_cast<int>(std::lround(presentation.h * settings.renderScale)));
+    if (!novelTarget || novelTargetWidth != targetWidth ||
+        novelTargetHeight != targetHeight) {
+      TexturePtr next(SDL_CreateTexture(renderer.get(), SDL_PIXELFORMAT_RGBA32,
+                                        SDL_TEXTUREACCESS_TARGET, targetWidth,
+                                        targetHeight));
+      if (!next || !SDL_SetTextureScaleMode(next.get(), SDL_SCALEMODE_LINEAR) ||
+          !SDL_SetTextureBlendMode(next.get(), SDL_BLENDMODE_NONE))
+        throw std::runtime_error(SDL_GetError());
+      novelTarget = std::move(next);
+      novelTargetWidth = targetWidth;
+      novelTargetHeight = targetHeight;
+    }
+    if (!SDL_SetRenderTarget(renderer.get(), novelTarget.get()) ||
+        !SDL_SetRenderViewport(renderer.get(), nullptr) ||
+        !SDL_SetRenderClipRect(renderer.get(), nullptr) ||
+        !SDL_SetRenderScale(renderer.get(), 1, 1) ||
+        !SDL_SetRenderLogicalPresentation(renderer.get(), novelView.x, novelView.y,
+                                          SDL_LOGICAL_PRESENTATION_STRETCH))
+      throw std::runtime_error(SDL_GetError());
+    ui->setPixelDensity(std::min(
+        static_cast<float>(targetWidth) / novelView.x,
+        static_cast<float>(targetHeight) / novelView.y));
+    SDL_SetRenderDrawColor(renderer.get(), 0, 0, 0, 0);
+    if (!SDL_RenderClear(renderer.get()))
+      throw std::runtime_error(SDL_GetError());
+  }
+
   runtime.renderBackground(*renderer, ui->pixelDensity());
   const auto design = UI::designFrame(runtime.viewport());
   {
@@ -446,6 +519,25 @@ SDL_AppResult Engine::Iterate() {
     timeline->renderSubtitles(*renderer);
   }
   runtime.render(*renderer, ui->pixelDensity());
+
+  if (ownedNovel) {
+    if (runtime.useOwnedNarrativeTarget() &&
+        !visualTransition.compose(*renderer, *novelTarget,
+                                  runtime.narrativeFrameDrawable(),
+                                  runtime.narrativeBoundaryFrame(),
+                                  runtime.narrativeVisualOwner()))
+      throw std::runtime_error(SDL_GetError());
+    runtime.renderNarrativeOverlay(*renderer, ui->pixelDensity());
+    if (!SDL_SetRenderTarget(renderer.get(), nullptr))
+      throw std::runtime_error(SDL_GetError());
+    configureRenderSpace(RenderSpace::Novel);
+    // The media/image upscalers have already run at their existing call sites.
+    // This copy only maps the reduced Novel raster back to the fitted physical
+    // presentation, avoiding a second upscaler pass over the whole frame.
+    if (!SDL_RenderTexture(renderer.get(), novelTarget.get(), nullptr, nullptr))
+      throw std::runtime_error(SDL_GetError());
+  }
+
   configureRenderSpace(RenderSpace::Screen);
   runtime.renderScreen(*renderer, ui->pixelDensity());
   if (settingsMenu->isOpen()) {
@@ -458,6 +550,7 @@ SDL_AppResult Engine::Iterate() {
   }
   debug->renderHUD(*renderer);
   debug->renderMenu(*renderer);
+  runtime.devControlPump(*renderer);
   SDL_RenderPresent(renderer.get());
   configureRenderSpace(RenderSpace::Novel);
   return SDL_APP_CONTINUE;

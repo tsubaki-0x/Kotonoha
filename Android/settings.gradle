@@ -4,6 +4,17 @@ pluginManagement {
         mavenCentral()
         gradlePluginPortal()
     }
+    // The Android Gradle Plugin itself may already be present in an offline
+    // Gradle cache even when the lightweight plugin-marker artifact is not.
+    // Resolve the application plugin directly to the cached AGP module so
+    // offline builds do not require that redundant marker.
+    resolutionStrategy {
+        eachPlugin {
+            if (requested.id.id == 'com.android.application') {
+                useModule("com.android.tools.build:gradle:${requested.version}")
+            }
+        }
+    }
 }
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)

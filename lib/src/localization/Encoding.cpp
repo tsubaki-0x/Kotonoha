@@ -1,4 +1,4 @@
-#include <Kotonoha/localization/Encoding.hpp>
+﻿#include <Kotonoha/localization/Encoding.hpp>
 
 #include <SDL3/SDL_stdinc.h>
 
@@ -13,8 +13,52 @@
 #include <algorithm>
 #include <stdexcept>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 namespace Kotonoha {
 namespace {
+
+#ifdef _WIN32
+std::string WindowsCp932ToUtf8(std::string_view text) {
+  std::string out;
+  out.reserve(text.size() * 3);
+
+  const auto append = [&](const char *bytes, int count) -> bool {
+    wchar_t wide[2]{};
+    const int wideCount = MultiByteToWideChar(932, MB_ERR_INVALID_CHARS, bytes,
+                                               count, wide, 2);
+    if (wideCount <= 0)
+      return false;
+    char utf8[8]{};
+    const int utf8Count = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+                                               wide, wideCount, utf8,
+                                               int(sizeof utf8), nullptr, nullptr);
+    if (utf8Count <= 0)
+      return false;
+    out.append(utf8, size_t(utf8Count));
+    return true;
+  };
+
+  for (size_t i = 0; i < text.size();) {
+    const unsigned char first = static_cast<unsigned char>(text[i]);
+    if (first < 0x80) {
+      out.push_back(char(first));
+      ++i;
+      continue;
+    }
+    const bool lead = (first >= 0x81 && first <= 0x9f) ||
+                      (first >= 0xe0 && first <= 0xfc);
+    const size_t count = lead && i + 1 < text.size() ? 2 : 1;
+    if (!append(text.data() + i, int(count)))
+      out.push_back('?');
+    i += count;
+  }
+  return out;
+}
+#endif
 
 class Converter {
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
@@ -121,7 +165,14 @@ std::string ConvertEncoding(std::string_view text, const char *from,
 }
 
 std::string ShiftJisToUtf8(std::string_view text) {
-  // CP932 first: plain SHIFT_JIS lacks the NEC row 13 symbols (①, Ⅰ...).
+#ifdef _WIN32
+  // SDL's built-in iconv does not provide CP932 on Windows. Use the native
+  // Windows-31J code page so Japanese game scripts do not depend on a separate
+  // iconv runtime. Invalid Shift-JIS sequences become '?', matching the
+  // cross-platform converter contract.
+  return WindowsCp932ToUtf8(text);
+#else
+  // CP932 first: plain SHIFT_JIS lacks the NEC row 13 extension symbols.
   for (const char *name : {"CP932", "WINDOWS-31J", "SHIFT_JIS", "SJIS"}) {
     Converter converter(name, "UTF-8");
     if (!converter.valid())
@@ -135,6 +186,7 @@ std::string ShiftJisToUtf8(std::string_view text) {
   }
   throw std::runtime_error(
       "Shift-JIS conversion is unavailable (no compatible iconv converter)");
+#endif
 }
 
 } // namespace Kotonoha

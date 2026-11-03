@@ -70,6 +70,20 @@ public:
   virtual bool onScreenEvent(EventRef event);
   virtual void renderScreen(RendererRef renderer, float scale);
   virtual void renderBackground(RendererRef renderer, float scale);
+  // Games with scene transactions can retain the fully composed Novel raster
+  // in an engine-owned target. Readiness means a primary image/video drew.
+  virtual bool useOwnedNarrativeTarget() const { return false; }
+  virtual bool narrativeFrameDrawable() const { return false; }
+  virtual bool narrativeBoundaryFrame() const { return false; }
+  virtual std::string narrativeVisualOwner() const { return {}; }
+  // Called on the Novel target after an outgoing frame has been composed.
+  // Native/modal overlays stay above a retained narrative surface.
+  virtual void renderNarrativeOverlay(RendererRef, float) {}
+  virtual bool devPauseRequested() const { return false; }
+  virtual bool devConsumeStep() { return false; }
+  virtual void devIdle() {}
+  virtual void devControlPump(RendererRef) {}
+  virtual void devInputProcessed(EventRef) {}
   virtual void saveGame(const std::string &path);
   virtual void loadGame(const std::string &path);
 

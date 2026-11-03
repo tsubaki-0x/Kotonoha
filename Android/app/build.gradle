@@ -3,14 +3,20 @@ plugins {
 }
 
 def engineRoot = rootProject.projectDir.parentFile
-def sdlRoot = new File(rootProject.projectDir, '.deps/SDL')
-def sdlRevision = '4bb5020be2a3e3f7a963b84c95f49fe7ef5d35a4'
+// Use the SDL checkout already pinned by the Kotonoha repository.  The old
+// Gradle path cloned a second SDL tree under Android/.deps, which could drift
+// from the native engine submodule and also made offline Android builds fail.
+def sdlRoot = new File(engineRoot, 'lib/submodules/SDL')
 def vcpkgRoot = providers.environmentVariable('VCPKG_ROOT').orNull
 if (!vcpkgRoot) {
     throw new GradleException('Set VCPKG_ROOT to your vcpkg checkout before opening Android.')
 }
 def includeGameAssets = providers.gradleProperty('bundleGameAssets').orElse('true').get().toBoolean()
 def abis = providers.gradleProperty('abis').orElse('arm64-v8a').get().split(',').toList()
+if (abis.size() != 1 || !(abis[0] in ['arm64-v8a', 'x86_64'])) {
+    throw new GradleException('Android builds must select exactly one supported ABI: -Pabis=arm64-v8a or -Pabis=x86_64.')
+}
+def vcpkgTriplet = abis[0] == 'arm64-v8a' ? 'arm64-android' : 'x64-android'
 def games = [
     example: ['example', 'Kotonoha', 'me.kotonoha.example', 'Kotonoha'],
     zeroNoTsukaima: ['zero-no-tsukaima', 'ZeroNoTsukaima', 'me.hirameki.kotonoha.zeronotsukaima', 'Zero no Tsukaima'],
@@ -19,29 +25,15 @@ def games = [
     schoolDays: ['school-days', 'SchoolDays', 'me.hirameki.kotonoha.schooldays', 'School Days']
 ]
 
-def prepareSDL = tasks.register('prepareSDL') {
-    inputs.property('revision', sdlRevision)
-    outputs.file(new File(sdlRoot, '.kotonoha-revision'))
-    doLast {
-        def executeGit = { List<String> command ->
-            def process = new ProcessBuilder(command).inheritIO().start()
-            if (process.waitFor() != 0) throw new GradleException("Git dependency failed: ${command}")
-        }
-        if (!new File(sdlRoot, '.git').exists()) {
-            sdlRoot.parentFile.mkdirs()
-            executeGit(['git', 'clone', '--no-checkout', '--filter=blob:none',
-                        'https://github.com/libsdl-org/SDL.git', sdlRoot.absolutePath])
-        }
-        executeGit(['git', '-C', sdlRoot.absolutePath, 'fetch', 'origin', sdlRevision])
-        executeGit(['git', '-C', sdlRoot.absolutePath, 'checkout', '--detach', sdlRevision])
-        new File(sdlRoot, '.kotonoha-revision').text = sdlRevision + '\n'
-    }
-}
-
 android {
     namespace 'org.kotonoha.android'
-    compileSdk 36
-    ndkVersion '28.2.13676358'
+    compileSdk = 37
+    compileSdkMinor = 0
+    buildToolsVersion '37.0.0'
+    // Keep the Android build pinned to the NDK installed in this workstation.
+    // r27 supports the explicit 16 KiB max-page-size linker contract below and
+    // is the toolchain used by the existing Kotonoha/School Days Android work.
+    ndkVersion '27.0.12077973'
     defaultConfig {
         minSdk 28
         targetSdk 34
@@ -52,8 +44,11 @@ android {
             cmake {
                 arguments "-DCMAKE_TOOLCHAIN_FILE=${vcpkgRoot}/scripts/buildsystems/vcpkg.cmake",
                           "-DVCPKG_MANIFEST_DIR=${engineRoot}",
+                          "-DVCPKG_OVERLAY_PORTS=${new File(engineRoot, 'vcpkg-overlays')}",
+                          "-DVCPKG_TARGET_TRIPLET=${vcpkgTriplet}",
                           "-DVCPKG_CHAINLOAD_TOOLCHAIN_FILE=${android.ndkDirectory}/build/cmake/android.toolchain.cmake",
                           "-DKOTONOHA_SDL_SOURCE_DIR=${sdlRoot}",
+                          '-DANDROID_PLATFORM=android-28',
                           '-DANDROID_STL=c++_shared'
             }
         }
@@ -90,7 +85,7 @@ android {
     }
     sourceSets {
         main {
-            java.srcDir new File(sdlRoot, 'android-project/app/src/main/java')
+            java.srcDirs += new File(sdlRoot, 'android-project/app/src/main/java')
         }
     }
     packaging { jniLibs { useLegacyPackaging = true } }
@@ -116,11 +111,7 @@ android.applicationVariants.all { variant ->
         doLast {
             new File(staged.get().asFile, 'game-assets').mkdirs()
             if (variant.flavorName == 'dokiDoki') {
-                if (abis.size() != 1) {
-                    throw new GradleException('DDLC APKs must use one ABI each (-Pabis=arm64-v8a or x86_64).')
-                }
-                def triplet = abis[0] == 'arm64-v8a' ? 'arm64-android' : 'x64-android'
-                def prefix = new File(rootProject.projectDir, "build/vcpkg-python/${triplet}")
+                def prefix = new File(rootProject.projectDir, "build/vcpkg-python/${vcpkgTriplet}")
                 def stdlibs = fileTree(new File(prefix, 'lib')).matching { include 'python3.*/**' }.files
                 if (stdlibs.empty) throw new GradleException('Android CPython standard library is missing.')
                 copy {
@@ -150,12 +141,5 @@ android.applicationVariants.all { variant ->
         assets.configure {
             dependsOn variant.externalNativeBuildProviders
         }
-    }
-}
-
-tasks.configureEach { task ->
-    if (task.name == 'preBuild' || task.name.startsWith('configureCMake') ||
-        task.name.startsWith('buildCMake') || task.name.startsWith('compile')) {
-        task.dependsOn prepareSDL
     }
 }

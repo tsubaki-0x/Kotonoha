@@ -13,6 +13,7 @@
 
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -55,7 +56,34 @@ std::string DefaultDirectory() {
   for (const char *script : {"SCRIPT.DAT", "script.dat"})
     if (auto found = Kotonoha::FileResolver::findGameAsset(game, script))
       return found->parent_path().string();
+
+#ifdef _WIN32
+  // The retail installer stores the four DAT packs here. Keep commercial data
+  // external and use it directly instead of copying it into the Kotonoha build.
+  for (const char *variable : {"ProgramFiles(x86)", "ProgramW6432", "ProgramFiles"}) {
+    const char *base = std::getenv(variable);
+    if (!base || !*base)
+      continue;
+    const std::filesystem::path candidate =
+        std::filesystem::path(base) / "OVERFLOW" / "SNOWRADISH" / "pack";
+    std::error_code error;
+    if ((std::filesystem::exists(candidate / "SCRIPT.DAT", error) ||
+         std::filesystem::exists(candidate / "script.dat", error)) &&
+        (std::filesystem::exists(candidate / "GRAPHIC.DAT", error) ||
+         std::filesystem::exists(candidate / "graphic.dat", error)))
+      return candidate.string();
+  }
+#endif
+
   return Kotonoha::gameAssetDirectory(game).string();
+}
+
+void UseBundledTranslation(Kotonoha::EngineOptions &options) {
+  if (!options.translationPath.empty())
+    return;
+  if (auto path = Kotonoha::FileResolver::findGameAsset(
+          "snow-radish-vacation", "pt-BR-srv-full-script.json"))
+    options.translationPath = path->string();
 }
 
 
@@ -76,6 +104,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     arguments.option("--dump-translation", "FILE", "Export original texts by route and exit", dumpPath);
     arguments.flag("--launcher", "Open the DAT selection launcher", launcher);
     arguments.parse(argc, argv);
+    UseBundledTranslation(options);
     if (arguments.wantsHelp()) { std::fputs(arguments.help().c_str(), stdout); return SDL_APP_SUCCESS; }
     app->frames = arguments.frames;
     if (options.enableMCP && options.settingsPath.empty()) options.persistSettings = false;

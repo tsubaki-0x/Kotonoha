@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -15,6 +16,18 @@ class Upscaling;
 struct AudioClip {
   SDL_AudioSpec spec{};
   std::vector<Uint8> data;
+};
+
+// Optional random-access byte source for assets that can be streamed without
+// first materializing their complete contents. Implementations keep their own
+// cursor and must support absolute seeks within [0, size()].
+class AssetStream {
+public:
+  virtual ~AssetStream() = default;
+  virtual std::uint64_t size() const = 0;
+  virtual std::uint64_t tell() const = 0;
+  virtual std::size_t read(Uint8 *buffer, std::size_t size) = 0;
+  virtual bool seek(std::uint64_t position) = 0;
 };
 
 // Source of every game asset the engine loads (pictures, sounds, media and
@@ -39,6 +52,10 @@ public:
   virtual std::vector<std::string> list(const std::string &prefix = {}) const;
   // A file streaming consumers may open directly; empty for in-memory assets.
   virtual std::string localPath(const std::string &id) const;
+  // Optional seekable source for archived/disc-backed media. Returning null
+  // asks consumers to fall back to read(id), preserving providers that only
+  // expose complete in-memory assets.
+  virtual std::unique_ptr<AssetStream> openStream(const std::string &id) const;
   // Default decoders: SDL first (BMP/PNG/JPG, WAV), then FFmpeg for every
   // other picture, video (first frame) or audio format it can probe.
   virtual SurfacePtr loadSurface(const std::string &id) const;
@@ -48,6 +65,10 @@ public:
 
   // Texture of loadSurface(id), cached per renderer until clearCache().
   SDL_Texture &texture(RendererRef renderer, const std::string &id);
+  // Upload a picture decoded on a worker into this renderer's texture cache.
+  // Must be called on the renderer thread.
+  SDL_Texture &stageTexture(RendererRef renderer, const std::string &id,
+                            SurfacePtr surface);
   // loadSurface(id) at `scale` x its size. With an upscaling pipeline whose
   // backend is enabled, scales above 1 go through it (Upscaling::scaled);
   // otherwise (or with nullptr) the picture is scaled linearly. Cached per

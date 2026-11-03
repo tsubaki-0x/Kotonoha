@@ -16,6 +16,11 @@ kotonoha_copy_assets(KotonohaInfrastructureTests)
 add_test(NAME Kotonoha.Infrastructure COMMAND KotonohaInfrastructureTests)
 set_tests_properties(Kotonoha.Infrastructure PROPERTIES
     ENVIRONMENT "SDL_VIDEO_DRIVER=dummy;SDL_AUDIO_DRIVER=dummy")
+if(WIN32)
+    set_tests_properties(Kotonoha.Infrastructure PROPERTIES
+        ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:KotonohaEngine>")
+endif()
 
 if(SDLTTF_PLUTOSVG)
     add_executable(KotonohaPlatformSmokeTests PlatformSmokeTests.cpp)
@@ -36,6 +41,11 @@ target_link_libraries(KotonohaAssetProviderTests PRIVATE Kotonoha::Engine)
 add_test(NAME Kotonoha.AssetProvider COMMAND KotonohaAssetProviderTests)
 set_tests_properties(Kotonoha.AssetProvider PROPERTIES
     ENVIRONMENT "SDL_VIDEO_DRIVER=dummy;SDL_AUDIO_DRIVER=dummy")
+if(WIN32)
+    set_tests_properties(Kotonoha.AssetProvider PROPERTIES
+        ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:KotonohaEngine>")
+endif()
 
 add_executable(KotonohaComponentHooksTests ComponentHooksTests.cpp)
 target_link_libraries(KotonohaComponentHooksTests PRIVATE Kotonoha::Engine)
@@ -48,6 +58,24 @@ target_link_libraries(KotonohaMediaFormatsTests PRIVATE Kotonoha::Engine)
 add_test(NAME Kotonoha.MediaFormats COMMAND KotonohaMediaFormatsTests)
 set_tests_properties(Kotonoha.MediaFormats PROPERTIES
     ENVIRONMENT "SDL_VIDEO_DRIVER=dummy;SDL_AUDIO_DRIVER=dummy")
+
+add_executable(KotonohaMediaAnalysisTests MediaAnalysisTests.cpp)
+target_link_libraries(KotonohaMediaAnalysisTests PRIVATE Kotonoha::Engine)
+add_test(NAME Kotonoha.MediaAnalysis COMMAND KotonohaMediaAnalysisTests)
+if(WIN32)
+    set_tests_properties(Kotonoha.MediaAnalysis PROPERTIES
+        ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:KotonohaEngine>")
+endif()
+
+add_executable(KotonohaMediaPlayerRateTests MediaPlayerRateTests.cpp)
+target_link_libraries(KotonohaMediaPlayerRateTests PRIVATE Kotonoha::Engine)
+add_test(NAME Kotonoha.MediaPlayerRate COMMAND KotonohaMediaPlayerRateTests)
+if(WIN32)
+    set_tests_properties(Kotonoha.MediaPlayerRate PROPERTIES
+        ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:KotonohaEngine>")
+endif()
 
 add_executable(KotonohaLauncherTests LauncherTests.cpp)
 target_link_libraries(KotonohaLauncherTests PRIVATE Kotonoha::Engine)

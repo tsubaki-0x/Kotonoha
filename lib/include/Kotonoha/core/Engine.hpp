@@ -7,6 +7,7 @@
 #include <Kotonoha/core/SDL.hpp>
 #include <Kotonoha/core/Scene.hpp>
 #include <Kotonoha/core/Settings.hpp>
+#include <Kotonoha/core/VisualTransition.hpp>
 #include <Kotonoha/localization/Translation.hpp>
 #include <Kotonoha/media/AudioMixer.hpp>
 #include <Kotonoha/parsers/AssStyle.hpp>
@@ -44,11 +45,15 @@ private:
 
   WindowPtr window;
   RendererPtr renderer;
+  TexturePtr novelTarget;
+  int novelTargetWidth = 0, novelTargetHeight = 0;
+  VisualTransition visualTransition;
   // Declared after the renderer so cached textures are released first.
   std::shared_ptr<AssetProvider> assets;
   std::unique_ptr<Upscaling> upscaler;
   EngineSettings settings;
   std::string settingsPath;
+  bool settingsLoadedFromDisk = false;
   std::optional<AssStyle> subtitleStyle;
   std::unique_ptr<SettingsMenu> settingsMenu;
 
@@ -58,6 +63,9 @@ private:
   std::unique_ptr<DebugOverlay> debug;
   std::unique_ptr<MCPServer> mcp;
   bool agentPaused = false;
+  // A screen-space control owns both edges of a mouse press, even if the
+  // pressed edge opens a modal before the release event arrives.
+  Uint32 screenCapturedMouseButtons = 0;
   Clock frameClock;
   Translation translation;
   void configureRenderSpace(RenderSpace space);
@@ -72,6 +80,7 @@ public:
   UI &GetUI() { return *ui; }
   TimelinePlayer &GetTimeline() { return *timeline; }
   RendererRef GetRenderer() { return *renderer; }
+  SDL_Texture *GetNovelTarget() const { return novelTarget.get(); }
   SDL_FPoint screenSize() const;
   const Translation &GetTranslation() const { return translation; }
   // Writes every original text (runtime routes + loaded script nodes) to a
@@ -87,6 +96,8 @@ public:
   AssetProvider &GetAssets() { return *assets; }
   void SetAssetProvider(std::shared_ptr<AssetProvider> provider);
   const EngineSettings &GetSettings() const { return settings; }
+  VisualTransition &GetVisualTransition() { return visualTransition; }
+  bool HasStoredSettings() const { return settingsLoadedFromDisk; }
   const std::optional<AssStyle> &GetSubtitleStyle() const { return subtitleStyle; }
   void applySettings(const EngineSettings &value, bool persist = true);
   void saveSettings() const;

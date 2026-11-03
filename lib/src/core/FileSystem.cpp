@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <fstream>
+#include <mutex>
 #include <stdexcept>
 #ifdef __APPLE__
 #include <TargetConditionals.h>
@@ -29,7 +30,6 @@ std::filesystem::path androidDirectory(const char *method) {
   if (!env || !activity)
     throw std::runtime_error("Android storage requires an SDL activity");
   jclass type = env->GetObjectClass(activity);
-  env->DeleteLocalRef(activity);
   jmethodID id = type ? env->GetMethodID(type, method, "()Ljava/lang/String;") : nullptr;
   auto value = id ? static_cast<jstring>(env->CallObjectMethod(activity, id)) : nullptr;
   if (env->ExceptionCheck() || !value) {
@@ -39,18 +39,21 @@ std::filesystem::path androidDirectory(const char *method) {
     }
     if (value) env->DeleteLocalRef(value);
     if (type) env->DeleteLocalRef(type);
+    env->DeleteLocalRef(activity);
     throw std::runtime_error(std::string("Cannot locate Android directory: ") + method);
   }
   const char *text = env->GetStringUTFChars(value, nullptr);
   if (!text) {
     env->DeleteLocalRef(value);
     env->DeleteLocalRef(type);
+    env->DeleteLocalRef(activity);
     throw std::runtime_error("Cannot read Android storage path");
   }
   std::filesystem::path result(text);
   env->ReleaseStringUTFChars(value, text);
   env->DeleteLocalRef(value);
   env->DeleteLocalRef(type);
+  env->DeleteLocalRef(activity);
   if (result.empty())
     throw std::runtime_error(std::string("Empty Android directory: ") + method);
   return result;
@@ -206,7 +209,8 @@ std::optional<std::filesystem::path> FileResolver::findGameAsset(const std::stri
   std::error_code error;
   for (const auto &root : roots(game))
     for (const auto &candidate : {root / "game-assets" / relative,
-                                  root / "games" / game / "game-assets" / relative})
+                                  root / "games" / game / "game-assets" / relative,
+                                  root / relative})
       if (std::filesystem::exists(candidate, error))
         return candidate;
 #ifdef __ANDROID__

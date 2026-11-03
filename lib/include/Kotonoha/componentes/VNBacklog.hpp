@@ -3,6 +3,7 @@
 #include <Kotonoha/core/Engine.hpp>
 #include <Kotonoha/core/Scene.hpp>
 
+#include <functional>
 #include <string>
 #include <vector>
 

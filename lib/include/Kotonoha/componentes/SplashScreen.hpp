@@ -7,8 +7,9 @@
 
 namespace Kotonoha {
 
-// Each picture fades in, then advances after a timeout or a click/touch.
-// Keys are ignored; missing or undecodable files are skipped.
+// Each picture follows the legacy Kotonoha commercial splash envelope: fade
+// in, hold, fade out, then advance. Any direct user activation skips the splash
+// sequence; missing or undecodable files are skipped.
 class SplashScreen : public Scene {
 public:
   static constexpr double fadeSeconds = 0.8;

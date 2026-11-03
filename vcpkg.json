@@ -1,7 +1,7 @@
 {
   "name": "kotonoha",
   "version-string": "0.1.0",
-  "builtin-baseline": "ada4709cf238a75753b71b99681e1c5d31a078c9",
+  "builtin-baseline": "2c88ca199b27256e4c7d9f796216f82f2b976b0e",
   "dependencies": [
     "freetype",
     "harfbuzz",
@@ -9,11 +9,11 @@
     "libass",
     {
       "name": "fontconfig",
-      "platform": "android | ios"
+      "platform": "ios"
     },
     {
       "name": "libunibreak",
-      "platform": "android | ios"
+      "platform": "ios"
     },
     {
       "name": "libiconv",

@@ -1,0 +1,1 @@
+vcpkg-overlays/libiconv/*.patch whitespace=-blank-at-eol,-blank-at-eof

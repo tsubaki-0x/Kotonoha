@@ -118,6 +118,7 @@ void testSettings(const std::filesystem::path &directory) {
   settings.masterVolume = 0.4f;
   settings.masterMuted = true;
   settings.debugUIScale = 1.75f;
+  settings.renderScale = 0.75f;
   settings.resizable = false;
   settings.renderer = "opengl";
   settings.upscaling = {UpscaleBackend::MPV, UpscalePreset::ArtCNNDenoise, 1.5f,
@@ -142,6 +143,8 @@ void testSettings(const std::filesystem::path &directory) {
               read.translationPath == "trans.json" &&
               read.fontPath == "font.ttf",
           "Every settings field survives persistence");
+  require(std::abs(read.renderScale - 0.75f) < 0.0001f,
+          "Render scale survives persistence");
   settings.width = 0;
   rejects([&] { settings.save(file); }, "Validate before overwriting settings");
   require(EngineSettings::load(file).width == 1600,
@@ -155,7 +158,8 @@ void testSettings(const std::filesystem::path &directory) {
         "{\"renderer\":\"x\\u0000y\"}", "{\"masterVolume\":-0.1}",
         "{\"masterVolume\":1.1}", "{\"masterVolume\":1e300}",
         "{\"masterMuted\":1}", "{\"debugUIScale\":0.9}",
-        "{\"debugUIScale\":3.1}"}) {
+        "{\"debugUIScale\":3.1}", "{\"renderScale\":0.24}",
+        "{\"renderScale\":1.01}", "{\"renderScale\":1e300}"}) {
     writeTextFileAtomically(file, invalid);
     rejects([&] { EngineSettings::load(file); },
             "Reject invalid settings JSON/value");
@@ -216,13 +220,88 @@ SDL_Event key(SDL_Keycode code) {
 class EventRuntime : public Runtime {
 public:
   int novelEvents = 0, screenEvents = 0;
+  bool inspectRenderScale = false;
+  bool novelTargetActive = false;
+  bool screenTargetNative = false;
+  bool screenSawNovelComposite = false;
+  int novelTargetWidth = 0, novelTargetHeight = 0;
   EventRuntime() : Runtime("Infrastructure tests", "1", "org.kotonoha.infra") {}
   void onEvent(EventRef) override { ++novelEvents; }
   bool onScreenEvent(EventRef) override {
     ++screenEvents;
     return false;
   }
+  void renderBackground(RendererRef renderer, float scale) override {
+    if (!inspectRenderScale) {
+      Runtime::renderBackground(renderer, scale);
+      return;
+    }
+    auto *target = SDL_GetRenderTarget(&renderer);
+    novelTargetActive = target != nullptr;
+    novelTargetWidth = novelTargetHeight = 0;
+    if (target) {
+      float width = 0, height = 0;
+      require(SDL_GetTextureSize(target, &width, &height),
+              "Read reduced Novel target size");
+      novelTargetWidth = static_cast<int>(std::lround(width));
+      novelTargetHeight = static_cast<int>(std::lround(height));
+    }
+    require(SDL_SetRenderDrawColor(&renderer, 211, 37, 19, 255) &&
+                SDL_RenderClear(&renderer),
+            "Paint reduced Novel target");
+  }
+  void renderScreen(RendererRef renderer, float scale) override {
+    if (!inspectRenderScale) {
+      Runtime::renderScreen(renderer, scale);
+      return;
+    }
+    screenTargetNative = SDL_GetRenderTarget(&renderer) == nullptr;
+    int width = 0, height = 0;
+    require(SDL_GetCurrentRenderOutputSize(&renderer, &width, &height) && width > 0 &&
+                height > 0,
+            "Read native Screen output size");
+    SDL_Rect pixel{width / 2, height / 2, 1, 1};
+    SurfacePtr image{SDL_RenderReadPixels(&renderer, &pixel)};
+    require(bool(image), "Read composed Novel pixel");
+    Uint8 r = 0, g = 0, b = 0, a = 0;
+    require(SDL_ReadSurfacePixel(image.get(), 0, 0, &r, &g, &b, &a),
+            "Decode composed Novel pixel");
+    screenSawNovelComposite = r > 180 && g < 80 && b < 60;
+  }
 };
+
+void testRenderScale(Engine &engine, EventRuntime &runtime) {
+  engine.GetTimeline().stop();
+  auto settings = engine.GetSettings();
+  settings.renderScale = 0.5f;
+  engine.applySettings(settings, false);
+
+  SDL_FRect presentation{};
+  require(SDL_GetRenderLogicalPresentationRect(&engine.GetRenderer(), &presentation),
+          "Read native Novel presentation");
+  const int expectedWidth =
+      std::max(1, static_cast<int>(std::lround(presentation.w * 0.5f)));
+  const int expectedHeight =
+      std::max(1, static_cast<int>(std::lround(presentation.h * 0.5f)));
+
+  runtime.inspectRenderScale = true;
+  require(engine.Iterate() == SDL_APP_CONTINUE, "Render scaled Novel frame");
+  require(runtime.novelTargetActive && runtime.screenTargetNative &&
+              runtime.screenSawNovelComposite &&
+              runtime.novelTargetWidth == expectedWidth &&
+              runtime.novelTargetHeight == expectedHeight,
+          "Render scale reduces only Novel and composes before native Screen UI");
+
+  runtime.novelTargetActive = false;
+  runtime.screenTargetNative = false;
+  runtime.screenSawNovelComposite = false;
+  settings.renderScale = 1.0f;
+  engine.applySettings(settings, false);
+  require(engine.Iterate() == SDL_APP_CONTINUE && !runtime.novelTargetActive &&
+              runtime.screenTargetNative && runtime.screenSawNovelComposite,
+          "Native render scale bypasses the Novel intermediate target");
+  runtime.inspectRenderScale = false;
+}
 
 void testWindowAndMenu(Engine &engine, EventRuntime &runtime,
                        const std::string &file) {
@@ -540,6 +619,7 @@ int main(int argc, char **argv) {
       testWindowAndMenu(engine, runtime, options.settingsPath);
       testKtrfRuntime(engine, temporary.path);
       testRenderState(engine);
+      testRenderScale(engine, runtime);
     } else
       testNativeWindow(engine);
     const auto backend = argc == 1 ? UpscaleBackend::Linear

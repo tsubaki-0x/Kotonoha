@@ -38,8 +38,12 @@ bool SplashScreen::handleEvent(EventRef event) {
   // Touches also arrive as synthetic mouse events; count them once.
   const bool click = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
                      event.button.which != SDL_TOUCH_MOUSEID;
-  if (click || event.type == SDL_EVENT_FINGER_DOWN)
-    next();
+  const bool key = event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat;
+  if (click || key || event.type == SDL_EVENT_FINGER_DOWN) {
+    current = pictures.size();
+    texture.reset();
+    loaded = false;
+  }
   return true;
 }
 
@@ -69,6 +73,7 @@ void SplashScreen::load(RendererRef renderer) {
       continue;
     }
     SDL_SetTextureScaleMode(texture.get(), SDL_SCALEMODE_LINEAR);
+    SDL_SetTextureBlendMode(texture.get(), SDL_BLENDMODE_BLEND);
     loaded = true;
     startedNs = SDL_GetTicksNS();
   }
@@ -95,9 +100,12 @@ void SplashScreen::render(RendererRef renderer, float) {
   const SDL_FRect target{(screen.w - textureWidth * fit) / 2,
                          (screen.h - textureHeight * fit) / 2,
                          textureWidth * fit, textureHeight * fit};
-  const double alpha = std::clamp(elapsed() / fadeSeconds, 0.0, 1.0);
+  const double time = elapsed();
+  const double alpha = std::clamp(
+      std::min(time, displaySeconds - time) / fadeSeconds, 0.0, 1.0);
   SDL_SetTextureAlphaModFloat(texture.get(), static_cast<float>(alpha));
   SDL_RenderTexture(&renderer, texture.get(), nullptr, &target);
+  SDL_SetTextureAlphaModFloat(texture.get(), 1.0f);
 }
 
 } // namespace Kotonoha

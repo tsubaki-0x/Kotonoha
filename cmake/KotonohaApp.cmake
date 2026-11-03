@@ -34,6 +34,45 @@ function(kotonoha_configure_app target)
 
     kotonoha_copy_assets(${target} GAME "${APP_GAME}")
 
+    if(WIN32 AND NOT ANDROID)
+        set(windows_dependency_dirs
+            "$<TARGET_FILE_DIR:KotonohaEngine>"
+            "$<TARGET_FILE_DIR:kotonoha_imgui>"
+            "$<TARGET_FILE_DIR:SDL3::SDL3>"
+            "$<TARGET_FILE_DIR:SDL3_ttf::SDL3_ttf>"
+            ${FFMPEG_LIBRARY_DIRS} ${JSON_C_LIBRARY_DIRS} ${LIBASS_LIBRARY_DIRS})
+        foreach(library_dir IN LISTS FFMPEG_LIBRARY_DIRS JSON_C_LIBRARY_DIRS LIBASS_LIBRARY_DIRS)
+            if(library_dir)
+                get_filename_component(dependency_prefix "${library_dir}" DIRECTORY)
+                list(APPEND windows_dependency_dirs "${dependency_prefix}/bin")
+            endif()
+        endforeach()
+        if(FREETYPE_LIBRARY_RELEASE)
+            get_filename_component(freetype_lib_dir "${FREETYPE_LIBRARY_RELEASE}" DIRECTORY)
+            get_filename_component(freetype_prefix "${freetype_lib_dir}" DIRECTORY)
+            list(APPEND windows_dependency_dirs "${freetype_prefix}/bin")
+        endif()
+        list(REMOVE_DUPLICATES windows_dependency_dirs)
+        add_custom_command(TARGET ${target} POST_BUILD
+            # Always refresh the four direct runtime DLLs before dependency
+            # discovery; otherwise an older DLL already beside the executable
+            # wins Windows' normal lookup order and gets repackaged again.
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "$<TARGET_FILE:KotonohaEngine>" "$<TARGET_FILE_DIR:${target}>"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "$<TARGET_FILE:kotonoha_imgui>" "$<TARGET_FILE_DIR:${target}>"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "$<TARGET_FILE:SDL3::SDL3>" "$<TARGET_FILE_DIR:${target}>"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "$<TARGET_FILE:SDL3_ttf::SDL3_ttf>" "$<TARGET_FILE_DIR:${target}>"
+            COMMAND "${CMAKE_COMMAND}"
+                "-DAPP_EXECUTABLE=$<TARGET_FILE:${target}>"
+                "-DAPP_DESTINATION=$<TARGET_FILE_DIR:${target}>"
+                "-DDEPENDENCY_DIRS=${windows_dependency_dirs}"
+                -P "${KOTONOHA_PROJECT_ROOT}/cmake/PackageWindowsRuntime.cmake"
+            VERBATIM)
+    endif()
+
     if(APPLE AND CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND KOTONOHA_BUILD_MACOS_BUNDLES)
         set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS
             "${KOTONOHA_PROJECT_ROOT}/cmake/BundleApp.cmake"
