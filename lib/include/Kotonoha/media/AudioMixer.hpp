@@ -32,6 +32,7 @@ class AudioChannel {
   };
   std::string name;
   float volume = 1;
+  float userVolume = 1;
   bool muted = false;
   float masterGain = 1;
   std::vector<Stream> streams;
@@ -52,6 +53,8 @@ class AudioChannel {
 public:
   const std::string &getName() const { return name; }
   float getVolume() const { return volume; }
+  float getUserVolume() const { return userVolume; }
+  void setUserVolume(float value);
   bool isMuted() const { return muted; }
   std::size_t activeStreams() const { return streams.size(); }
 #ifdef KOTONOHA_DEV_CONTROL
@@ -70,6 +73,7 @@ public:
 class AudioMixer {
   std::map<std::string, std::shared_ptr<AudioChannel>> channels;
   float masterVolume = 1;
+  std::map<std::string, float> userVolumes;
   bool masterMuted = false;
   void applyMaster(float volume, bool muted);
 
@@ -78,6 +82,7 @@ public:
   float getMasterVolume() const { return masterVolume; }
   bool isMasterMuted() const { return masterMuted; }
   void setMasterVolume(float value);
+  void setUserVolumes(const std::map<std::string, float> &values);
   void setMasterMuted(bool value);
   static void validateChannelName(const std::string &name);
   std::shared_ptr<AudioChannel> channel(const std::string &name);

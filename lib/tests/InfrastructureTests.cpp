@@ -6,11 +6,13 @@
 #include <Kotonoha/core/Engine.hpp>
 #include <Kotonoha/core/FileSystem.hpp>
 #include <Kotonoha/core/Log.hpp>
+#include <Kotonoha/events/BackAction.hpp>
 #include <Kotonoha/media/MediaPlayer.hpp>
 #include <Kotonoha/media/upscaling/MetalFXUpscaler.hpp>
 #include <Kotonoha/media/upscaling/OpenGLUpscaler.hpp>
-#include <Kotonoha/script/TimelinePlayer.hpp>
+#include <Kotonoha/parsers/Documents.hpp>
 #include <Kotonoha/script/KtrfScript.hpp>
+#include <Kotonoha/script/TimelinePlayer.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -94,11 +96,12 @@ void testLog(const std::filesystem::path &directory) {
 }
 
 void testSettings(const std::filesystem::path &directory) {
-  const std::vector<std::string> shaders{
-      "/tmp/custom shaders/first.glsl", "/tmp/colon:name.glsl",
-      "C:\\shaders\\second.glsl"};
-  require(UpscaleShaderFiles(UpscaleShaderFileList(shaders)) == shaders,
-          "Shader lists preserve order, spaces, colons and Windows drive paths");
+  const std::vector<std::string> shaders{"/tmp/custom shaders/first.glsl",
+                                         "/tmp/colon:name.glsl",
+                                         "C:\\shaders\\second.glsl"};
+  require(
+      UpscaleShaderFiles(UpscaleShaderFileList(shaders)) == shaders,
+      "Shader lists preserve order, spaces, colons and Windows drive paths");
   require(UpscaleShaderFiles("first.glsl:second.glsl") ==
               std::vector<std::string>{"first.glsl", "second.glsl"},
           "Legacy colon-separated presets remain supported");
@@ -126,6 +129,10 @@ void testSettings(const std::filesystem::path &directory) {
   settings.logPriority = SDL_LOG_PRIORITY_DEBUG;
   settings.translationPath = "trans.json";
   settings.fontPath = "font.ttf";
+  settings.vnFontPath = "vn.ttf";
+  settings.vnTextColorOverride = true;
+  settings.vnTextColor = {21, 43, 65, 187};
+  settings.channelVolumes = {{"BGM", .3f}, {"Voice", .7f}};
   settings.save(file);
   const auto read = EngineSettings::load(file);
   require(read.width == 1600 && read.height == 900 && read.display == 2 &&
@@ -141,7 +148,10 @@ void testSettings(const std::filesystem::path &directory) {
               read.masterVolume == 0.4f && read.masterMuted &&
               read.debugUIScale == 1.75f &&
               read.translationPath == "trans.json" &&
-              read.fontPath == "font.ttf",
+              read.fontPath == "font.ttf" && read.vnFontPath == "vn.ttf" &&
+              read.vnTextColorOverride && read.vnTextColor.r == 21 &&
+              read.vnTextColor.a == 187 &&
+              read.channelVolumes == settings.channelVolumes,
           "Every settings field survives persistence");
   require(std::abs(read.renderScale - 0.75f) < 0.0001f,
           "Render scale survives persistence");
@@ -189,7 +199,7 @@ void testKtrfRuntime(Engine &engine, const std::filesystem::path &directory) {
   manager.startScript();
   const auto listed = engine.debugNodes();
   require(listed.size() == 2 && listed.front().assets ==
-              std::vector<std::string>{"background.bmp"},
+                                    std::vector<std::string>{"background.bmp"},
           "Debug nodes expose scene assets");
   const auto path = (directory / "runtime.json").string();
   engine.dumpKtrf(path);
@@ -197,15 +207,18 @@ void testKtrfRuntime(Engine &engine, const std::filesystem::path &directory) {
   edited.nodes[0].text = "Customized runtime dialogue";
   edited.dump(path);
   engine.loadKtrf(path);
-  require(GetVNTextBoxRuntime(engine, "", "", 30).getText() == "Customized runtime dialogue",
+  require(GetVNTextBoxRuntime(engine, "", "", 30).getText() ==
+              "Customized runtime dialogue",
           "Loaded KTRF changes the live dialogue");
   edited.nodes[0].nextNodeId = 9999;
   rejects([&] { edited.dump(path); }, "Invalid graph cannot replace the file");
-  std::ofstream(path) << "{\"profile\":\"kotonoha.vn\",\"version\":1,\"nodes\":[]}";
+  std::ofstream(path)
+      << "{\"profile\":\"kotonoha.vn\",\"version\":1,\"nodes\":[]}";
   rejects([&] { engine.loadKtrf(path); }, "Invalid loaded graph is rejected");
   require(manager.getCurrentNodeId() == 0,
           "Rejected KTRF preserves the current runtime graph");
-  require(GetVNTextBoxRuntime(engine, "", "", 30).getText() == "Customized runtime dialogue",
+  require(GetVNTextBoxRuntime(engine, "", "", 30).getText() ==
+              "Customized runtime dialogue",
           "Rejected load preserves the visible scene");
   engine.debugJumpToNode("1");
   require(manager.isFinished(), "Debug facade jumps to an engine node");
@@ -226,10 +239,21 @@ public:
   bool screenSawNovelComposite = false;
   int novelTargetWidth = 0, novelTargetHeight = 0;
   EventRuntime() : Runtime("Infrastructure tests", "1", "org.kotonoha.infra") {}
-  void onEvent(EventRef) override { ++novelEvents; }
-  bool onScreenEvent(EventRef) override {
+  void onEvent(EventRef event) override {
+    ++novelEvents;
+    if ((event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+         event.type == SDL_EVENT_MOUSE_BUTTON_UP) &&
+        event.button.which == SDL_TOUCH_MOUSEID) {
+      held = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+      if (held)
+        ++touchDowns;
+      else
+        ++touchUps;
+    }
+  }
+  bool onScreenEvent(EventRef event) override {
     ++screenEvents;
-    return false;
+    return screenHandler ? screenHandler(event) : false;
   }
   void renderBackground(RendererRef renderer, float scale) override {
     if (!inspectRenderScale) {
@@ -345,8 +369,8 @@ void testWindowAndMenu(Engine &engine, EventRuntime &runtime,
           "Cancel does not apply the draft or leak Escape");
   engine.openSettings();
   event = key(SDLK_DOWN);
-  for (int i = 0; i < 9; ++i)
-    engine.Event(&event);
+  event = key(SDLK_END);
+  engine.Event(&event);
   event = key(SDLK_RETURN);
   engine.Event(&event);
   require(!engine.GetSettingsMenu().isOpen(), "Apply/save closes settings");
@@ -415,10 +439,27 @@ void testUpscaler(Engine &engine, UpscaleBackend backend) {
   upscaler.configure({});
   require(&upscaler.process(*source, 1) == source.get(),
           "Disabled upscaler passes through");
-  const int count = backend == UpscaleBackend::MPV ? 4 : 1;
+  upscaler.configure({backend, UpscalePreset::Anime4KModeAFast, 2, {}});
+  const auto properties = SDL_GetRendererProperties(&renderer);
+  const auto maximum = SDL_GetNumberProperty(
+      properties, SDL_PROP_RENDERER_MAX_TEXTURE_SIZE_NUMBER, 0);
+  SDL_SetNumberProperty(properties, SDL_PROP_RENDERER_MAX_TEXTURE_SIZE_NUMBER,
+                        16);
+  require(&upscaler.process(*source, 0) == source.get(),
+          "An image that exceeds upscale limits falls back to its original");
+  SDL_SetNumberProperty(properties, SDL_PROP_RENDERER_MAX_TEXTURE_SIZE_NUMBER,
+                        maximum);
+  require(&upscaler.process(*source, 0) == source.get(),
+          "A failed static image is skipped rather than retried every draw");
+  upscaler.clear();
+  // The forced failure above is expected. Shader-profile validation below
+  // checks only logs emitted while executing the real GPU chains.
+  Log::clear();
+  const int count = backend == UpscaleBackend::MPV
+                        ? static_cast<int>(UpscalePresets().size())
+                        : 1;
   for (int preset = 0; preset < count; ++preset) {
-    UpscaleSettings settings{
-        backend, static_cast<UpscalePreset>(preset), 2, {}};
+    UpscaleSettings settings{backend, UpscalePresets()[preset], 2, {}};
     upscaler.configure(settings);
     const Upscaler *implementation = upscaler.getImplementation();
     require(implementation && implementation->backend() == backend,
@@ -440,6 +481,30 @@ void testUpscaler(Engine &engine, UpscaleBackend backend) {
             "Backend renders red without channel swaps");
     require(&upscaler.process(*source, 1) == &output,
             "Unchanged frame reuses cached output");
+    TexturePtr second(SDL_CreateTexture(&renderer, SDL_PIXELFORMAT_RGBA32,
+                                        SDL_TEXTUREACCESS_STREAMING, 32, 18));
+    require(bool(second) &&
+                SDL_UpdateTexture(second.get(), nullptr, pixels.data(), 32 * 4),
+            "Create another cached image");
+    auto &secondOutput = upscaler.process(*second, 1);
+    require(&secondOutput != &output &&
+                &upscaler.process(*source, 1) == &output,
+            "Alternating images retain separate cached upscale textures");
+    bool secondCacheAlive = true;
+    SDL_SetPointerPropertyWithCleanup(
+        SDL_GetTextureProperties(&secondOutput), "test.cache-lifetime",
+        &secondCacheAlive,
+        [](void *, void *value) { *static_cast<bool *>(value) = false; },
+        nullptr);
+    second.reset();
+    require(!secondCacheAlive,
+            "Destroying an original releases its cached upscale");
+    upload({10, 240, 10, 255});
+    const auto retained =
+        readPixel(renderer, upscaler.process(*source, 1), 32, 18);
+    require(retained.r > 150 && retained.r > retained.g + 100,
+            "An unchanged content serial never reprocesses source pixels after "
+            "drawing another image");
     upload({10, 10, 240, 255});
     auto &updated = upscaler.process(*source, 2);
     auto blue = readPixel(renderer, updated, 32, 18);
@@ -458,8 +523,15 @@ void testUpscaler(Engine &engine, UpscaleBackend backend) {
     auto &resized = upscaler.process(*source, 4);
     require(resized.w == 48 && resized.h == 27,
             "Factor change recreates correctly sized output");
+    bool cacheAlive = true;
+    SDL_SetPointerPropertyWithCleanup(
+        SDL_GetTextureProperties(&resized), "test.cache-lifetime", &cacheAlive,
+        [](void *, void *value) { *static_cast<bool *>(value) = false; },
+        nullptr);
     settings.factor = 1;
     upscaler.configure(settings);
+    require(!cacheAlive,
+            "Disabling upscaling immediately releases cached GPU textures");
     require(&upscaler.process(*source, 5) == source.get(),
             "1x disables processing");
   }
@@ -467,19 +539,22 @@ void testUpscaler(Engine &engine, UpscaleBackend backend) {
     TemporaryDirectory custom;
     const auto first = custom.path / "first custom shader.glsl";
     const auto second = custom.path / "second custom shader.glsl";
-    std::ofstream(first) <<
-        "//!HOOK MAIN\n//!BIND HOOKED\n"
-        "vec4 hook() { return vec4(0.0, 1.0, 0.0, 1.0); }\n";
-    std::ofstream(second) <<
-        "//!HOOK MAIN\n//!BIND HOOKED\n"
-        "vec4 hook() { return vec4(HOOKED_tex(HOOKED_pos).g, 0.0, 0.0, 1.0); }\n";
-    UpscaleSettings settings{backend, UpscalePreset::Anime4K, 2,
-                             UpscaleShaderFileList({first.string(), second.string()})};
+    std::ofstream(first)
+        << "//!HOOK MAIN\n//!BIND HOOKED\n"
+           "vec4 hook() { return vec4(0.0, 1.0, 0.0, 1.0); }\n";
+    std::ofstream(second)
+        << "//!HOOK MAIN\n//!BIND HOOKED\n"
+           "vec4 hook() { return vec4(HOOKED_tex(HOOKED_pos).g, 0.0, 0.0, "
+           "1.0); }\n";
+    UpscaleSettings settings{
+        backend, UpscalePreset::Anime4K, 2,
+        UpscaleShaderFileList({first.string(), second.string()})};
     upscaler.configure(settings);
     upload({0, 0, 255, 255});
     auto color = readPixel(renderer, upscaler.process(*source, 6), 32, 18);
-    require(color.r > 240 && color.g < 10 && color.b < 10,
-            "Selected absolute shader paths execute in list order, not the preset");
+    require(
+        color.r > 240 && color.g < 10 && color.b < 10,
+        "Selected absolute shader paths execute in list order, not the preset");
     for (const auto &entry : Log::entries())
       require(entry.priority < SDL_LOG_PRIORITY_WARN,
               "GPU presets execute without shader errors or fallback");
@@ -593,6 +668,10 @@ void testRenderState(Engine &engine) {
 
 int main(int argc, char **argv) {
   try {
+    Kotonoha::OrsDocument emptyOrs(Kotonoha_OrsParserBytes(nullptr, 0));
+    Kotonoha::OrsDocument movedOrs(std::move(emptyOrs));
+    require(emptyOrs.get().data == nullptr && movedOrs.get().size == 0,
+            "Parser resource ownership moves safely");
     TemporaryDirectory temporary;
     if (argc == 1) {
       testLog(temporary.path);
@@ -605,15 +684,18 @@ int main(int argc, char **argv) {
       options.rendererOverride = argv[1];
     Engine engine(runtime, options);
     require(engineAssetDirectory() == resourceDirectory() / "assets" &&
-                gameAssetDirectory("example") == resourceDirectory() / "game-assets",
+                gameAssetDirectory("example") ==
+                    resourceDirectory() / "game-assets",
             "Packaged engine and game assets have separate stable directories");
     require(preferredDataDirectory("example") == resourceDirectory(),
             "Desktop data resolves to the package resource directory");
-    require(std::filesystem::is_directory(preferredDocumentsDirectory("example")) &&
-                std::filesystem::path(EngineSettings::defaultPath("example")).parent_path() ==
-                    preferredDocumentsDirectory("example"),
-            "Settings use the writable preferred documents directory");
-    rejects([] { gameAssetDirectory("../game"); }, "Reject invalid game identifiers");
+    require(
+        std::filesystem::is_directory(preferredDocumentsDirectory("example")) &&
+            std::filesystem::path(EngineSettings::defaultPath("example"))
+                    .parent_path() == preferredDocumentsDirectory("example"),
+        "Settings use the writable preferred documents directory");
+    rejects([] { gameAssetDirectory("../game"); },
+            "Reject invalid game identifiers");
     SDL_HideWindow(&engine.GetWindow());
     if (argc == 1) {
       testWindowAndMenu(engine, runtime, options.settingsPath);

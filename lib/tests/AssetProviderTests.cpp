@@ -1,4 +1,5 @@
 #include <Kotonoha/core/AssetProvider.hpp>
+#include <Kotonoha/core/CommandLine.hpp>
 #include <Kotonoha/core/Engine.hpp>
 #include <Kotonoha/core/FileSystem.hpp>
 #include <Kotonoha/media/MediaPlayer.hpp>
@@ -35,17 +36,17 @@ public:
   mutable int reads = 0;
 
   std::string name() const override { return "Memory"; }
-  bool contains(const std::string &id) const override {
+  bool containsAsset(const std::string &id) const override {
     return files.count(id) != 0;
   }
-  std::vector<Uint8> read(const std::string &id) const override {
+  std::vector<Uint8> readAsset(const std::string &id) const override {
     ++reads;
     const auto found = files.find(id);
     if (found == files.end())
       throw std::runtime_error("Missing " + id);
     return found->second;
   }
-  std::vector<std::string> list(const std::string &prefix) const override {
+  std::vector<std::string> listAsset(const std::string &prefix) const override {
     std::vector<std::string> result;
     for (const auto &[id, bytes] : files)
       if (id.compare(0, prefix.size(), prefix) == 0)
@@ -58,13 +59,13 @@ public:
 class SolidColorProvider final : public AssetProvider {
 public:
   std::string name() const override { return "Solid"; }
-  bool contains(const std::string &id) const override {
+  bool containsAsset(const std::string &id) const override {
     return id.rfind("solid:", 0) == 0;
   }
-  std::vector<Uint8> read(const std::string &id) const override {
+  std::vector<Uint8> readAsset(const std::string &id) const override {
     return {id.begin(), id.end()};
   }
-  SurfacePtr loadSurface(const std::string &id) const override {
+  SurfacePtr loadSurfaceAsset(const std::string &id) const override {
     const auto color = std::stoul(id.substr(6), nullptr, 16);
     SurfacePtr surface(SDL_CreateSurface(2, 2, SDL_PIXELFORMAT_RGBA32));
     require(surface != nullptr, "Create solid surface");
@@ -122,10 +123,10 @@ public:
 std::vector<Uint8> bitmap() {
   SurfacePtr surface(SDL_CreateSurface(3, 2, SDL_PIXELFORMAT_RGBA32));
   require(surface != nullptr, "Create bitmap");
-  require(SDL_FillSurfaceRect(surface.get(), nullptr,
-                              SDL_MapSurfaceRGBA(surface.get(), 10, 20, 30,
-                                                 255)),
-          "Fill bitmap");
+  require(
+      SDL_FillSurfaceRect(surface.get(), nullptr,
+                          SDL_MapSurfaceRGBA(surface.get(), 10, 20, 30, 255)),
+      "Fill bitmap");
   SDL_IOStream *stream = SDL_IOFromDynamicMem();
   require(stream != nullptr, "Open bitmap stream");
   require(SDL_SaveBMP_IO(surface.get(), stream, false), "Encode bitmap");
@@ -168,9 +169,9 @@ std::vector<Uint8> wave() {
 }
 
 void fileSystemProvider() {
-  const auto root = std::filesystem::temp_directory_path() /
-                    ("kotonoha-assets-" +
-                     std::to_string(SDL_GetPerformanceCounter()));
+  const auto root =
+      std::filesystem::temp_directory_path() /
+      ("kotonoha-assets-" + std::to_string(SDL_GetPerformanceCounter()));
   std::filesystem::create_directories(root / "pictures");
   writeTextFileAtomically((root / "pictures/a.txt").string(), "hello");
   std::filesystem::create_directories(root.parent_path() / "outside");
@@ -253,6 +254,57 @@ public:
   TestRuntime() : Runtime("AssetTests", "1", "asset-tests") {}
 };
 
+void overlays() {
+  struct Directory {
+    std::filesystem::path path =
+        std::filesystem::temp_directory_path() /
+        ("kotonoha-overlay-" + std::to_string(SDL_GetTicksNS()));
+    Directory() { std::filesystem::create_directories(path); }
+    ~Directory() {
+      std::error_code ec;
+      std::filesystem::remove_all(path, ec);
+    }
+  } dir;
+  std::filesystem::create_directories(dir.path / "Images");
+  const auto bmp = bitmap();
+  {
+    std::ofstream file(dir.path / "Images" / "Scene.BMP", std::ios::binary);
+    file.write(reinterpret_cast<const char *>(bmp.data()), bmp.size());
+  }
+  {
+    std::ofstream file(dir.path / "script.ks");
+    file << "translated";
+  }
+  MemoryAssetProvider provider;
+  provider.files["script.ks"] = {'b', 'a', 's', 'e'};
+  provider.files["untouched"] = {'o', 'k'};
+  provider.setOverlay(dir.path);
+  require(provider.contains("images/scene.bmp"),
+          "Overlay-only asset is visible");
+  auto text = provider.read("SCRIPT.KS");
+  require(std::string(text.begin(), text.end()) == "translated",
+          "Overlay precedes archive and ignores case");
+  require(provider.read("untouched") == std::vector<Uint8>({'o', 'k'}),
+          "Missing overlay falls back to archive");
+  require(!provider.localPath("Images/Scene.bmp").empty(),
+          "Streaming opens the overlay file");
+  require(provider.loadSurface("images/scene.bmp")->w == 3,
+          "Overlay image decoder");
+  require(provider.list().size() == 3,
+          "Overlay and archive listings merge without duplicates");
+  require(provider.overlayPath("../script.ks").empty() &&
+              provider.overlayPath((dir.path / "script.ks").string()).empty(),
+          "Overlay IDs stay relative");
+  rejects([&] { provider.setOverlay(dir.path / "missing"); },
+          "Reject missing overlay directory");
+  require(provider.read("script.ks") == text,
+          "Failed mount preserves active overlay");
+  provider.setOverlay({});
+  require(provider.read("script.ks") ==
+              std::vector<Uint8>({'b', 'a', 's', 'e'}),
+          "Disabling overlay restores native assets");
+}
+
 void engineProvider() {
   TestRuntime runtime;
   {
@@ -325,8 +377,19 @@ void memoryMedia(const char *path) {
 int main(int argc, char **argv) {
   try {
     require(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO), "Initialize SDL");
+    {
+      EngineOptions options;
+      CommandLine cli("test", options);
+      char a0[] = "test", a1[] = "--dump-translation", a2[] = "texts.json",
+           a3[] = "--launcher";
+      char *args[] = {a0, a1, a2, a3};
+      cli.parse(5, args);
+      require(options.dumpTranslationPath == "texts.json" && !options.launcher,
+              "Engine export bypasses the launcher regardless of option order");
+    }
     fileSystemProvider();
     decoders();
+    overlays();
     if (argc > 1)
       memoryMedia(argv[1]);
     seekableMediaProvider();

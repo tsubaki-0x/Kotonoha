@@ -1,10 +1,7 @@
 #pragma once
 
 #include "SDL.hpp"
-
-#include <functional>
 #include <string>
-#include <vector>
 
 namespace Kotonoha {
 
@@ -23,6 +20,8 @@ public:
     return false;
   }
   virtual bool capturesInput() const { return false; }
+  virtual bool finished() const { return false; }
+  virtual void restart() {}
   virtual bool pausesStory() const { return false; }
   virtual RenderSpace renderSpace() const { return RenderSpace::Novel; }
   virtual RenderLayer renderLayer() const { return RenderLayer::Foreground; }
@@ -31,6 +30,8 @@ public:
   // draw in viewport coordinates keep the default.
   virtual bool designSpace() const { return false; }
   virtual void update() {}
+  virtual void translationChanged(const std::string &, const std::string &,
+                                  const std::string &) {}
   virtual void render(RendererRef renderer, float scale) {}
 
 protected:

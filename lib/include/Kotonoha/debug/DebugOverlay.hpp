@@ -49,5 +49,3 @@ public:
 };
 
 } // namespace Kotonoha
-
-\n

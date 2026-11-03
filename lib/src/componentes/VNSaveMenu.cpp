@@ -2,6 +2,7 @@
 #include <Kotonoha/componentes/VNSaveMenu.hpp>
 #include <Kotonoha/core/Engine.hpp>
 #include <Kotonoha/core/UI.hpp>
+#include <Kotonoha/events/BackAction.hpp>
 
 #include <algorithm>
 #include <stdexcept>
@@ -18,7 +19,9 @@ std::size_t VNSaveMenu::count() const {
   return slots.size() + (loading ? 0 : 1);
 }
 
-void VNSaveMenu::open(const std::string &path, bool load) {
+void VNSaveMenu::open(const std::string &path, bool load,
+                      const std::string &suggestion) {
+  suggestedName = suggestion;
   directory = path;
   loading = load;
   opened = true;
@@ -81,6 +84,26 @@ void VNSaveMenu::finishRename() {
   }
 }
 
+void VNSaveMenu::beginCreate() {
+  if (!renameDialog)
+    renameDialog =
+        std::make_unique<TextInputDialog>(engine, "", nullptr, nullptr);
+  renameDialog->configure(
+      "Save name",
+      [this](const std::string &name) {
+        try {
+          const auto path = VNSaveSlots(directory).nextPath(name);
+          engine.GetRuntime().saveGame(path);
+          close();
+        } catch (const std::exception &failure) {
+          reportError(failure.what());
+          finishRename();
+        }
+      },
+      [this] { finishRename(); }, suggestedName);
+  engine.GetRuntime().AddScene(renameDialog.get());
+}
+
 void VNSaveMenu::beginRename() {
   if (!hasSelectedSave())
     return;
@@ -134,6 +157,10 @@ void VNSaveMenu::activate() {
     confirmation = Confirmation::Overwrite;
     return;
   }
+  if (!loading && selected == 0 && !suggestedName.empty()) {
+    beginCreate();
+    return;
+  }
   try {
     if (loading)
       engine.GetRuntime().loadGame(slots.at(selected).path);
@@ -158,14 +185,16 @@ void VNSaveMenu::activate() {
 void VNSaveMenu::onEvent(EventRef event) {
   if (!opened)
     return;
+
+  if (BackAction(engine, event)) {
+    if (confirmation != Confirmation::None)
+      confirmation = Confirmation::None;
+    else
+      close();
+    return;
+  }
+
   if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) {
-    if (event.key.key == SDLK_ESCAPE) {
-      if (confirmation != Confirmation::None)
-        confirmation = Confirmation::None;
-      else
-        close();
-      return;
-    }
     if (event.key.key == SDLK_RETURN) {
       activate();
       return;
@@ -213,10 +242,28 @@ void VNSaveMenu::onEvent(EventRef event) {
       return;
     }
   }
+  if (count() && event.type >= SDL_EVENT_FINGER_DOWN &&
+      event.type <= SDL_EVENT_FINGER_CANCELED) {
+    if (event.type == SDL_EVENT_FINGER_DOWN) {
+      listScroll = float(first * 50);
+      if (event.tfinger.y * UI::height < 160 ||
+          event.tfinger.y * UI::height > 510)
+        return;
+    }
+    float velocity = 0;
+    bool follow = false;
+    scrollGesture.handle(
+        event, UI::height, listScroll, velocity, follow,
+        float(count() > pageSize ? (count() - pageSize) * 50 : 0));
+    first = size_t(listScroll / 50);
+  }
   if (event.type == SDL_EVENT_MOUSE_WHEEL && count()) {
-    if (event.wheel.y < 0)
+    const float delta =
+        event.wheel.y *
+        (event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -1.f : 1.f);
+    if (delta < 0)
       selected = std::min(count() - 1, selected + 1);
-    else if (event.wheel.y > 0 && selected > 0)
+    else if (delta > 0 && selected > 0)
       --selected;
     revealSelection();
   }
@@ -247,16 +294,18 @@ void VNSaveMenu::render(RendererRef renderer, float) {
   if (!opened)
     return;
   auto &ui = engine.GetUI();
-  ui.panel(renderer, {0, 0, UI::width, UI::height}, {0, 0, 0, 190});
+  ui.backdrop(renderer, {0, 0, 0, 190});
   ui.panel(renderer, {210, 60, 880, 610});
   ui.text(renderer, loading ? "Load game" : "Save game", 230, 85, 640,
           {255, 215, 100, 255});
   ui.button(renderer, {890, 80, 180, 44}, "Close [ESC]");
   for (std::size_t row = 0; row < pageSize && first + row < count(); ++row) {
     const auto index = first + row;
-    const auto label = !loading && index == 0
-                           ? std::string("+ New save")
-                           : slots.at(index - (loading ? 0 : 1)).name;
+    const auto label =
+        !loading && index == 0
+            ? std::string("+ New save") +
+                  (suggestedName.empty() ? "" : " — " + suggestedName)
+            : slots.at(index - (loading ? 0 : 1)).name;
     const float y = 160.0f + row * 50;
     const SDL_Rect rowClip{230, static_cast<int>(y), 820, 44};
     if (!SDL_SetRenderClipRect(&renderer, &rowClip))

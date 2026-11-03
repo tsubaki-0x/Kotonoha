@@ -9,13 +9,13 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
-#include <utility>
 #include <vector>
 
 namespace Kotonoha {
 
 class Engine;
 class SplashScreen;
+class SplashChainloader;
 
 enum class GameState { Splash, Menu, Gameplay };
 
@@ -40,12 +40,15 @@ protected:
   std::vector<Scene *> gameplayScenes;
 
 private:
-  std::unique_ptr<SplashScreen> splash;
+  std::unique_ptr<SplashChainloader> splash;
   Engine *splashEngine = nullptr;
 
 public:
   Runtime(std::string name, std::string version, std::string identify);
   virtual ~Runtime();
+  // Native script menus may poll pointer-down and pointer-up on different
+  // frames.
+  virtual bool continuousTouch() const { return false; }
 
   // Ciclo de inicialização
   virtual void init(Engine &engine);
@@ -53,8 +56,9 @@ public:
   // Default: the engine splash (splashPictures()); when it ends the runtime
   // switches to GameState::Menu.
   virtual void initSplash(Engine &engine);
-  // Pictures shown by the default splash; the engine logo
-  // (assets/SPLASH.PNG in the executable resources) unless overridden.
+  // Splash media shown by the default splash. The first matching asset among
+  // SPLASH.MP4, SPLASH.MOV, SPLASH.WEBM, and SPLASH.PNG is used unless
+  // overridden. Videos play their embedded audio when present.
   virtual std::vector<std::filesystem::path> splashPictures() const;
   virtual void initMenu(Engine &engine);
   virtual void initGameplay(Engine &engine);
@@ -68,6 +72,8 @@ public:
   virtual void update();
   virtual void onEvent(EventRef event);
   virtual bool onScreenEvent(EventRef event);
+  virtual bool handleBackAction() { return false; }
+  virtual bool handleBacklogAction() { return false; }
   virtual void renderScreen(RendererRef renderer, float scale);
   virtual void renderBackground(RendererRef renderer, float scale);
   // Games with scene transactions can retain the fully composed Novel raster
@@ -92,11 +98,25 @@ public:
   // texts here and look them up with Engine::GetTranslation().text(route, ...).
   virtual Translation::SourceTexts translationSources() const { return {}; }
 
+  virtual int translationRoute() const;
+  // Original keys currently presented by a native script runtime. Used to
+  // follow the exact dialogue/choice in the live translation editor.
+  virtual std::vector<std::string> activeTranslationKeys() const { return {}; }
+  virtual std::vector<int> translationRoutes() const { return {}; }
+  virtual std::vector<std::string> translationTexts(int route) const {
+    auto sources = translationSources();
+    auto found = sources.find(route);
+    return found == sources.end() ? std::vector<std::string>{}
+                                  : std::move(found->second);
+  }
+
   // Current story position of games with their own interpreter (script,
   // label, route...), shown as the node by the debug overlay and MCP. Empty
   // means the engine VNManager node is used.
   virtual std::string debugNode() const { return {}; }
-  virtual std::optional<double> debugNodeSeconds() const { return std::nullopt; }
+  virtual std::optional<double> debugNodeSeconds() const {
+    return std::nullopt;
+  }
   virtual std::vector<DebugNode> debugNodes() const { return {}; }
   virtual void debugJumpToNode(const std::string &) {
     throw std::runtime_error("This runtime does not support node jumps");

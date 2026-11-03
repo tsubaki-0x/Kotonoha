@@ -1,13 +1,112 @@
 ﻿#include <Kotonoha/localization/Encoding.hpp>
 
+#include <algorithm>
+#include <cstdint>
+#include <stdexcept>
+
+// -----------------------------------------------------------------------------
+// SEÇÃO DE SELEÇÃO DA PLATAFORMA DE CONVERSÃO
+// -----------------------------------------------------------------------------
+
+#if defined(__ANDROID__)
+
+#include <SDL3/SDL_system.h>
+#include <jni.h>
+
+namespace Kotonoha {
+namespace {
+
+// Conversão resiliente via JNI (java.lang.String) no Android
+std::string ConvertViaJNI(std::string_view text, const char *fromEncoding,
+                          const char *toEncoding = "UTF-8") {
+  if (text.empty())
+    return {};
+
+  JNIEnv *env = static_cast<JNIEnv *>(SDL_GetAndroidJNIEnv());
+  if (!env) {
+    throw std::runtime_error(
+        "JNIEnv indisponível para conversão de texto no Android");
+  }
+
+  // Garante o mapeamento do alias de encoding para o formato aceito pelo Java
+  std::string encodingName = fromEncoding;
+  if (encodingName == "CP932" || encodingName == "WINDOWS-31J" ||
+      encodingName == "SJIS") {
+    encodingName = "Shift_JIS";
+  }
+
+  jbyteArray byteArray = env->NewByteArray(static_cast<jsize>(text.size()));
+  if (!byteArray) {
+    throw std::runtime_error("Falha ao alocar jbyteArray no JNI");
+  }
+
+  env->SetByteArrayRegion(byteArray, 0, static_cast<jsize>(text.size()),
+                          reinterpret_cast<const jbyte *>(text.data()));
+
+  jstring encodingStr = env->NewStringUTF(encodingName.c_str());
+  jclass stringClass = env->FindClass("java/lang/String");
+  jmethodID ctor =
+      env->GetMethodID(stringClass, "<init>", "([BLjava/lang/String;)V");
+
+  jstring javaString = static_cast<jstring>(
+      env->NewObject(stringClass, ctor, byteArray, encodingStr));
+
+  // Trata falha na decodificação pelo Java (ex: encoding inválido)
+  if (env->ExceptionCheck() || !javaString) {
+    env->ExceptionClear();
+    env->DeleteLocalRef(encodingStr);
+    env->DeleteLocalRef(byteArray);
+    env->DeleteLocalRef(stringClass);
+    throw std::runtime_error(
+        "Falha na conversão de caracteres via java.nio.charset: " +
+        encodingName);
+  }
+
+  const auto getBytes =
+      env->GetMethodID(stringClass, "getBytes", "(Ljava/lang/String;)[B");
+  jstring target = env->NewStringUTF(toEncoding);
+  auto encoded = static_cast<jbyteArray>(
+      env->CallObjectMethod(javaString, getBytes, target));
+  if (env->ExceptionCheck() || !encoded) {
+    env->ExceptionClear();
+    env->DeleteLocalRef(target);
+    env->DeleteLocalRef(javaString);
+    env->DeleteLocalRef(encodingStr);
+    env->DeleteLocalRef(byteArray);
+    env->DeleteLocalRef(stringClass);
+    throw std::runtime_error("Unsupported target text encoding");
+  }
+  std::string result(static_cast<size_t>(env->GetArrayLength(encoded)), '\0');
+  env->GetByteArrayRegion(encoded, 0, static_cast<jsize>(result.size()),
+                          reinterpret_cast<jbyte *>(result.data()));
+  env->DeleteLocalRef(encoded);
+  env->DeleteLocalRef(target);
+  env->DeleteLocalRef(javaString);
+  env->DeleteLocalRef(encodingStr);
+  env->DeleteLocalRef(byteArray);
+  env->DeleteLocalRef(stringClass);
+
+  return result;
+}
+
+} // namespace
+} // namespace Kotonoha
+
+#else
+
+// Configuração para iOS e Desktop (SDL3)
 #include <SDL3/SDL_stdinc.h>
 
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif
+
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
 #include <cerrno>
 #include <iconv.h>
+#define KOTONOHA_USE_SYSTEM_ICONV 1
+#else
+#define KOTONOHA_USE_SYSTEM_ICONV 0
 #endif
 
 #include <algorithm>
@@ -61,7 +160,7 @@ std::string WindowsCp932ToUtf8(std::string_view text) {
 #endif
 
 class Converter {
-#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+#if KOTONOHA_USE_SYSTEM_ICONV
   iconv_t handle;
 #else
   SDL_iconv_t handle;
@@ -69,24 +168,28 @@ class Converter {
 
 public:
   Converter(const char *from, const char *to)
-#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
-      : handle(iconv_open(to, from)) {}
+#if KOTONOHA_USE_SYSTEM_ICONV
+      : handle(iconv_open(to, from)){}
 #else
-      : handle(SDL_iconv_open(to, from)) {}
+      : handle(SDL_iconv_open(to, from)) {
+  }
 #endif
-  ~Converter() {
+
+        ~Converter() {
     if (valid()) {
-#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+#if KOTONOHA_USE_SYSTEM_ICONV
       iconv_close(handle);
 #else
       SDL_iconv_close(handle);
 #endif
     }
   }
+
   Converter(const Converter &) = delete;
   Converter &operator=(const Converter &) = delete;
+
   bool valid() const {
-#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+#if KOTONOHA_USE_SYSTEM_ICONV
     return handle != reinterpret_cast<iconv_t>(-1);
 #else
     return handle != reinterpret_cast<SDL_iconv_t>(-1);
@@ -95,26 +198,29 @@ public:
 
   size_t convert(const char **input, size_t *inputLeft, char **output,
                  size_t *outputLeft) {
-#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+#if KOTONOHA_USE_SYSTEM_ICONV
     char *current = input ? const_cast<char *>(*input) : nullptr;
-    const size_t result =
-        iconv(handle, input ? &current : nullptr, inputLeft, output, outputLeft);
+    const size_t result = iconv(handle, input ? &current : nullptr, inputLeft,
+                                output, outputLeft);
     if (input)
       *input = current;
     if (result != static_cast<size_t>(-1))
       return result;
     switch (errno) {
-    case E2BIG: return SDL_ICONV_E2BIG;
-    case EILSEQ: return SDL_ICONV_EILSEQ;
-    case EINVAL: return SDL_ICONV_EINVAL;
-    default: return SDL_ICONV_ERROR;
+    case E2BIG:
+      return SDL_ICONV_E2BIG;
+    case EILSEQ:
+      return SDL_ICONV_EILSEQ;
+    case EINVAL:
+      return SDL_ICONV_EINVAL;
+    default:
+      return SDL_ICONV_ERROR;
     }
 #else
     return SDL_iconv(handle, input, inputLeft, output, outputLeft);
 #endif
   }
 
-  // `invalidLength` tells how many input bytes an undecodable sequence spans.
   template <typename Skip>
   std::string run(std::string_view text, Skip invalidLength) {
     std::string out;
@@ -137,8 +243,9 @@ public:
           dst = out.data() + used;
           outLeft = out.size() - used;
         }
-        const size_t skip = std::min<size_t>(inLeft, invalidLength(
-            reinterpret_cast<const unsigned char *>(in), inLeft));
+        const size_t skip = std::min<size_t>(
+            inLeft,
+            invalidLength(reinterpret_cast<const unsigned char *>(in), inLeft));
         in += skip;
         inLeft -= skip;
         *dst++ = '?';
@@ -154,14 +261,27 @@ public:
 };
 
 } // namespace
+} // namespace Kotonoha
+
+#endif // __ANDROID__
+
+// -----------------------------------------------------------------------------
+// API PÚBLICA DA ENGINE
+// -----------------------------------------------------------------------------
+
+namespace Kotonoha {
 
 std::string ConvertEncoding(std::string_view text, const char *from,
                             const char *to) {
+#if defined(__ANDROID__)
+  return ConvertViaJNI(text, from, to);
+#else
   Converter converter(from, to);
   if (!converter.valid())
     throw std::runtime_error(std::string("Unsupported text encoding ") + from +
                              " -> " + to);
   return converter.run(text, [](const unsigned char *, size_t) { return 1; });
+#endif
 }
 
 std::string ShiftJisToUtf8(std::string_view text) {
@@ -177,10 +297,9 @@ std::string ShiftJisToUtf8(std::string_view text) {
     Converter converter(name, "UTF-8");
     if (!converter.valid())
       continue;
-    // A bad lead byte consumes its trail byte, as Shift-JIS decoders do.
     return converter.run(text, [](const unsigned char *p, size_t left) {
-      const bool lead = p[0] >= 0x81 && p[0] <= 0xFC &&
-                        !(p[0] >= 0xA1 && p[0] <= 0xDF);
+      const bool lead =
+          p[0] >= 0x81 && p[0] <= 0xFC && !(p[0] >= 0xA1 && p[0] <= 0xDF);
       return lead && left > 1 ? size_t(2) : size_t(1);
     });
   }

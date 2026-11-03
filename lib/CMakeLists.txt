@@ -114,6 +114,7 @@ target_link_libraries(kotonoha_imgui PUBLIC SDL3::SDL3)
 
 add_library(KotonohaEngine SHARED
     src/core/AssetProvider.cpp
+    src/core/AssetOverlay.cpp
     src/core/Clock.cpp
     src/core/CommandLine.cpp
     src/core/DiscImage.cpp
@@ -135,12 +136,16 @@ add_library(KotonohaEngine SHARED
     src/componentes/SettingsMenu.cpp
     src/componentes/SplashScreen.cpp
     src/componentes/SubtitleScene.cpp
+    src/componentes/TextInputForm.cpp
     src/componentes/TextInputDialog.cpp
     src/componentes/VNBacklog.cpp
     src/componentes/VNManager.cpp
     src/componentes/VNSave.cpp
     src/componentes/VNSaveMenu.cpp
     src/componentes/VNTextBox.cpp
+    src/events/BackAction.cpp
+    src/events/BacklogEvents.cpp
+    src/events/InputActions.cpp
     src/debug/DebugOverlay.cpp
     src/debug/ImGuiTheme.cpp
     src/localization/Encoding.cpp
@@ -158,13 +163,13 @@ add_library(KotonohaEngine SHARED
     src/script/Timeline.cpp
     src/script/TimelinePlayer.cpp
     src/script/KtrfScript.cpp
-    src/parsers/Ktrf.c
-    src/parsers/KtrfTyped.c
-    src/parsers/Ors.c
+    src/parsers/Ktrf.cpp
+    src/parsers/KtrfTyped.cpp
+    src/parsers/Ors.cpp
     src/parsers/AssStyle.cpp
-    src/routing/KtrfRuntime.c
-    src/routing/KtrfRouter.c
-    src/routing/KtrfAdapter.c
+    src/routing/KtrfRuntime.cpp
+    src/routing/KtrfRouter.cpp
+    src/routing/KtrfAdapter.cpp
 )
 add_library(Kotonoha::Engine ALIAS KotonohaEngine)
 add_library(kotonoha ALIAS KotonohaEngine)

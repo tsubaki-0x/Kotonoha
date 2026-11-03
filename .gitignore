@@ -687,8 +687,6 @@ games-assets/*
 *.ini
 .vscode
 .cxx
-Xcode/vcpkg/*
-
 /build/
 /vcpkg_installed/
 /.cache/

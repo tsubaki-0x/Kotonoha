@@ -26,8 +26,10 @@ protected:
   bool active = false;
   std::size_t selected = 0;
   float scroll = 0;
+  ScrollGesture scrollGesture;
   // Area the options scroll and receive clicks in.
   virtual SDL_FRect listArea() const { return {230, 190, 820, 440}; }
+  virtual float scrollInputHeight() const { return 720; }
   virtual void layout();
   virtual void select(std::size_t index);
   virtual void openMenu();
@@ -42,9 +44,10 @@ public:
                       std::vector<ChoiceOption> choices,
                       std::function<void(int, const std::string &)> callback);
 
-  virtual void setQuestion(const std::string &question,
-                   const std::vector<ChoiceOption> &choices,
-                   std::function<void(int, const std::string &)> callback) {
+  virtual void
+  setQuestion(const std::string &question,
+              const std::vector<ChoiceOption> &choices,
+              std::function<void(int, const std::string &)> callback) {
     if (choices.empty())
       throw std::invalid_argument(
           "Choice component requires at least one option");
@@ -67,6 +70,8 @@ public:
   }
   bool capturesInput() const override { return active; }
 
+  void translationChanged(const std::string &, const std::string &,
+                          const std::string &) override;
   void onEvent(EventRef event) override;
   void update() override;
   void render(RendererRef renderer, float scale) override;

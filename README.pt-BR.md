@@ -101,7 +101,7 @@ export VCPKG_ROOT=/caminho/para/vcpkg
 cmake -S . -B build \
   -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
   -DVCPKG_TARGET_TRIPLET=arm64-osx-dynamic \
-  -DVCPKG_INSTALLED_DIR="$PWD/build/ios-deps/macos"
+  -DVCPKG_INSTALLED_DIR="$PWD/build/iOS-deps/macos"
 cmake --build build
 ctest --test-dir build --output-on-failure
 ./build/games/example/Kotonoha
@@ -248,8 +248,9 @@ apps separados. `KotonohaIOSSmoke` verifica CP932 e glifos SVG no simulador.
 O executavel demonstrativo chama-se `Kotonoha`; seu namespace C++ e
 `KotonohaExample`, separado do motor. A opcao CMake
 `KOTONOHA_BUILD_SCHOOL_DAYS` controla o port School Days.
+`KOTONOHA_BUILD_AIR` controla o [port inicial de AIR Standard Edition](games/air/README.md), que lê os dados originais com `--air DIRETORIO`.
 Depois de alterar os fontes da biblioteca School Days, execute manualmente
-`python3 Xcode/UpdateGameTargets.py` para sincronizar o target nativo sem
+`ruby Xcode/UpdateGameTargets.rb` para sincronizar o target nativo sem
 remover os recursos e modulos Python existentes.
 `DdlcIOSScriptSmoke` exercita CPython e os scripts reais no simulador.
 O deployment target e iOS 15; MetalFX exige iOS 16 ou superior e nao esta
@@ -261,9 +262,9 @@ prepare os pacotes estaticos para dispositivo e simulador Apple Silicon:
 ```sh
 export VCPKG_ROOT=/caminho/para/vcpkg
 "$VCPKG_ROOT/vcpkg" install --x-manifest-root="$PWD" \
-  --x-install-root="$PWD/vcpkg_installed" --triplet=arm64-ios
+  --x-install-root="$PWD/build/iOS-deps/ios" --triplet=arm64-ios
 "$VCPKG_ROOT/vcpkg" install --x-manifest-root="$PWD" \
-  --x-install-root="$PWD/build/ios-deps/simulator" --triplet=arm64-ios-simulator
+  --x-install-root="$PWD/build/iOS-deps/simulator" --triplet=arm64-ios-simulator
 open Xcode/Kotonoha.xcodeproj
 # Ou, sem assinatura, apenas para verificar a compilacao:
 xcodebuild -project Xcode/Kotonoha.xcodeproj -scheme Kotonoha \
@@ -294,11 +295,11 @@ do projeto BeeWare, com as bibliotecas padrao e extensoes para iOS. Exemplo
 da versao testada (o SHA-256 e publicado na release):
 
 ```sh
-mkdir -p build/ios-deps/python
+mkdir -p build/iOS-deps/python
 curl -fL https://github.com/beeware/Python-Apple-support/releases/download/3.15-b3/Python-3.15-iOS-support.b3.tar.gz \
-  -o build/ios-deps/python/Python-iOS.tar.gz
-echo '429080dcfab3778b75bbc6548cbfd754dc943cfc6092a92b72022541ff3212a0  build/ios-deps/python/Python-iOS.tar.gz' | shasum -a 256 -c -
-python3 tools/PrepareApplePython.py --archive build/ios-deps/python/Python-iOS.tar.gz
+  -o build/iOS-deps/python/Python-iOS.tar.gz
+echo '429080dcfab3778b75bbc6548cbfd754dc943cfc6092a92b72022541ff3212a0  build/iOS-deps/python/Python-iOS.tar.gz' | shasum -a 256 -c -
+python3 tools/PrepareApplePython.py --archive build/iOS-deps/python/Python-iOS.tar.gz
 ```
 
 O preparo externo converte as extensoes em frameworks e cria os marcadores
@@ -452,6 +453,14 @@ hooks `protected` virtuais que um jogo sobrescreve:
 | `VNBacklog` | `addEntry`, `clear`, `open`/`close`/`isVisible`, `renderFrame`, `renderEntries` |
 
 `lib/tests/ComponentHooksTests.cpp` verifica o despacho de cada hook.
+
+## Amagami (PS2) — prólogo jogável
+
+O [port de Amagami](games/amagami/PORT_STATUS.md) lê a ISO japonesa
+(`SLPS_259.18`) com `--amagami DISC.iso`. Compile o alvo `Amagami`;
+`KOTONOHA_BUILD_AMAGAMI` habilita o port. Sem caminho, abre o seletor de disco.
+O prólogo tem diálogo, escolhas, cenários, sprites, áudio e save/load.
+O calendário e as rotas posteriores ainda não formam um jogo completo.
 
 ## Zero no Tsukaima (PS2)
 
@@ -1295,3 +1304,19 @@ Eventos tambem usam o espaco de cada cena. `handleEvent` pode retornar true
 para consumir a entrada, e `capturesInput()` permite modais. Cliques nas
 barras nao avancam a novel, mas podem acionar elementos Screen. A area de
 entrada IME e convertida para coordenadas da janela apos resize/HiDPI.
+
+### Summer Radish Vacation!! 1.1 (em desenvolvimento)
+
+O novo alvo `SummerRadish` lê os cinco pacotes `.cmp` originais diretamente da
+pasta do disco. Compile com `cmake --build build --target SummerRadish` e execute:
+
+```sh
+build/games/summer-radish-vacation/SummerRadish.app/Contents/MacOS/SummerRadish \
+  --summer "/Volumes/Server/data3/SRV_1_1"
+```
+
+O port ainda não tem equivalência 1:1 comprovada. Recursos implementados,
+evidências da descompilação com REA, testes e pendências estão em
+[PORT_STATUS.md](games/summer-radish-vacation/PORT_STATUS.md).
+
+Shared overlay, gesture and live translation behavior: [documentation](docs/ASSET_OVERLAYS.md).

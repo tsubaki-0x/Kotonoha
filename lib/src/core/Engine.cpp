@@ -1,9 +1,14 @@
+#include <Kotonoha/componentes/InGameMenu.hpp>
 #include <Kotonoha/componentes/SettingsMenu.hpp>
+#include <Kotonoha/componentes/VNBacklog.hpp>
 #include <Kotonoha/componentes/VNManager.hpp>
+#include <Kotonoha/componentes/VNTextBox.hpp>
+#include <Kotonoha/core/Config.hpp>
 #include <Kotonoha/core/Engine.hpp>
 #include <Kotonoha/core/FileSystem.hpp>
 #include <Kotonoha/core/UI.hpp>
 #include <Kotonoha/debug/DebugOverlay.hpp>
+#include <Kotonoha/events/BackAction.hpp>
 #include <Kotonoha/mcp/MCPServer.hpp>
 #include <Kotonoha/mobile/AndroidDisplay.hpp>
 #include <Kotonoha/script/TimelinePlayer.hpp>
@@ -26,7 +31,8 @@ std::vector<DebugNode> Engine::debugNodes() {
     const auto &node = manager.getScriptNode(id);
     DebugNode item{std::to_string(id), node.name, {}};
     for (const auto &asset : {node.backgroundAsset, node.characterAsset})
-      if (!asset.empty()) item.assets.push_back(asset);
+      if (!asset.empty())
+        item.assets.push_back(asset);
     for (const auto &cue : node.timeline.cues)
       if ((cue.type == CueType::Video || cue.type == CueType::Audio) &&
           !cue.value.empty())
@@ -45,7 +51,8 @@ void Engine::debugJumpToNode(const std::string &id) {
     runtime.debugJumpToNode(id);
   } else {
     int number = -1;
-    const auto parsed = std::from_chars(id.data(), id.data() + id.size(), number);
+    const auto parsed =
+        std::from_chars(id.data(), id.data() + id.size(), number);
     if (parsed.ec != std::errc{} || parsed.ptr != id.data() + id.size())
       throw std::invalid_argument("Invalid script node ID");
     GetVNManagerRuntime(*this).debugJumpToNode(number);
@@ -59,7 +66,8 @@ void Engine::loadKtrf(const std::string &path) {
     runtime.loadKtrf(path);
   } else {
     if (!runtime.debugNodes().empty())
-      throw std::logic_error("This game's native scripts do not use the VN KTRF profile");
+      throw std::logic_error(
+          "This game's native scripts do not use the VN KTRF profile");
     if (runtime.GetState() != GameState::Gameplay)
       throw std::logic_error("Start gameplay before loading KTRF");
     GetVNManagerRuntime(*this).loadKtrf(path);
@@ -72,13 +80,29 @@ void Engine::dumpKtrf(const std::string &path) {
     runtime.dumpKtrf(path);
   else {
     if (!runtime.debugNodes().empty())
-      throw std::logic_error("This game's native scripts do not use the VN KTRF profile");
+      throw std::logic_error(
+          "This game's native scripts do not use the VN KTRF profile");
     GetVNManagerRuntime(*this).dumpKtrf(path);
   }
   SDL_LogInfo(LogCore, "Dumped KTRF: %s", path.c_str());
 }
 
+std::string EngineOptions::assetOverlayDirectory() const {
+  if (assetOverlaySpecified)
+    return assetOverlayPath;
+  if (!assetOverlayPath.empty())
+    return assetOverlayPath;
+  if (!settings.assetOverlayPath.empty())
+    return settings.assetOverlayPath;
+  if (!settingsPath.empty() && std::filesystem::exists(settingsPath)) {
+    auto loaded = EngineSettings::load(settingsPath).assetOverlayPath;
+    if (!loaded.empty())
+      return loaded;
+  }
+  return {};
+}
 SDLSession::SDLSession(const Runtime &runtime) {
+  SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
   if (!SDL_SetAppMetadata(runtime.name.c_str(), runtime.version.c_str(),
                           runtime.identify.c_str()) ||
       !SDL_Init(SDL_INIT_AUDIO | SDL_INIT_VIDEO | SDL_INIT_EVENTS))
@@ -96,7 +120,7 @@ Engine::Engine(Runtime &run, EngineOptions options)
 #else
                                   std::filesystem::path{}
 #endif
-                                  )),
+                                      )),
       settings(options.settings), settingsPath(options.settingsPath) {
   if (!options.subtitleStylePath.empty())
     subtitleStyle = AssStyle::load(options.subtitleStylePath);
@@ -127,10 +151,20 @@ Engine::Engine(Runtime &run, EngineOptions options)
   }
   if (!options.translationPath.empty())
     translation.load(options.translationPath);
+  SDL_WindowFlags graphicsFlags = 0;
+  if (isMobilePlatform() && settings.upscaling.backend == UpscaleBackend::MPV &&
+      options.rendererOverride.empty())
+    settings.renderer = "opengles2";
+  if (settings.renderer == "opengles2") {
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    graphicsFlags = SDL_WINDOW_OPENGL;
+  }
   window.reset(
       SDL_CreateWindow(runtime.name.c_str(), settings.width, settings.height,
                        (settings.resizable ? SDL_WINDOW_RESIZABLE : 0) |
-                           SDL_WINDOW_HIGH_PIXEL_DENSITY));
+                           SDL_WINDOW_HIGH_PIXEL_DENSITY | graphicsFlags));
   if (!window)
     throw std::runtime_error(SDL_GetError());
   renderer.reset(SDL_CreateRenderer(
@@ -155,10 +189,17 @@ Engine::Engine(Runtime &run, EngineOptions options)
     SDL_SetLogPriority(category, settings.logPriority);
   settingsMenu = std::make_unique<SettingsMenu>(*this);
   ui = std::make_unique<UI>(settings.fontPath);
+  vnUI = std::make_unique<UI>(
+      settings.vnFontPath.empty() ? settings.fontPath : settings.vnFontPath);
+  audio.setUserVolumes(settings.channelVolumes);
   timeline = std::make_unique<TimelinePlayer>(*this);
   debug = std::make_unique<DebugOverlay>(*this);
   configureRenderSpace(RenderSpace::Novel);
   runtime.init(*this);
+  if (!options.dumpTranslationPath.empty()) {
+    dumpTranslation(options.dumpTranslationPath);
+    translationDumpComplete = true;
+  }
   if (options.enableMCP)
     mcp = std::make_unique<MCPServer>(*this, options.mcpFileRoot);
   frameClock.reset();
@@ -176,71 +217,74 @@ Engine::~Engine() {
   }
 }
 
-void Engine::applyWindowSettings(const EngineSettings &value) {
-  int count = 0;
-  SDL_DisplayID *raw = SDL_GetDisplays(&count);
-  std::unique_ptr<SDL_DisplayID, decltype(&SDL_free)> displays(raw, SDL_free);
-  if (!displays || value.display >= count)
-    throw std::runtime_error("Configured display is unavailable");
-  const auto display = displays.get()[value.display];
+void Engine::applyWindowSettings(const EngineSettings &value, bool geometry) {
   const auto check = [](bool result, const char *operation) {
     if (!result)
       throw std::runtime_error(std::string(operation) + ": " + SDL_GetError());
   };
-  const auto flags = SDL_GetWindowFlags(window.get());
-  const bool fullscreen = flags & SDL_WINDOW_FULLSCREEN;
-  const bool wantsFullscreen = value.mode != WindowMode::Windowed;
-  SDL_DisplayMode exclusive{};
-  const SDL_DisplayMode *desiredMode = nullptr;
-  if (value.mode == WindowMode::Exclusive) {
-    if (value.fullscreenWidth > 0) {
-      check(SDL_GetClosestFullscreenDisplayMode(
-                display, value.fullscreenWidth, value.fullscreenHeight,
-                value.refreshRate, true, &exclusive),
-            "Find fullscreen mode");
-    } else {
-      const auto *desktop = SDL_GetDesktopDisplayMode(display);
-      if (!desktop)
-        throw std::runtime_error(SDL_GetError());
-      exclusive = *desktop;
+  if (geometry) {
+    int count = 0;
+    SDL_DisplayID *raw = SDL_GetDisplays(&count);
+    std::unique_ptr<SDL_DisplayID, decltype(&SDL_free)> displays(raw, SDL_free);
+    if (!displays || value.display >= count)
+      throw std::runtime_error("Configured display is unavailable");
+    const auto display = displays.get()[value.display];
+    const auto flags = SDL_GetWindowFlags(window.get());
+    const bool fullscreen = flags & SDL_WINDOW_FULLSCREEN;
+    const bool wantsFullscreen = value.mode != WindowMode::Windowed;
+    SDL_DisplayMode exclusive{};
+    const SDL_DisplayMode *desiredMode = nullptr;
+    if (value.mode == WindowMode::Exclusive) {
+      if (value.fullscreenWidth > 0) {
+        check(SDL_GetClosestFullscreenDisplayMode(
+                  display, value.fullscreenWidth, value.fullscreenHeight,
+                  value.refreshRate, true, &exclusive),
+              "Find fullscreen mode");
+      } else {
+        const auto *desktop = SDL_GetDesktopDisplayMode(display);
+        if (!desktop)
+          throw std::runtime_error(SDL_GetError());
+        exclusive = *desktop;
+      }
+      desiredMode = &exclusive;
     }
-    desiredMode = &exclusive;
-  }
-  const auto *activeMode = SDL_GetWindowFullscreenMode(window.get());
-  const bool sameMode =
-      (!desiredMode && !activeMode) ||
-      (desiredMode && activeMode && desiredMode->w == activeMode->w &&
-       desiredMode->h == activeMode->h &&
-       std::abs(desiredMode->refresh_rate - activeMode->refresh_rate) <
-           0.001f &&
-       desiredMode->pixel_density == activeMode->pixel_density);
-  const bool modeChanged =
-      fullscreen != wantsFullscreen ||
-      (wantsFullscreen &&
-       (SDL_GetDisplayForWindow(window.get()) != display || !sameMode));
-  if (fullscreen && modeChanged) {
-    check(SDL_SetWindowFullscreen(window.get(), false), "Leave fullscreen");
-    check(SDL_SyncWindow(window.get()), "Wait for windowed mode");
-  }
-  if (bool(flags & SDL_WINDOW_RESIZABLE) != value.resizable)
-    check(SDL_SetWindowResizable(window.get(), value.resizable),
-          "Set resizable");
-  int width = 0, height = 0;
-  check(SDL_GetWindowSize(window.get(), &width, &height), "Get window size");
-  if ((!fullscreen || modeChanged) &&
-      (width != value.width || height != value.height))
-    check(SDL_SetWindowSize(window.get(), value.width, value.height),
-          "Set window size");
-  if (SDL_GetDisplayForWindow(window.get()) != display)
-    check(SDL_SetWindowPosition(window.get(),
-                                SDL_WINDOWPOS_CENTERED_DISPLAY(display),
-                                SDL_WINDOWPOS_CENTERED_DISPLAY(display)),
-          "Move window to display");
-  if (wantsFullscreen && modeChanged) {
-    check(SDL_SetWindowFullscreenMode(window.get(), desiredMode),
-          "Set fullscreen mode");
-    check(SDL_SetWindowFullscreen(window.get(), true), "Enter fullscreen");
-    check(SDL_SyncWindow(window.get()), "Wait for fullscreen mode");
+    const auto *activeMode = SDL_GetWindowFullscreenMode(window.get());
+    const bool sameMode =
+        (!desiredMode && !activeMode) ||
+        (desiredMode && activeMode && desiredMode->w == activeMode->w &&
+         desiredMode->h == activeMode->h &&
+         std::abs(desiredMode->refresh_rate - activeMode->refresh_rate) <
+             0.001f &&
+         desiredMode->pixel_density == activeMode->pixel_density);
+    const bool modeChanged =
+        fullscreen != wantsFullscreen ||
+        (wantsFullscreen &&
+         (SDL_GetDisplayForWindow(window.get()) != display || !sameMode));
+    if (fullscreen && modeChanged) {
+      check(SDL_SetWindowFullscreen(window.get(), false), "Leave fullscreen");
+      check(SDL_SyncWindow(window.get()), "Wait for windowed mode");
+    }
+    if (bool(flags & SDL_WINDOW_RESIZABLE) != value.resizable)
+      check(SDL_SetWindowResizable(window.get(), value.resizable),
+            "Set resizable");
+    int width = 0, height = 0;
+    check(SDL_GetWindowSize(window.get(), &width, &height), "Get window size");
+    if ((!fullscreen || modeChanged) &&
+        (width != value.width || height != value.height) &&
+        canChangeDisplaySize())
+      check(SDL_SetWindowSize(window.get(), value.width, value.height),
+            "Set window size");
+    if (SDL_GetDisplayForWindow(window.get()) != display)
+      check(SDL_SetWindowPosition(window.get(),
+                                  SDL_WINDOWPOS_CENTERED_DISPLAY(display),
+                                  SDL_WINDOWPOS_CENTERED_DISPLAY(display)),
+            "Move window to display");
+    if (wantsFullscreen && modeChanged) {
+      check(SDL_SetWindowFullscreenMode(window.get(), desiredMode),
+            "Set fullscreen mode");
+      check(SDL_SetWindowFullscreen(window.get(), true), "Enter fullscreen");
+      check(SDL_SyncWindow(window.get()), "Wait for fullscreen mode");
+    }
   }
   int vsync = 0;
   check(SDL_GetRenderVSync(renderer.get(), &vsync), "Get VSync");
@@ -272,12 +316,26 @@ void Engine::applySettings(const EngineSettings &value, bool persist) {
   if (!upscaler->supports(value.upscaling.backend))
     throw std::invalid_argument(
         "Upscaler is unavailable for the current renderer");
+  std::unique_ptr<UI> nextVNUI;
+  if (value.vnFontPath != settings.vnFontPath ||
+      value.fontPath != settings.fontPath)
+    nextVNUI = std::make_unique<UI>(
+        value.vnFontPath.empty() ? value.fontPath : value.vnFontPath);
   const auto previous = settings;
+  const bool geometryChanged =
+      value.width != previous.width || value.height != previous.height ||
+      value.display != previous.display || value.mode != previous.mode ||
+      value.resizable != previous.resizable ||
+      value.fullscreenWidth != previous.fullscreenWidth ||
+      value.fullscreenHeight != previous.fullscreenHeight ||
+      value.refreshRate != previous.refreshRate;
   try {
-    applyWindowSettings(value);
+    if (geometryChanged || value.vsync != previous.vsync)
+      applyWindowSettings(value, geometryChanged);
     upscaler->configure(value.upscaling);
     audio.setMasterVolume(value.masterVolume);
     audio.setMasterMuted(value.masterMuted);
+    audio.setUserVolumes(value.channelVolumes);
     settings = value;
     if (persist)
       saveSettings();
@@ -285,16 +343,20 @@ void Engine::applySettings(const EngineSettings &value, bool persist) {
     const std::string failure = error.what();
     settings = previous;
     try {
-      applyWindowSettings(previous);
+      if (geometryChanged || value.vsync != previous.vsync)
+        applyWindowSettings(previous, geometryChanged);
       upscaler->configure(previous.upscaling);
       audio.setMasterVolume(previous.masterVolume);
       audio.setMasterMuted(previous.masterMuted);
+      audio.setUserVolumes(previous.channelVolumes);
     } catch (const std::exception &rollback) {
       throw std::runtime_error(
           failure + "; settings rollback failed: " + rollback.what());
     }
     throw;
   }
+  if (nextVNUI)
+    vnUI = std::move(nextVNUI);
   for (int category : {LogCore, LogConfig, LogMedia, LogUpscaler, LogUI})
     SDL_SetLogPriority(category, settings.logPriority);
   frameClock.reset();
@@ -354,9 +416,29 @@ void Engine::advanceTimeline(double seconds) {
   frameClock.reset();
 }
 
+void Engine::setTranslation(const std::string &section,
+                            const std::string &original,
+                            const std::string &translated) {
+  auto &dictionary = translation.mutableSections()[section];
+  auto found = dictionary.find(original);
+  auto previous = found == dictionary.end() ? original : found->second;
+  if (previous == translated)
+    return;
+  dictionary[original] = translated;
+  const int route = runtime.translationRoute();
+  if (route >= 0 && section != "nodo" && section != std::to_string(route))
+    return;
+  for (auto *scene : runtime.GetActiveScenes())
+    if (scene)
+      scene->translationChanged(original, previous,
+                                translated.empty() ? original : translated);
+}
+
 void Engine::SetAssetProvider(std::shared_ptr<AssetProvider> provider) {
   if (!provider)
     throw std::invalid_argument("Asset provider is required");
+  if (!settings.assetOverlayPath.empty())
+    provider->setOverlay(settings.assetOverlayPath);
   assets = std::move(provider);
   SDL_LogInfo(LogCore, "Asset provider: %s", assets->name().c_str());
 }
@@ -392,13 +474,33 @@ void Engine::configureRenderSpace(RenderSpace space) {
   if (!SDL_GetRenderLogicalPresentationRect(renderer.get(), &presentation))
     throw std::runtime_error(SDL_GetError());
   ui->setPixelDensity(presentation.w / width);
+  vnUI->setPixelDensity(presentation.w / width);
 }
 
 SDL_AppResult Engine::Event(EventPtr event) {
   if (!event)
     return SDL_APP_CONTINUE;
+  inputActions.process(*event);
+  SDL_Event pointer{};
+  const bool nativeTouch = runtime.continuousTouch() || settingsMenu->isOpen();
+  const bool pointerEvent = touchPointer.translate(*event, *window, pointer);
+  bool translate = nativeTouch && pointerEvent;
+  if (nativeTouch && event->type >= SDL_EVENT_FINGER_DOWN &&
+      event->type <= SDL_EVENT_FINGER_CANCELED &&
+      (inputActions.back(*event) || inputActions.backlog(*event)))
+    translate = touchPointer.cancel(*window, pointer) || translate;
+  const auto result = dispatchEvent(event);
+  if (translate && result == SDL_APP_CONTINUE)
+    return dispatchEvent(&pointer);
+  return result;
+}
+SDL_AppResult Engine::dispatchEvent(EventPtr event) {
+  if (!event)
+    return SDL_APP_CONTINUE;
   if (event->type == SDL_EVENT_QUIT)
     return SDL_APP_SUCCESS;
+  const bool synthesizeTouch =
+      !runtime.continuousTouch() && !settingsMenu->isOpen();
   runtime.devInputProcessed(*event);
   synchronizeTimeline();
   const bool debugConsumed = debug->handleEvent(*event);
@@ -422,6 +524,7 @@ SDL_AppResult Engine::Event(EventPtr event) {
       screenCapturedMouseButtons &= ~buttonMask;
     }
   }
+  const bool touchTap = inputActions.tap();
   configureRenderSpace(RenderSpace::Novel);
   if (event->type == SDL_EVENT_KEY_DOWN && !event->key.repeat &&
       (event->key.key == SDLK_F11 ||
@@ -441,12 +544,39 @@ SDL_AppResult Engine::Event(EventPtr event) {
   SDL_Event logical = *event;
   if (!SDL_ConvertEventToRenderCoordinates(renderer.get(), &logical))
     throw std::runtime_error(SDL_GetError());
-  const bool mouseButton = logical.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
-                           logical.type == SDL_EVENT_MOUSE_BUTTON_UP;
   const SDL_Point view = runtime.viewport();
+  const auto frame = UI::designFrame(view);
+  SDL_Event framed = UI::toFrame(logical, frame);
+
+  // Manual mobile menu button click detection
+  const SDL_FRect mobileMenuButton{16, 16, 76, 36};
+  if (isMobilePlatform() && runtime.GetState() == GameState::Gameplay &&
+      !settingsMenu->isOpen() && !GetInGameMenuRuntime(*this).IsOpen()) {
+    if (logical.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+        logical.button.button == SDL_BUTTON_LEFT) {
+      const SDL_FPoint pt{framed.button.x, framed.button.y};
+      if (SDL_PointInRectFloat(&pt, &mobileMenuButton)) {
+        GetInGameMenuRuntime(*this).open();
+        return SDL_APP_CONTINUE;
+      }
+    } else if (logical.type == SDL_EVENT_FINGER_DOWN) {
+      const SDL_FPoint pt{logical.tfinger.x * view.x,
+                          logical.tfinger.y * view.y};
+      const SDL_FPoint designPt{(pt.x - frame.x) / frame.scale,
+                                (pt.y - frame.y) / frame.scale};
+      if (SDL_PointInRectFloat(&designPt, &mobileMenuButton)) {
+        GetInGameMenuRuntime(*this).open();
+        return SDL_APP_CONTINUE;
+      }
+    }
+  }
+
+  if (!consumed && !settingsMenu->isOpen() && HandleNavigation(*this, logical))
+    return SDL_APP_CONTINUE;
   const bool outsideNovel =
-      mouseButton && (logical.button.x < 0 || logical.button.x >= view.x ||
-                      logical.button.y < 0 || logical.button.y >= view.y);
+      logical.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+      (logical.button.x < 0 || logical.button.x >= view.x ||
+       logical.button.y < 0 || logical.button.y >= view.y);
   if (settingsMenu->isOpen())
     settingsMenu->onEvent(UI::toFrame(logical, UI::designFrame(view)));
   else if (!consumed && !outsideNovel)
@@ -455,10 +585,29 @@ SDL_AppResult Engine::Event(EventPtr event) {
   timeline->setPaused(isStoryPaused());
   if (wasPaused != timeline->isPaused())
     frameClock.reset();
+  if (touchTap && !consumed && synthesizeTouch &&
+      event->type == SDL_EVENT_FINGER_UP) {
+    int w = 0, h = 0;
+    SDL_GetWindowSize(window.get(), &w, &h);
+    SDL_Event tap{};
+    tap.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+    tap.button.windowID = SDL_GetWindowID(window.get());
+    tap.button.which = SDL_TOUCH_MOUSEID;
+    tap.button.button = SDL_BUTTON_LEFT;
+    tap.button.down = true;
+    tap.button.x = event->tfinger.x * w;
+    tap.button.y = event->tfinger.y * h;
+    Event(&tap);
+    tap.type = SDL_EVENT_MOUSE_BUTTON_UP;
+    tap.button.down = false;
+    Event(&tap);
+  }
   return SDL_APP_CONTINUE;
 }
 
 SDL_AppResult Engine::Iterate() {
+  if (translationDumpComplete)
+    return SDL_APP_SUCCESS;
   configureRenderSpace(RenderSpace::Novel);
   synchronizeTimeline();
   if (mcp && !mcp->pump())

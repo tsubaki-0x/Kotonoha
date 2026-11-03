@@ -1,3 +1,4 @@
+#include <Kotonoha/componentes/SplashChainloader.hpp>
 #include <Kotonoha/componentes/SplashScreen.hpp>
 #include <Kotonoha/core/Engine.hpp>
 #include <Kotonoha/core/FileSystem.hpp>
@@ -5,6 +6,8 @@
 #include <Kotonoha/core/UI.hpp>
 #include <Kotonoha/script/TimelinePlayer.hpp>
 
+#include <Kotonoha/events/InputActions.hpp>
+#include <charconv>
 #include <stdexcept>
 
 namespace Kotonoha {
@@ -15,6 +18,26 @@ Runtime::Runtime(std::string name, std::string version, std::string identify)
 
 Runtime::~Runtime() = default;
 
+int Runtime::translationRoute() const {
+  auto node = debugNode();
+  size_t start = 0;
+  bool tagged = false;
+  for (auto tag : {" | scene ", " | route "})
+    if (auto pos = node.find(tag); pos != node.npos) {
+      start = pos + std::char_traits<char>::length(tag);
+      tagged = true;
+      break;
+    }
+  int id = -1;
+  auto parsed =
+      std::from_chars(node.data() + start, node.data() + node.size(), id);
+  return parsed.ec == std::errc{} && id >= 0 &&
+                 (tagged || parsed.ptr == node.data() + node.size() ||
+                  *parsed.ptr == ':')
+             ? id
+             : -1;
+}
+
 void Runtime::saveGame(const std::string &) {
   throw std::logic_error("This game has not implemented saveGame");
 }
@@ -24,6 +47,7 @@ void Runtime::loadGame(const std::string &) {
 }
 
 void Runtime::init(Engine &engine) {
+  splashEngine = &engine;
   engine.GetTimeline().stop();
   if (SDL_TextInputActive(&engine.GetWindow()) &&
       !SDL_StopTextInput(&engine.GetWindow()))
@@ -54,7 +78,8 @@ SDL_FPoint Runtime::sceneSize(const Scene &scene) const {
   return {static_cast<float>(view.x), static_cast<float>(view.y)};
 }
 
-void Runtime::renderScene(Scene &scene, RendererRef renderer, float scale) const {
+void Runtime::renderScene(Scene &scene, RendererRef renderer,
+                          float scale) const {
   const auto frame = UI::fit(sceneSize(scene), viewport());
   UI::FrameScope scope(renderer, frame);
   scene.render(renderer, scale * frame.scale);
@@ -67,16 +92,21 @@ bool Runtime::dispatchEvent(Scene &scene, EventRef event) const {
 
 void Runtime::initGlobal(Engine &engine) {}
 std::vector<std::filesystem::path> Runtime::splashPictures() const {
-  if (auto splash = FileResolver::findEngineAsset("SPLASH.PNG"))
-    return {*splash};
+  for (const char *name :
+       {"SPLASH.MP4", "SPLASH.MOV", "SPLASH.WEBM", "SPLASH.PNG"}) {
+    if (auto splash = FileResolver::findEngineAsset(name))
+      return {*splash};
+  }
   return {};
 }
 
 void Runtime::initSplash(Engine &engine) {
   splashEngine = &engine;
-  if (!splash)
-    splash = std::make_unique<SplashScreen>(engine, splashPictures());
-  else
+  if (!splash) {
+    std::vector<std::unique_ptr<Scene>> scenes;
+    scenes.push_back(std::make_unique<SplashScreen>(engine, splashPictures()));
+    splash = std::make_unique<SplashChainloader>(engine, std::move(scenes));
+  } else
     splash->restart();
   AddScene(splash.get(), GameState::Splash);
 }
@@ -142,6 +172,8 @@ void Runtime::update() {
 }
 
 void Runtime::onEvent(EventRef event) {
+  if (splashEngine && HandleNavigation(*splashEngine, event))
+    return;
   const auto activeScenes = GetActiveScenes();
   for (auto it = activeScenes.rbegin(); it != activeScenes.rend(); ++it) {
     if (*it && (*it)->renderSpace() == RenderSpace::Novel &&

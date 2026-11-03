@@ -1,3 +1,5 @@
+import java.security.MessageDigest
+
 plugins {
     id 'com.android.application'
 }
@@ -64,12 +66,18 @@ android {
                 externalNativeBuild {
                     cmake {
                         arguments "-DKOTONOHA_ANDROID_GAME=${game[0]}",
-                                  "-DVCPKG_INSTALLED_DIR=${rootProject.projectDir}/build/vcpkg${flavor == 'dokiDoki' ? '-python' : ''}",
-                                  "-DVCPKG_MANIFEST_FEATURES=${flavor == 'dokiDoki' ? 'android-python' : ''}"
+                                "-DVCPKG_INSTALLED_DIR=${rootProject.projectDir}/build/vcpkg${flavor == 'dokiDoki' ? '-python' : ''}"
                         targets game[1]
                     }
                 }
             }
+        }
+    }
+    buildTypes {
+        release {
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'),
+                    'proguard-rules.pro',
+                    file("${sdlRoot}/android-project/app/proguard-rules.pro")
         }
     }
     buildFeatures { buildConfig true }
@@ -120,7 +128,7 @@ android.applicationVariants.all { variant ->
                     into new File(staged.get().asFile, 'python/lib')
                 }
             }
-            def digest = java.security.MessageDigest.getInstance('SHA-256')
+            def digest = MessageDigest.getInstance('SHA-256')
             fileTree(staged).files.sort { it.path }.each { file ->
                 digest.update(file.toPath().toString().replace(staged.get().asFile.path, '').getBytes('UTF-8'))
                 file.withInputStream { stream ->

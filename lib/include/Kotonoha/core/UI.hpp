@@ -2,8 +2,10 @@
 
 #include <Kotonoha/core/SDL.hpp>
 #include <SDL3_ttf/SDL_ttf.h>
+#include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace Kotonoha {
 
@@ -15,7 +17,9 @@ class UI {
     TexturePtr texture;
     float width = 0, height = 0;
   };
-  SDLHandle<TTF_Font, TTF_CloseFont> font;
+  TTFSession ttfSession;
+  std::vector<uint8_t> fontData;
+  FontPtr font;
   std::unordered_map<std::string, CachedText> cache;
   float density = 1;
 
@@ -26,14 +30,23 @@ public:
   UI &operator=(const UI &) = delete;
   void setPixelDensity(float value);
   float pixelDensity() const { return density; }
+  const char *fontFamily() const { return TTF_GetFontFamilyName(font.get()); }
   float rasterFontSize() const { return TTF_GetFontSize(font.get()); }
   static SDL_FPoint viewSize(RendererRef renderer);
+  static float rasterDensity(RendererRef renderer);
   float text(RendererRef renderer, const std::string &value, float x, float y,
              float width, SDL_Color color = {240, 240, 245, 255});
+  float textSized(RendererRef renderer, const std::string &value, float x,
+                  float y, float width, float fontSize,
+                  SDL_Color color = {240, 240, 245, 255});
+  SDL_FPoint measureSized(const std::string &value, float width,
+                          float fontSize) const;
   float textHeight(RendererRef renderer, const std::string &value, float width);
   SDL_FPoint textSize(const std::string &value, float width) const;
   void panel(RendererRef renderer, SDL_FRect rect,
              SDL_Color color = {20, 23, 36, 235});
+  // Dim the complete game canvas, independently of a fitted menu viewport.
+  void backdrop(RendererRef renderer, SDL_Color color = {0, 0, 0, 160});
   void button(RendererRef renderer, SDL_FRect rect, const std::string &label,
               bool selected = false);
   static SDL_FRect centered(float width, float height);

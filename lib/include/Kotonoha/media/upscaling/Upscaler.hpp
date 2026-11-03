@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Kotonoha/core/SDL.hpp>
+#include <array>
 #include <string>
 #include <vector>
 
@@ -8,7 +9,28 @@ namespace Kotonoha {
 
 // Auto picks MetalFX on Metal, MPV on OpenGL and Linear otherwise.
 enum class UpscaleBackend { None, Linear, MPV, MetalFX, Auto };
-enum class UpscalePreset { Anime4K, ArtCNN, ArtCNNDenoise, ArtCNNLarge };
+enum class UpscalePreset {
+  Anime4K = 0,
+  Anime4KModeAHQ = Anime4K,
+  ArtCNN = 1,
+  ArtCNNDenoise = 2,
+  ArtCNNLarge = 3,
+  Anime4KModeBHQ = 4,
+  Anime4KModeCHQ,
+  Anime4KModeAAHQ,
+  Anime4KModeBBHQ,
+  Anime4KModeCAHQ,
+  Anime4KModeAFast,
+  Anime4KModeBFast,
+  Anime4KModeCFast,
+  Anime4KModeAAFast,
+  Anime4KModeBBFast,
+  Anime4KModeCAFast
+};
+const std::array<UpscalePreset, 15> &UpscalePresets();
+const char *UpscalePresetName(UpscalePreset preset);
+bool UpscalePresetIsAnime4K(UpscalePreset preset);
+std::vector<std::string> UpscalePresetShaderFiles(UpscalePreset preset);
 
 // factor is the on/off switch, as in Kotonoha: 1.0 disables upscaling (no
 // backend resources, linear SDL scaling), anything above 1.0 (up to 4.0)
@@ -17,7 +39,8 @@ struct UpscaleSettings {
   UpscaleBackend backend = UpscaleBackend::Auto;
   UpscalePreset preset = UpscalePreset::Anime4K;
   float factor = 1;
-  std::string shaderFiles; // Ordered newline-separated paths; legacy ':' lists accepted.
+  std::string shaderFiles; // Ordered newline-separated paths; legacy ':' lists
+                           // accepted.
   bool enabled() const;
   void validate() const;
 };
@@ -28,6 +51,7 @@ std::string UpscaleShaderFileList(const std::vector<std::string> &files);
 
 // Shared texture allocation, conversion and frame caching for every backend.
 class Upscaler {
+  friend class Upscaling;
   UpscaleSettings settings;
   TexturePtr intermediate, output;
   SDL_Texture *source = nullptr;
@@ -64,12 +88,16 @@ class Upscaling {
   UpscaleSettings settings;
   std::unique_ptr<Upscaler> implementation;
   Uint64 stillSerial = 0;
+  struct TextureCache;
+  std::vector<std::weak_ptr<TextureCache>> textureCaches;
+  void clearTextureCaches();
 
 public:
   explicit Upscaling(RendererRef renderer);
   ~Upscaling();
   Upscaling(const Upscaling &) = delete;
   Upscaling &operator=(const Upscaling &) = delete;
+  static Upscaling *forRenderer(RendererRef renderer);
   bool supports(UpscaleBackend backend) const;
   // Concrete backend for `backend` on this renderer (Auto resolved).
   UpscaleBackend resolve(UpscaleBackend backend) const;
@@ -88,5 +116,21 @@ public:
   // scaled() for CPU pixels: returns an RGBA32 surface.
   SurfacePtr scaled(const SDL_Surface &surface, float scale);
 };
+
+// Draw a game image through the renderer’s configured engine pipeline.
+// Increment contentSerial only when pixels change; zero denotes a static
+// texture.
+bool RenderUpscaledTexture(SDL_Renderer *renderer, SDL_Texture *texture,
+                           const SDL_FRect *source,
+                           const SDL_FRect *destination,
+                           Uint64 contentSerial = 0);
+
+// The same pipeline and crop mapping, preserving the game's rotation/flip.
+bool RenderUpscaledTextureRotated(SDL_Renderer *renderer, SDL_Texture *texture,
+                                  const SDL_FRect *source,
+                                  const SDL_FRect *destination, double angle,
+                                  const SDL_FPoint *center = nullptr,
+                                  SDL_FlipMode flip = SDL_FLIP_NONE,
+                                  Uint64 contentSerial = 0);
 
 } // namespace Kotonoha

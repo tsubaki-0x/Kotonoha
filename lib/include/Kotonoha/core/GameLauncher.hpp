@@ -30,6 +30,13 @@ public:
   static std::string rememberedPath(const std::string &settingsPath,
                                     const std::string &rememberFile);
 
+  // Validate every candidate, including standard package/document/source roots.
+  // Empty means no usable data was found; callers should open the chooser.
+  static std::string findGamePath(
+      const std::string &game, const std::vector<std::string> &preferred,
+      const std::function<bool(const std::string &, std::string &)> &validator,
+      const std::vector<std::string> &relative = {""});
+
   const std::string &path() const;
   void setPath(std::string path);
   bool pathValid() const;
@@ -69,6 +76,19 @@ private:
   void setFieldPath(PathField &field, std::string path);
   void check(PathField &field, bool force = false);
   void drawPathField(PathField &field);
+};
+
+// Common folder launcher for ports that only need a data-directory validator.
+class FolderGameLauncher final : public GameLauncher {
+public:
+  using Validator = std::function<bool(const std::string &, std::string &)>;
+  FolderGameLauncher(std::string title, std::string settingsPath,
+                     std::string path, Validator validator,
+                     EngineSettings defaults = {});
+
+private:
+  Validator validator;
+  bool checkPath(const std::string &path, std::string &info) override;
 };
 
 } // namespace Kotonoha

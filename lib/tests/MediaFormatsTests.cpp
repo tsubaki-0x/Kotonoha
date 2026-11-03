@@ -36,10 +36,10 @@ class MemoryAssetProvider final : public AssetProvider {
 public:
   std::map<std::string, std::vector<Uint8>> files;
   std::string name() const override { return "Memory"; }
-  bool contains(const std::string &id) const override {
+  bool containsAsset(const std::string &id) const override {
     return files.count(id) != 0;
   }
-  std::vector<Uint8> read(const std::string &id) const override {
+  std::vector<Uint8> readAsset(const std::string &id) const override {
     const auto found = files.find(id);
     if (found == files.end())
       throw std::runtime_error("Missing " + id);
@@ -50,14 +50,17 @@ public:
 void encoding() {
   // "こんにちは" + NEC "①" + CP932 wave dash "～" + half-width "ｱ".
   const std::string sjis =
-      "\x82\xb1\x82\xf1\x82\xc9\x82\xbf\x82\xcd\x87\x40\x81\x60\xb1" "A";
+      "\x82\xb1\x82\xf1\x82\xc9\x82\xbf\x82\xcd\x87\x40\x81\x60\xb1"
+      "A";
   require(ShiftJisToUtf8(sjis) ==
               "\xE3\x81\x93\xE3\x82\x93\xE3\x81\xAB\xE3\x81\xA1\xE3\x81\xAF"
               "\xE2\x91\xA0\xEF\xBD\x9E\xEF\xBD\xB1"
               "A",
           "CP932 to UTF-8");
   // An unmapped pair becomes one '?', and the trail byte is not reused.
-  require(ShiftJisToUtf8("a\x85\x40" "z") == "a?z", "Invalid pair");
+  require(ShiftJisToUtf8("a\x85\x40"
+                         "z") == "a?z",
+          "Invalid pair");
   require(ShiftJisToUtf8("") == "", "Empty text");
   require(ConvertEncoding("caf\xe9", "LATIN1") == "caf\xC3\xA9",
           "Generic conversion");
@@ -249,6 +252,48 @@ void decoder() {
           "Reject audio without a stream");
 }
 
+void shaderPresets() {
+  const std::vector<std::vector<std::string>> modes{
+      {"Restore_CNN_VL", "Upscale_CNN_x2_VL", "AutoDownscalePre_x2",
+       "AutoDownscalePre_x4", "Upscale_CNN_x2_M"},
+      {"Restore_CNN_Soft_VL", "Upscale_CNN_x2_VL", "AutoDownscalePre_x2",
+       "AutoDownscalePre_x4", "Upscale_CNN_x2_M"},
+      {"Upscale_Denoise_CNN_x2_VL", "AutoDownscalePre_x2",
+       "AutoDownscalePre_x4", "Upscale_CNN_x2_M"},
+      {"Restore_CNN_VL", "Upscale_CNN_x2_VL", "Restore_CNN_M",
+       "AutoDownscalePre_x2", "AutoDownscalePre_x4", "Upscale_CNN_x2_M"},
+      {"Restore_CNN_Soft_VL", "Upscale_CNN_x2_VL", "AutoDownscalePre_x2",
+       "AutoDownscalePre_x4", "Restore_CNN_Soft_M", "Upscale_CNN_x2_M"},
+      {"Upscale_Denoise_CNN_x2_VL", "AutoDownscalePre_x2",
+       "AutoDownscalePre_x4", "Restore_CNN_M", "Upscale_CNN_x2_M"},
+      {"Restore_CNN_M", "Upscale_CNN_x2_M", "AutoDownscalePre_x2",
+       "AutoDownscalePre_x4", "Upscale_CNN_x2_S"},
+      {"Restore_CNN_Soft_M", "Upscale_CNN_x2_M", "AutoDownscalePre_x2",
+       "AutoDownscalePre_x4", "Upscale_CNN_x2_S"},
+      {"Upscale_Denoise_CNN_x2_M", "AutoDownscalePre_x2", "AutoDownscalePre_x4",
+       "Upscale_CNN_x2_S"},
+      {"Restore_CNN_M", "Upscale_CNN_x2_M", "Restore_CNN_S",
+       "AutoDownscalePre_x2", "AutoDownscalePre_x4", "Upscale_CNN_x2_S"},
+      {"Restore_CNN_Soft_M", "Upscale_CNN_x2_M", "AutoDownscalePre_x2",
+       "AutoDownscalePre_x4", "Restore_CNN_Soft_S", "Upscale_CNN_x2_S"},
+      {"Upscale_Denoise_CNN_x2_M", "AutoDownscalePre_x2", "AutoDownscalePre_x4",
+       "Restore_CNN_S", "Upscale_CNN_x2_S"}};
+  for (std::size_t i = 0; i < modes.size(); ++i) {
+    std::vector<std::string> expected{"Anime4K_Clamp_Highlights.glsl"};
+    for (const auto &name : modes[i])
+      expected.push_back("Anime4K_" + name + ".glsl");
+    const auto preset = UpscalePresets()[i];
+    require(UpscalePresetIsAnime4K(preset), "Anime4K preset classification");
+    require(UpscalePresetShaderFiles(preset) == expected,
+            "Anime4K chain matches requested sequence");
+    UpscaleSettings settings{UpscaleBackend::MPV, preset, 2, {}};
+    settings.validate();
+  }
+  require(static_cast<int>(UpscalePreset::ArtCNN) == 1 &&
+              static_cast<int>(UpscalePreset::ArtCNNLarge) == 3,
+          "Existing ArtCNN settings remain compatible");
+}
+
 void scaling() {
   MemoryAssetProvider assets;
   assets.files["pic"] = bitmap(4, 2, {0, 128, 255, 255});
@@ -263,7 +308,8 @@ void scaling() {
           "Upscaler defaults to Auto, off at 1.0x");
 
   SDL_Texture &linear = assets.texture(*renderer, "pic", 2.5f, &upscaling);
-  require(linear.w == 10 && linear.h == 5, "Linear scale size");
+  require(linear.w == 4 && linear.h == 2,
+          "Disabled pipeline returns original size");
   require(&assets.texture(*renderer, "pic", 2.5f, &upscaling) == &linear,
           "Scaled texture cache");
   require(&assets.texture(*renderer, "pic", 1, &upscaling) !=
@@ -277,13 +323,17 @@ void scaling() {
   require(upscaling.activeBackend() == UpscaleBackend::None &&
               !upscaling.getImplementation(),
           "Factor 1.0 disables the backend");
-  upscaling.configure({UpscaleBackend::Auto, UpscalePreset::Anime4K, 1.25f, {}});
+  upscaling.configure(
+      {UpscaleBackend::Auto, UpscalePreset::Anime4K, 1.25f, {}});
   require(upscaling.activeBackend() == UpscaleBackend::Linear &&
               upscaling.resolve(UpscaleBackend::Auto) == UpscaleBackend::Linear,
           "Auto resolves to Linear on the software renderer");
-  rejects([&] {
-    upscaling.configure({UpscaleBackend::Auto, UpscalePreset::Anime4K, 0.5f, {}});
-  }, "Reject factor below 1.0");
+  rejects(
+      [&] {
+        upscaling.configure(
+            {UpscaleBackend::Auto, UpscalePreset::Anime4K, 0.5f, {}});
+      },
+      "Reject factor below 1.0");
   upscaling.configure({UpscaleBackend::Linear, UpscalePreset::Anime4K, 2, {}});
   const SurfacePtr upscaled = assets.surface(*renderer, "pic", 3, &upscaling);
   require(upscaled->w == 12 && upscaled->h == 6, "Upscaled surface size");
@@ -299,6 +349,16 @@ void scaling() {
           "CPU scale without upscaler");
   rejects([&] { assets.texture(*renderer, "pic", 0, &upscaling); },
           "Reject zero scale");
+  require(Upscaling::forRenderer(*renderer) == &upscaling,
+          "Renderer exposes its configured engine pipeline");
+  auto &original = assets.texture(*renderer, "pic");
+  SDL_FRect crop{1, 0, 2, 2}, destination{4, 4, 16, 16};
+  require(RenderUpscaledTexture(renderer.get(), &original, &crop, &destination),
+          "Game images automatically use the renderer pipeline");
+  require(SDL_FlushRenderer(renderer.get()), "Flush automatic upscale draw");
+  require(SDL_ReadSurfacePixel(target.get(), 10, 10, &r, &g, &b, &a) &&
+              r == 0 && g == 128 && b == 255,
+          "Automatic upscale preserves crop and destination");
   assets.clearCache();
 }
 
@@ -343,8 +403,7 @@ void player() {
           "Letterbox bars");
   media.render(*renderer, SDL_FRect{0, 0, 16, 8}, nullptr, true);
   require(SDL_RenderPresent(renderer.get()), "Present stretched");
-  require(SDL_ReadSurfacePixel(target.get(), 1, 4, &r, &g, &b, &a) &&
-              r == 255,
+  require(SDL_ReadSurfacePixel(target.get(), 1, 4, &r, &g, &b, &a) && r == 255,
           "Stretched frame");
   media.stop();
   require(media.finished(), "Stopped player is finished");
@@ -363,6 +422,7 @@ int main() {
       encoding();
       discImage(directory);
       decoder();
+      shaderPresets();
       scaling();
       player();
     } catch (...) {

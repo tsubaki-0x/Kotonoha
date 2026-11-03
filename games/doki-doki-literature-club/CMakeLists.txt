@@ -22,6 +22,7 @@ add_library(DdlcFormats STATIC
     src/Archive.cpp
     src/Display.cpp
     src/Python.cpp
+    src/Replay.cpp
     src/Script.cpp
     src/Value.cpp
     src/Vm.cpp
@@ -52,4 +53,8 @@ kotonoha_configure_app(DokiDoki
 
 if(BUILD_TESTING)
     add_subdirectory(tests)
+endif()
+
+if(ANDROID)
+    target_compile_definitions(DdlcFormats PRIVATE KOTONOHA_ANDROID_ABI="${ANDROID_ABI}")
 endif()

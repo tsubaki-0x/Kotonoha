@@ -1,6 +1,10 @@
+#include <Kotonoha/core/Appearance.hpp>
+#include <Kotonoha/core/AssetOverlay.hpp>
+#include <Kotonoha/core/Config.hpp>
+#include <Kotonoha/core/FileSystem.hpp>
 #include <Kotonoha/core/Launcher.hpp>
 #include <Kotonoha/core/Log.hpp>
-#include <Kotonoha/core/FileSystem.hpp>
+#include <Kotonoha/media/AudioMixer.hpp>
 
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
@@ -29,9 +33,8 @@ struct Launcher::Dialog {
 namespace {
 constexpr const char *Modes[]{"Windowed", "Borderless fullscreen",
                               "Exclusive fullscreen"};
-constexpr const char *Presets[]{"Anime4K B-S", "ArtCNN C4F16",
-                                "ArtCNN C4F16 DS", "ArtCNN C4F32"};
-constexpr const char *Priorities[]{"Trace",   "Verbose", "Debug",  "Info",
+
+constexpr const char *Priorities[]{"Trace",   "Verbose", "Debug",   "Info",
                                    "Warning", "Error",   "Critical"};
 constexpr std::pair<int, int> Resolutions[]{
     {1280, 720}, {1600, 900}, {1920, 1080}, {2560, 1440}, {3840, 2160}};
@@ -59,7 +62,7 @@ const char *requiredRenderer(UpscaleBackend backend,
       renderer != "metal")
     return "metal";
   if (backend == UpscaleBackend::MPV && renderer.rfind("opengl", 0) != 0)
-    return "opengl";
+    return isMobilePlatform() ? "opengles2" : "opengl";
   return nullptr;
 }
 } // namespace
@@ -73,8 +76,7 @@ Launcher::Launcher(std::string name, std::string path, EngineSettings values)
   try {
     draft = EngineSettings::load(settingsPath);
   } catch (const std::exception &error) {
-    setStatus(std::string("Invalid settings, using defaults: ") +
-                  error.what(),
+    setStatus(std::string("Invalid settings, using defaults: ") + error.what(),
               true);
   }
 }
@@ -84,19 +86,43 @@ Launcher::~Launcher() { close(); }
 void Launcher::open() {
   if (isOpen())
     return;
+  SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
   if (!SDL_InitSubSystem(SDL_INIT_VIDEO))
     throw std::runtime_error(SDL_GetError());
   videoInitialized = true;
   try {
-    window.reset(SDL_CreateWindow(title.c_str(), 760, 560,
-                                  SDL_WINDOW_RESIZABLE |
-                                      SDL_WINDOW_HIGH_PIXEL_DENSITY));
+    // 1. Define o modo padrão baseado na plataforma se não estiver configurado
+    WindowMode mode = defaultWindowMode();
+
+    // 2. Determina as flags da janela SDL3 com base no modo
+    Uint32 windowFlags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+
+    if (mode == WindowMode::Borderless || mode == WindowMode::Exclusive) {
+      windowFlags |= SDL_WINDOW_FULLSCREEN;
+    }
+
+    // 3. Obtém o tamanho da tela do monitor principal se for mobile/fullscreen
+    int width = 760;
+    int height = 560;
+
+    if (isMobilePlatform()) {
+      SDL_DisplayID displayID = SDL_GetPrimaryDisplay();
+      const SDL_DisplayMode *displayMode = SDL_GetCurrentDisplayMode(displayID);
+      if (displayMode) {
+        width = displayMode->w;
+        height = displayMode->h;
+      }
+    }
+
+    window.reset(SDL_CreateWindow(title.c_str(), width, height, windowFlags));
     if (!window)
       throw std::runtime_error(SDL_GetError());
+
     renderer.reset(SDL_CreateRenderer(window.get(), nullptr));
     if (!renderer)
       throw std::runtime_error(SDL_GetError());
     SDL_SetRenderVSync(renderer.get(), 1);
+
     IMGUI_CHECKVERSION();
     context = ImGui::CreateContext();
     ImGui::SetCurrentContext(context);
@@ -105,6 +131,7 @@ void Launcher::open() {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     ImGuiTheme::loadFonts(draft.fontPath);
     ImGuiTheme::apply(1);
+
     if (!ImGui_ImplSDL3_InitForSDLRenderer(window.get(), renderer.get()))
       throw std::runtime_error("Cannot initialize ImGui for the launcher");
     if (!ImGui_ImplSDLRenderer3_Init(renderer.get())) {
@@ -144,13 +171,54 @@ void Launcher::close() {
 
 bool Launcher::isOpen() const { return context != nullptr; }
 Launcher::State Launcher::state() const { return current; }
+void Launcher::setAudioChannels(std::vector<std::string> names) {
+  std::vector<std::string> unique;
+  for (auto &name : names) {
+    AudioMixer::validateChannelName(name);
+    if (std::find(unique.begin(), unique.end(), name) == unique.end())
+      unique.push_back(std::move(name));
+  }
+  audioChannels = std::move(unique);
+}
+
 EngineSettings &Launcher::settings() { return draft; }
 const std::string &Launcher::getSettingsPath() const { return settingsPath; }
 const std::string &Launcher::getStatus() const { return status; }
 void Launcher::quit() { current = State::Quit; }
 
 void Launcher::drawGameOptions() {}
-bool Launcher::validate(std::string &) { return true; }
+void Launcher::checkOverlay(bool force) {
+  if (!force && overlayCheckedOnce && overlayChecked == draft.assetOverlayPath)
+    return;
+  overlayCheckedOnce = true;
+  overlayChecked = draft.assetOverlayPath;
+  overlayValid = true;
+  overlayInfo.clear();
+  if (draft.assetOverlayPath.empty()) {
+    overlayInfo = "Optional asset overlay folder";
+    overlayValid = true;
+    return;
+  }
+
+  AssetOverlay validateOverlay(draft.assetOverlayPath);
+  if (validateOverlay.root().empty()) {
+    overlayValid = false;
+    overlayInfo = "Invalid asset overlay path";
+  } else {
+    overlayValid = true;
+    draft.assetOverlayPath = validateOverlay.root().string();
+    overlayInfo = "Asset overlay valid: " + draft.assetOverlayPath;
+  }
+}
+
+bool Launcher::validate(std::string &error) {
+  checkOverlay(true);
+  if (!overlayValid) {
+    error = overlayInfo;
+    return false;
+  }
+  return true;
+}
 void Launcher::save() {}
 
 void Launcher::setStatus(std::string message, bool error) {
@@ -201,6 +269,9 @@ void Launcher::browseFile(const FileFilters &filters,
   if (dialog)
     return;
   auto next = std::make_shared<Dialog>();
+  next->names.reserve(filters.size());
+  next->patterns.reserve(filters.size());
+  next->filters.reserve(filters.size());
   for (const auto &[name, pattern] : filters) {
     next->names.push_back(name);
     next->patterns.push_back(pattern);
@@ -235,6 +306,23 @@ SDL_AppResult Launcher::event(const SDL_Event &event) {
     return SDL_APP_CONTINUE;
   ImGui::SetCurrentContext(context);
   ImGui_ImplSDL3_ProcessEvent(&event);
+  SDL_Event pointer{};
+  if (touchPointer.translate(event, *window, pointer)) {
+    SDL_Event position{};
+    position.type = SDL_EVENT_MOUSE_MOTION;
+    position.motion.windowID = pointer.type == SDL_EVENT_MOUSE_MOTION
+                                   ? pointer.motion.windowID
+                                   : pointer.button.windowID;
+    position.motion.which = SDL_TOUCH_MOUSEID;
+    position.motion.x = pointer.type == SDL_EVENT_MOUSE_MOTION
+                            ? pointer.motion.x
+                            : pointer.button.x;
+    position.motion.y = pointer.type == SDL_EVENT_MOUSE_MOTION
+                            ? pointer.motion.y
+                            : pointer.button.y;
+    ImGui_ImplSDL3_ProcessEvent(&position);
+    ImGui_ImplSDL3_ProcessEvent(&pointer);
+  }
   if (event.type == SDL_EVENT_QUIT ||
       (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED &&
        event.window.windowID == SDL_GetWindowID(window.get())))
@@ -282,9 +370,8 @@ void Launcher::draw() {
                                 pixelHeight / io.DisplaySize.y};
   const float displayScale = SDL_GetWindowDisplayScale(window.get());
   const float pixelDensity = SDL_GetWindowPixelDensity(window.get());
-  const float scale = displayScale > 0 && pixelDensity > 0
-                          ? displayScale / pixelDensity
-                          : 1.0f;
+  const float scale =
+      displayScale > 0 && pixelDensity > 0 ? displayScale / pixelDensity : 1.0f;
   if (contentScale != scale) {
     ImGuiTheme::apply(scale);
     contentScale = scale;
@@ -329,6 +416,29 @@ void Launcher::draw() {
   if (ImGui::BeginTabBar("##tabs")) {
     if (ImGui::BeginTabItem("Game")) {
       drawGameOptions();
+      ImGui::SeparatorText("Asset overlay (all games)");
+      if (ImGui::InputText("Overlay folder", &draft.assetOverlayPath,
+                           ImGuiInputTextFlags_EnterReturnsTrue) ||
+          !ImGui::IsItemActive())
+        checkOverlay();
+      if (ImGui::Button("Browse overlay..."))
+        browseFolder(draft.assetOverlayPath, [this](const std::string &path) {
+          draft.assetOverlayPath = path;
+          checkOverlay(true);
+        });
+      ImGui::SameLine();
+      if (ImGui::Button("Disable overlay")) {
+        draft.assetOverlayPath.clear();
+        checkOverlay(true);
+      }
+
+      checkOverlay();
+      ImGui::PushStyleColor(ImGuiCol_Text, overlayValid
+                                               ? ImGuiTheme::success()
+                                               : ImGuiTheme::warning());
+      ImGui::TextWrapped("%s", overlayInfo.c_str());
+      ImGui::PopStyleColor();
+
       ImGui::EndTabItem();
     }
     if (ImGui::BeginTabItem("Video")) {
@@ -376,87 +486,96 @@ void Launcher::draw() {
 }
 
 void Launcher::drawVideo() {
-  int mode = static_cast<int>(draft.mode);
-  if (ImGui::Combo("Mode", &mode, Modes, 3))
-    draft.mode = static_cast<WindowMode>(mode);
+  if (canChangeDisplaySize()) {
+    int mode = static_cast<int>(draft.mode);
+    if (ImGui::Combo("Mode", &mode, Modes, 3))
+      draft.mode = static_cast<WindowMode>(mode);
 
-  int count = 0;
-  SDL_DisplayID *displays = SDL_GetDisplays(&count);
-  if (count > 0) {
-    draft.display = std::clamp(draft.display, 0, count - 1);
-    const char *name = SDL_GetDisplayName(displays[draft.display]);
-    const std::string current = std::to_string(draft.display + 1) + ": " +
-                                (name ? name : "Monitor");
-    if (ImGui::BeginCombo("Monitor", current.c_str())) {
-      for (int i = 0; i < count; ++i) {
-        const char *label = SDL_GetDisplayName(displays[i]);
-        const std::string text =
-            std::to_string(i + 1) + ": " + (label ? label : "Monitor");
-        if (ImGui::Selectable(text.c_str(), i == draft.display))
-          draft.display = i;
-      }
-      ImGui::EndCombo();
-    }
-  }
-
-  const std::string size =
-      std::to_string(draft.width) + " x " + std::to_string(draft.height);
-  if (ImGui::BeginCombo("Window", size.c_str())) {
-    for (const auto &[w, h] : Resolutions) {
-      const std::string text = std::to_string(w) + " x " + std::to_string(h);
-      if (ImGui::Selectable(text.c_str(),
-                            w == draft.width && h == draft.height)) {
-        draft.width = w;
-        draft.height = h;
+    int count = 0;
+    SDL_DisplayID *displays = SDL_GetDisplays(&count);
+    if (count > 0) {
+      draft.display = std::clamp(draft.display, 0, count - 1);
+      const char *name = SDL_GetDisplayName(displays[draft.display]);
+      const std::string current =
+          std::to_string(draft.display + 1) + ": " + (name ? name : "Monitor");
+      if (ImGui::BeginCombo("Monitor", current.c_str())) {
+        for (int i = 0; i < count; ++i) {
+          const char *label = SDL_GetDisplayName(displays[i]);
+          const std::string text =
+              std::to_string(i + 1) + ": " + (label ? label : "Monitor");
+          if (ImGui::Selectable(text.c_str(), i == draft.display))
+            draft.display = i;
+        }
+        ImGui::EndCombo();
       }
     }
-    ImGui::EndCombo();
-  }
-  int custom[2]{draft.width, draft.height};
-  if (ImGui::InputInt2("Custom size", custom)) {
-    draft.width = std::clamp(custom[0], 320, 16384);
-    draft.height = std::clamp(custom[1], 240, 16384);
-  }
 
-  if (draft.mode == WindowMode::Exclusive && count > 0) {
-    int modes = 0;
-    SDL_DisplayMode **list =
-        SDL_GetFullscreenDisplayModes(displays[draft.display], &modes);
-    std::string current = "Desktop resolution";
-    if (draft.fullscreenWidth > 0)
-      current = std::to_string(draft.fullscreenWidth) + " x " +
-                std::to_string(draft.fullscreenHeight) + " @ " +
-                std::to_string(static_cast<int>(draft.refreshRate + 0.5f)) +
-                " Hz";
-    if (ImGui::BeginCombo("Exclusive resolution", current.c_str())) {
-      if (ImGui::Selectable("Desktop resolution",
-                            draft.fullscreenWidth == 0)) {
-        draft.fullscreenWidth = draft.fullscreenHeight = 0;
-        draft.refreshRate = 0;
-      }
-      for (int i = 0; list && i < modes; ++i) {
-        const SDL_DisplayMode &m = *list[i];
-        const std::string text =
-            std::to_string(m.w) + " x " + std::to_string(m.h) + " @ " +
-            std::to_string(static_cast<int>(m.refresh_rate + 0.5f)) + " Hz";
-        const bool selected = m.w == draft.fullscreenWidth &&
-                              m.h == draft.fullscreenHeight &&
-                              m.refresh_rate == draft.refreshRate;
-        if (ImGui::Selectable(text.c_str(), selected)) {
-          draft.fullscreenWidth = m.w;
-          draft.fullscreenHeight = m.h;
-          draft.refreshRate = m.refresh_rate;
+    const std::string size =
+        std::to_string(draft.width) + " x " + std::to_string(draft.height);
+    if (ImGui::BeginCombo("Window", size.c_str())) {
+      for (const auto &[w, h] : Resolutions) {
+        const std::string text = std::to_string(w) + " x " + std::to_string(h);
+        if (ImGui::Selectable(text.c_str(),
+                              w == draft.width && h == draft.height)) {
+          draft.width = w;
+          draft.height = h;
         }
       }
       ImGui::EndCombo();
     }
-    SDL_free(list);
+    int custom[2]{draft.width, draft.height};
+    if (ImGui::InputInt2("Custom size", custom)) {
+      draft.width = std::clamp(custom[0], 320, 16384);
+      draft.height = std::clamp(custom[1], 240, 16384);
+    }
+
+    if (draft.mode == WindowMode::Exclusive && count > 0) {
+      int modes = 0;
+      SDL_DisplayMode **list =
+          SDL_GetFullscreenDisplayModes(displays[draft.display], &modes);
+      std::string current = "Desktop resolution";
+      if (draft.fullscreenWidth > 0)
+        current = std::to_string(draft.fullscreenWidth) + " x " +
+                  std::to_string(draft.fullscreenHeight) + " @ " +
+                  std::to_string(static_cast<int>(draft.refreshRate + 0.5f)) +
+                  " Hz";
+      if (ImGui::BeginCombo("Exclusive resolution", current.c_str())) {
+        if (ImGui::Selectable("Desktop resolution",
+                              draft.fullscreenWidth == 0)) {
+          draft.fullscreenWidth = draft.fullscreenHeight = 0;
+          draft.refreshRate = 0;
+        }
+        for (int i = 0; list && i < modes; ++i) {
+          const SDL_DisplayMode &m = *list[i];
+          const std::string text =
+              std::to_string(m.w) + " x " + std::to_string(m.h) + " @ " +
+              std::to_string(static_cast<int>(m.refresh_rate + 0.5f)) + " Hz";
+          const bool selected = m.w == draft.fullscreenWidth &&
+                                m.h == draft.fullscreenHeight &&
+                                m.refresh_rate == draft.refreshRate;
+          if (ImGui::Selectable(text.c_str(), selected)) {
+            draft.fullscreenWidth = m.w;
+            draft.fullscreenHeight = m.h;
+            draft.refreshRate = m.refresh_rate;
+          }
+        }
+        ImGui::EndCombo();
+      }
+      SDL_free(list);
+    }
+    if (count > 0) {
+      SDL_free(displays);
+    }
+  } else {
+    ImGui::TextDisabled(
+        "Display size and monitor settings are managed by Android/iOS.");
   }
-  SDL_free(displays);
 
   ImGui::Checkbox("VSync", &draft.vsync);
-  ImGui::SameLine();
-  ImGui::Checkbox("Resizable window", &draft.resizable);
+  if (canChangeDisplaySize()) {
+    ImGui::SameLine();
+    ImGui::Checkbox("Resizable window", &draft.resizable);
+  }
 
   const std::string renderer =
       draft.renderer.empty() ? "Automatic" : draft.renderer;
@@ -484,8 +603,7 @@ void Launcher::drawUpscaling() {
     upscaling.factor = 1;
   for (float preset : {1.5f, 2.0f, 3.0f, 4.0f}) {
     ImGui::SameLine();
-    const std::string label =
-        std::to_string(preset).substr(0, 3) + "x";
+    const std::string label = std::to_string(preset).substr(0, 3) + "x";
     if (ImGui::Button(label.c_str()))
       upscaling.factor = preset;
   }
@@ -498,20 +616,32 @@ void Launcher::drawUpscaling() {
         continue;
 #endif
       if (ImGui::Selectable(backendLabel(backend),
-                            backend == upscaling.backend))
+                            backend == upscaling.backend)) {
         upscaling.backend = backend;
+        if (backend == UpscaleBackend::MPV)
+          draft.renderer = isMobilePlatform() ? "opengles2" : "opengl";
+      }
     }
     ImGui::EndCombo();
   }
   const bool mpv = upscaling.backend == UpscaleBackend::MPV ||
                    (upscaling.backend == UpscaleBackend::Auto &&
                     draft.renderer.rfind("opengl", 0) == 0);
-  if (mpv) {
-    int preset = static_cast<int>(upscaling.preset);
-    if (ImGui::Combo("Preset (OpenGL)", &preset, Presets, 4))
-      upscaling.preset = static_cast<UpscalePreset>(preset);
-    shaderPicker->draw(window.get(), upscaling);
+  if (mpv && ImGui::BeginCombo("Shader (OpenGL)",
+                               UpscalePresetName(upscaling.preset))) {
+    for (auto preset : UpscalePresets())
+      if (ImGui::Selectable(UpscalePresetName(preset),
+                            preset == upscaling.preset)) {
+        upscaling.preset = preset;
+        upscaling.shaderFiles.clear();
+        upscaling.factor = std::max(2.0f, upscaling.factor);
+        if (upscaling.backend == UpscaleBackend::None)
+          upscaling.backend = UpscaleBackend::Auto;
+      }
+    ImGui::EndCombo();
   }
+  if (mpv)
+    shaderPicker->draw(window.get(), upscaling);
   if (upscaling.backend == UpscaleBackend::None)
     ImGui::TextDisabled("Backend 'None' keeps upscaling off");
   if (const char *required =
@@ -527,6 +657,43 @@ void Launcher::drawUpscaling() {
 void Launcher::drawAdvanced() {
   ImGui::SliderFloat("Master volume", &draft.masterVolume, 0, 1, "%.2f");
   ImGui::Checkbox("Mute all audio", &draft.masterMuted);
+  for (const auto &name : audioChannels) {
+    auto [entry, inserted] = draft.channelVolumes.try_emplace(name, 1.f);
+    ImGui::SliderFloat((name + "##mixer").c_str(), &entry->second, 0, 1,
+                       "%.2f");
+  }
+  ImGui::SeparatorText("VN text");
+  const auto vnFonts = VNFontOptions();
+  if (ImGui::BeginCombo("VN font", draft.vnFontPath.empty()
+                                       ? "Original game font"
+                                       : draft.vnFontPath.c_str())) {
+    for (const auto &font : vnFonts)
+      if (ImGui::Selectable(font.empty() ? "Original game font" : font.c_str(),
+                            draft.vnFontPath == font))
+        draft.vnFontPath = font;
+    ImGui::EndCombo();
+  }
+  ImGui::Checkbox("Override VN text colors", &draft.vnTextColorOverride);
+  auto chooseColor = [&](const char *label, SDL_Color &color) {
+    if (ImGui::BeginCombo(label, label)) {
+      for (const auto &[name, value] : VNColorOptions)
+        if (ImGui::Selectable(name)) {
+          color = value;
+          draft.vnTextColorOverride = true;
+        }
+      ImGui::EndCombo();
+    }
+    float rgba[]{color.r / 255.f, color.g / 255.f, color.b / 255.f,
+                 color.a / 255.f};
+    if (ImGui::ColorEdit4((std::string(label) + "##custom").c_str(), rgba)) {
+      color = {
+          Uint8(std::lround(rgba[0] * 255)), Uint8(std::lround(rgba[1] * 255)),
+          Uint8(std::lround(rgba[2] * 255)), Uint8(std::lround(rgba[3] * 255))};
+      draft.vnTextColorOverride = true;
+    }
+  };
+  chooseColor("Dialogue color", draft.vnTextColor);
+  chooseColor("Speaker color", draft.vnSpeakerColor);
   ImGui::SliderFloat("Debug UI scale", &draft.debugUIScale, 1, 3, "%.2fx");
   ImGui::Separator();
   int priority = static_cast<int>(draft.logPriority) - SDL_LOG_PRIORITY_TRACE;
@@ -535,13 +702,59 @@ void Launcher::drawAdvanced() {
         static_cast<SDL_LogPriority>(priority + SDL_LOG_PRIORITY_TRACE);
 }
 
+namespace {
+struct FontOption {
+  std::string filename;
+  std::string label;
+  bool isCJK = false;
+};
+
+std::vector<FontOption> getAvailableFonts() {
+  std::vector<FontOption> options;
+  try {
+    auto dir = FileResolver::fontDirectory();
+    std::error_code ec;
+    if (std::filesystem::exists(dir, ec)) {
+      for (const auto &entry : std::filesystem::directory_iterator(dir, ec)) {
+        if (entry.is_regular_file(ec)) {
+          auto ext = entry.path().extension().string();
+          std::string lower;
+          for (char c : ext)
+            lower += static_cast<char>(std::tolower(c));
+          if (lower == ".ttf" || lower == ".otf" || lower == ".ttc") {
+            std::string name = entry.path().filename().string();
+            bool cjk = (name.find("JP") != std::string::npos ||
+                        name.find("Japanese") != std::string::npos ||
+                        name.find("CJK") != std::string::npos ||
+                        name.find("Gothic") != std::string::npos ||
+                        name.find("Mincho") != std::string::npos ||
+                        name.find("NotoSans") != std::string::npos);
+            std::string label = name + (cjk ? " [CJK / JP]" : " [Latin]");
+            options.push_back({name, label, cjk});
+          }
+        }
+      }
+    }
+  } catch (...) {
+  }
+  std::sort(options.begin(), options.end(),
+            [](const FontOption &a, const FontOption &b) {
+              if (a.isCJK != b.isCJK)
+                return a.isCJK > b.isCJK;
+              return a.filename < b.filename;
+            });
+  return options;
+}
+} // namespace
+
 void Launcher::drawTranslation() {
   ImGui::TextUnformatted("Translation dictionary (JSON)");
   const ImGuiStyle &style = ImGui::GetStyle();
   constexpr const char *Browse = "Browse...";
   constexpr const char *Clear = "Clear";
 
-  const float buttonWidth = ImGui::CalcTextSize(Browse).x + ImGui::CalcTextSize(Clear).x +
+  const float buttonWidth = ImGui::CalcTextSize(Browse).x +
+                            ImGui::CalcTextSize(Clear).x +
                             style.ItemSpacing.x * 2 + style.FramePadding.x * 4;
   ImGui::SetNextItemWidth(-buttonWidth - style.ItemSpacing.x);
   ImGui::InputText("##translationPath", &draft.translationPath);
@@ -550,14 +763,17 @@ void Launcher::drawTranslation() {
     const std::string initial =
         draft.translationPath.empty()
             ? std::string()
-            : std::filesystem::path(draft.translationPath).parent_path().string();
-    browseFile({{"Translation JSON (*.json)", "*.json"}, {"All files (*)", "*"}},
-               initial, [this](const std::string &path) { draft.translationPath = path; });
+            : std::filesystem::path(draft.translationPath)
+                  .parent_path()
+                  .string();
+    browseFile({{"Translation JSON (*.json)", "json"}, {"All files (*)", "*"}},
+               initial, [this](const std::string &path) {
+                 draft.translationPath = path;
+               });
   }
   ImGui::SameLine();
   if (ImGui::Button("Clear##translation")) {
     draft.translationPath.clear();
-    draft.fontPath.clear();
   }
 
   std::error_code ec;
@@ -579,40 +795,54 @@ void Launcher::drawTranslation() {
   ImGui::Separator();
   ImGui::Spacing();
 
-  if (draft.translationPath.empty()) {
-    ImGui::TextDisabled("Define a translation file above to choose a custom font.");
-  } else {
-    ImGui::TextUnformatted("Custom font file (TTF / OTF / TTC)");
-    ImGui::SetNextItemWidth(-buttonWidth - style.ItemSpacing.x);
-    ImGui::InputText("##fontPath", &draft.fontPath);
-    ImGui::SameLine();
-    if (ImGui::Button("Browse...##font")) {
-      const std::string initial =
-          draft.fontPath.empty()
-              ? std::string()
-              : std::filesystem::path(draft.fontPath).parent_path().string();
-      browseFile({{"Font files (*.ttf, *.otf, *.ttc)", "*.ttf;*.otf;*.ttc"}, {"All files (*)", "*"}},
-                 initial, [this](const std::string &path) { draft.fontPath = path; });
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Clear##font")) {
-      draft.fontPath.clear();
-    }
+  ImGui::TextUnformatted("Default Font (SDL_ttf, ImGui, libass)");
 
-    if (!draft.fontPath.empty()) {
-      const auto resolvedFont = FileResolver::font(draft.fontPath);
-      if (std::filesystem::exists(resolvedFont, ec)) {
-        ImGui::PushStyleColor(ImGuiCol_Text, ImGuiTheme::success());
-        ImGui::TextUnformatted("Font file found");
-        ImGui::PopStyleColor();
-      } else {
-        ImGui::PushStyleColor(ImGuiCol_Text, ImGuiTheme::warning());
-        ImGui::TextUnformatted("Font file not found");
-        ImGui::PopStyleColor();
-      }
-    } else {
-      ImGui::TextDisabled("Default font will be used");
+  auto fonts = getAvailableFonts();
+  if (draft.fontPath.empty() && !fonts.empty()) {
+    draft.fontPath = fonts.front().filename;
+  }
+
+  std::string currentLabel =
+      draft.fontPath.empty() ? "Default (Noto Sans JP)" : draft.fontPath;
+  for (const auto &f : fonts) {
+    if (f.filename == draft.fontPath) {
+      currentLabel = f.label;
+      break;
     }
+  }
+
+  ImGui::SetNextItemWidth(-buttonWidth - style.ItemSpacing.x);
+  if (ImGui::BeginCombo("##fontCombo", currentLabel.c_str())) {
+    for (const auto &f : fonts) {
+      bool selected = (f.filename == draft.fontPath);
+      if (ImGui::Selectable(f.label.c_str(), selected)) {
+        draft.fontPath = f.filename;
+      }
+      if (selected) {
+        ImGui::SetItemDefaultFocus();
+      }
+    }
+    ImGui::EndCombo();
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Clear##font")) {
+    draft.fontPath.clear();
+  }
+
+  if (!draft.fontPath.empty()) {
+    const auto resolvedFont = FileResolver::font(draft.fontPath);
+    if (std::filesystem::exists(resolvedFont, ec)) {
+      ImGui::PushStyleColor(ImGuiCol_Text, ImGuiTheme::success());
+      ImGui::TextUnformatted("Font file found in available fonts");
+      ImGui::PopStyleColor();
+    } else {
+      ImGui::PushStyleColor(ImGuiCol_Text, ImGuiTheme::warning());
+      ImGui::TextUnformatted("Font file not found");
+      ImGui::PopStyleColor();
+    }
+  } else {
+    ImGui::TextDisabled(
+        "Default engine font (Noto Sans JP / CJK & Latin) will be used");
   }
 }
 

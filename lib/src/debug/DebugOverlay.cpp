@@ -265,14 +265,3 @@ void DebugOverlay::renderMenu(RendererRef renderer) {
 }
 
 } // namespace Kotonoha
-
-
-
-
-
-
-
-
-
-
-\n

@@ -40,8 +40,9 @@ public:
 class TestGameLauncher final : public GameLauncher {
 public:
   TestGameLauncher(const std::string &settings, std::string directory)
-      : GameLauncher("Game", settings,
-                     {"game directory", PathKind::Folder, {}, "game-path.txt", {}}) {
+      : GameLauncher(
+            "Game", settings,
+            {"game directory", PathKind::Folder, {}, "game-path.txt", {}}) {
     loadPath(std::move(directory));
   }
 
@@ -52,6 +53,27 @@ protected:
     return valid;
   }
 };
+
+void pathDiscovery(const std::filesystem::path &directory) {
+  const auto invalid = directory / "stale-folder";
+  const auto valid = directory / "valid-folder";
+  std::filesystem::create_directory(invalid);
+  std::filesystem::create_directory(valid);
+  std::ofstream(valid / "required.dat").put('x');
+  const auto validator = [](const std::string &path, std::string &) {
+    return std::filesystem::is_regular_file(std::filesystem::path(path) /
+                                            "required.dat");
+  };
+  require(GameLauncher::findGamePath("path-tests",
+                                     {invalid.string(), valid.string()},
+                                     validator) == valid.string(),
+          "Invalid remembered paths are skipped before trying a valid default");
+  require(GameLauncher::findGamePath("path-tests", {invalid.string()},
+                                     [](const auto &, auto &) { return false; })
+              .empty(),
+          "No valid candidate returns an empty chooser instead of launching "
+          "invalid data");
+}
 
 void gameLauncher(const std::filesystem::path &directory) {
   const auto root = directory / "game-launcher";
@@ -82,6 +104,29 @@ void launcher(const std::filesystem::path &directory) {
     require(launcher.state() == Launcher::State::Running &&
                 !launcher.settings().upscaling.enabled(),
             "Defaults without a settings file");
+    require(launcher.getAudioChannels().empty(),
+            "A generic launcher does not invent game audio channels");
+    launcher.settings().channelVolumes = {{"other-game", .2f}, {"voice", .6f}};
+    launcher.setAudioChannels({"voice", "bgm", "voice"});
+    require(launcher.getAudioChannels() ==
+                    std::vector<std::string>{"voice", "bgm"} &&
+                launcher.settings().channelVolumes.at("voice") == .6f &&
+                launcher.settings().channelVolumes.at("other-game") == .2f,
+            "Injected channels preserve order and saved gains without exposing "
+            "stale channels");
+    bool rejected = false;
+    try {
+      launcher.setAudioChannels({"se", "invalid\nchannel"});
+    } catch (const std::invalid_argument &) {
+      rejected = true;
+    }
+    require(rejected && launcher.getAudioChannels() ==
+                            std::vector<std::string>{"voice", "bgm"},
+            "Invalid injection leaves the existing channel list intact");
+    launcher.setAudioChannels({"se"});
+    require(launcher.getAudioChannels() == std::vector<std::string>{"se"},
+            "A game replaces the visible channel list instead of accumulating "
+            "every mixer");
     launcher.open();
     for (int i = 0; i < 3; ++i)
       launcher.iterate();
@@ -113,8 +158,7 @@ void launcher(const std::filesystem::path &directory) {
   const auto saved = EngineSettings::load(path);
   require(saved.upscaling.factor == 2.5f &&
               saved.upscaling.backend == UpscaleBackend::MetalFX &&
-              saved.width == 1600 &&
-              saved.translationPath == transPath &&
+              saved.width == 1600 && saved.translationPath == transPath &&
               saved.fontPath == "font.ttf",
           "The engine settings file holds the launcher choices");
 
@@ -161,6 +205,7 @@ int main() {
   try {
     std::filesystem::create_directories(directory);
     launcher(directory);
+    pathDiscovery(directory);
     gameLauncher(directory);
   } catch (const std::exception &error) {
     std::cerr << "FAIL: " << error.what() << '\n';

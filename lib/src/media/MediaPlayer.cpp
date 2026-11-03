@@ -134,10 +134,16 @@ struct MediaPlayer::State {
       return size;
     int64_t base = 0;
     switch (whence & ~AVSEEK_FORCE) {
-    case SEEK_SET: break;
-    case SEEK_CUR: base = static_cast<int64_t>(self.offset); break;
-    case SEEK_END: base = size; break;
-    default: return AVERROR(EINVAL);
+    case SEEK_SET:
+      break;
+    case SEEK_CUR:
+      base = static_cast<int64_t>(self.offset);
+      break;
+    case SEEK_END:
+      base = size;
+      break;
+    default:
+      return AVERROR(EINVAL);
     }
     if ((position > 0 && base > INT64_MAX - position) ||
         (position < 0 && base < INT64_MIN - position))
@@ -386,7 +392,8 @@ struct MediaPlayer::State {
       // starves audio in containers whose audio packets follow a video cluster.
       if ((!video || videoReady) && (!audio || audioReady))
         break;
-      // Bound buffering for interleaved streams with severely unequal timestamps.
+      // Bound buffering for interleaved streams with severely unequal
+      // timestamps.
       if (frames.size() > 300 || queuedAudio() > 5)
         throw std::runtime_error(
             "Media stream interleaving exceeds buffer limits");
@@ -884,6 +891,8 @@ void MediaPlayer::render(RendererRef renderer, const SDL_FRect &area,
                          Upscaling *upscaler, bool stretch) {
   if (!hasVideoFrame())
     return;
+  if (!upscaler)
+    upscaler = Upscaling::forRenderer(renderer);
   float w = area.w, h = area.w / static_cast<float>(state->aspect);
   if (stretch) {
     h = area.h;

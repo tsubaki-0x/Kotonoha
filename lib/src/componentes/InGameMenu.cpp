@@ -2,6 +2,7 @@
 #include <Kotonoha/componentes/VNBacklog.hpp>
 #include <Kotonoha/core/Engine.hpp>
 #include <Kotonoha/core/UI.hpp>
+#include <Kotonoha/events/BackAction.hpp>
 #include <Kotonoha/script/TimelinePlayer.hpp>
 
 namespace Kotonoha {
@@ -54,11 +55,13 @@ void InGameMenu::activate(int index) {
 
 void InGameMenu::onEvent(EventRef event) {
   const int count = itemCount();
+
+  if (BackAction(engine, event)) {
+    toggle();
+    return;
+  }
+
   if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) {
-    if (event.key.key == SDLK_ESCAPE) {
-      toggle();
-      return;
-    }
     if (!IsOpen() || count <= 0)
       return;
     if (event.key.key == SDLK_B) {
@@ -95,7 +98,7 @@ void InGameMenu::render(RendererRef renderer, float) {
 
 void InGameMenu::renderPanel(RendererRef renderer) {
   auto &ui = engine.GetUI();
-  ui.panel(renderer, {0, 0, UI::width, UI::height}, {0, 0, 0, 160});
+  ui.backdrop(renderer, {0, 0, 0, 160});
   ui.panel(renderer, {440, 130, 400, 440});
   ui.text(renderer, "Paused", 460, 150, 360, {255, 215, 100, 255});
 }
@@ -105,7 +108,7 @@ void InGameMenu::renderItem(RendererRef renderer, int index, bool focused) {
 }
 
 InGameMenu &GetInGameMenuRuntime(Engine &engineRef) {
-  static InGameMenu menu{engineRef};
+  auto &menu = engineRef.sharedScene<InGameMenu>();
   return menu;
 }
 

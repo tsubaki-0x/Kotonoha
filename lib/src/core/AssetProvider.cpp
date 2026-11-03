@@ -16,8 +16,8 @@ namespace Kotonoha {
 namespace {
 constexpr std::uintmax_t maximumAssetSize = 1024ull * 1024 * 1024;
 
-SDL_IOStream *memoryStream(const std::vector<Uint8> &bytes) {
-  SDL_IOStream *stream = SDL_IOFromConstMem(bytes.data(), bytes.size());
+IOStreamPtr memoryStream(const std::vector<Uint8> &bytes) {
+  IOStreamPtr stream{SDL_IOFromConstMem(bytes.data(), bytes.size())};
   if (!stream)
     throw std::runtime_error(SDL_GetError());
   return stream;
@@ -38,20 +38,95 @@ void prepareLinearSurface(SDL_Surface *surface) {
 
 AssetProvider::AssetProvider() = default;
 AssetProvider::~AssetProvider() = default;
+void AssetProvider::setOverlay(const std::filesystem::path &directory) {
+  AssetOverlay mounted(directory);
+  overlay = std::move(mounted);
+  clearCache();
+}
+std::string AssetProvider::overlayPath(const std::string &id) const {
+  return overlay.resolve(overlayId(id));
+}
+bool AssetProvider::contains(const std::string &id) const {
+  return !overlayPath(id).empty() || containsAsset(id);
+}
+std::vector<Uint8> AssetProvider::read(const std::string &id) const {
+  const auto file = overlayPath(id);
+  if (file.empty())
+    return readAsset(id);
+  const auto size = std::filesystem::file_size(file);
+  if (size > maximumAssetSize)
+    throw std::runtime_error("Overlay asset is too large: " + id);
+  std::ifstream input(file, std::ios::binary);
+  if (!input)
+    throw std::runtime_error("Cannot open overlay asset: " + id);
+  std::vector<Uint8> bytes(size);
+  if (size && !input.read(reinterpret_cast<char *>(bytes.data()),
+                          std::streamsize(size)))
+    throw std::runtime_error("Cannot read overlay asset: " + id);
+  return bytes;
+}
+std::string AssetProvider::localPath(const std::string &id) const {
+  auto file = overlayPath(id);
+  return file.empty() ? localPathAsset(id) : file;
+}
+std::vector<std::string> AssetProvider::list(const std::string &prefix) const {
+  auto result = listAsset(prefix);
+  auto overrides = overlay.list(prefix);
+  result.insert(result.end(), overrides.begin(), overrides.end());
+  std::map<std::string, std::string> unique;
+  for (auto &id : result)
+    unique[AssetOverlay::key(id)] = id;
+  result.clear();
+  for (auto &[key, id] : unique)
+    result.push_back(id);
+  return result;
+}
+SurfacePtr AssetProvider::loadSurface(const std::string &id) const {
+  if (!overlayPath(id).empty()) {
+    try {
+      return MediaDecoder::decodePicture(read(id));
+    } catch (const std::exception
+                 &) { /* Native asset formats use the game's decoder below. */
+    }
+  }
+  return loadSurfaceAsset(id);
+}
+SurfacePtr AssetProvider::loadFrame(const std::string &id,
+                                    double seconds) const {
+  if (!overlayPath(id).empty()) {
+    try {
+      return MediaDecoder::decodePicture(read(id), seconds);
+    } catch (const std::exception &) {
+    }
+  }
+  return loadFrameAsset(id, seconds);
+}
+AudioClip AssetProvider::loadAudio(const std::string &id) const {
+  if (!overlayPath(id).empty()) {
+    try {
+      return MediaDecoder::decodeAudio(read(id));
+    } catch (const std::exception &) {
+    }
+  }
+  return loadAudioAsset(id);
+}
 
-std::vector<std::string> AssetProvider::list(const std::string &) const {
+std::vector<std::string> AssetProvider::listAsset(const std::string &) const {
   return {};
 }
 
-std::string AssetProvider::localPath(const std::string &) const { return {}; }
+std::string AssetProvider::localPathAsset(const std::string &) const {
+  return {};
+}
 
 std::unique_ptr<AssetStream> AssetProvider::openStream(const std::string &) const {
   return {};
 }
 
-SurfacePtr AssetProvider::loadSurface(const std::string &id) const {
-  const auto bytes = read(id);
-  if (SurfacePtr surface{SDL_LoadSurface_IO(memoryStream(bytes), true)})
+SurfacePtr AssetProvider::loadSurfaceAsset(const std::string &id) const {
+  const auto bytes = readAsset(id);
+  if (SurfacePtr surface{
+          SDL_LoadSurface_IO(memoryStream(bytes).release(), true)})
     return surface;
   const std::string sdlError = SDL_GetError();
   try {
@@ -62,26 +137,27 @@ SurfacePtr AssetProvider::loadSurface(const std::string &id) const {
   }
 }
 
-SurfacePtr AssetProvider::loadFrame(const std::string &id,
-                                    double seconds) const {
+SurfacePtr AssetProvider::loadFrameAsset(const std::string &id,
+                                         double seconds) const {
   if (seconds <= 0)
-    return loadSurface(id);
+    return loadSurfaceAsset(id);
   try {
-    return MediaDecoder::decodePicture(read(id), seconds);
+    return MediaDecoder::decodePicture(readAsset(id), seconds);
   } catch (const std::exception &error) {
     throw std::runtime_error("Cannot decode frame of " + id + ": " +
                              error.what());
   }
 }
 
-AudioClip AssetProvider::loadAudio(const std::string &id) const {
-  const auto bytes = read(id);
+AudioClip AssetProvider::loadAudioAsset(const std::string &id) const {
+  const auto bytes = readAsset(id);
   AudioClip clip;
   Uint8 *data = nullptr;
   Uint32 length = 0;
-  if (SDL_LoadWAV_IO(memoryStream(bytes), true, &clip.spec, &data, &length)) {
-    clip.data.assign(data, data + length);
-    SDL_free(data);
+  if (SDL_LoadWAV_IO(memoryStream(bytes).release(), true, &clip.spec, &data,
+                     &length)) {
+    SDLMemoryPtr<Uint8> owned(data);
+    clip.data.assign(owned.get(), owned.get() + length);
     return clip;
   }
   const std::string sdlError = SDL_GetError();
@@ -119,6 +195,8 @@ SDL_Texture &AssetProvider::stageTexture(RendererRef renderer,
   if (!created)
     throw std::runtime_error("Cannot upload picture " + id + ": " +
                              SDL_GetError());
+  if (auto *pipeline = Upscaling::forRenderer(renderer))
+    pipeline->process(*created, 0);
   SDL_Texture &result = *created;
   textures.emplace(id, std::move(created));
   return result;
@@ -128,6 +206,8 @@ SDL_Texture &AssetProvider::texture(RendererRef renderer, const std::string &id,
                                     float scale, Upscaling *upscaling) {
   if (!std::isfinite(scale) || scale <= 0)
     throw std::invalid_argument("Texture scale must be positive");
+  if (upscaling)
+    return upscaling->process(texture(renderer, id), 0);
   if (scale == 1)
     return texture(renderer, id);
   if (textureRenderer != &renderer) {
@@ -138,9 +218,7 @@ SDL_Texture &AssetProvider::texture(RendererRef renderer, const std::string &id,
   if (auto found = textures.find(key); found != textures.end())
     return *found->second;
   TexturePtr created;
-  if (upscaling) {
-    created = upscaling->scaled(texture(renderer, id), scale);
-  } else {
+  {
     const SurfacePtr source = loadSurface(id);
     prepareLinearSurface(source.get());
     SurfacePtr resized(SDL_ScaleSurface(
@@ -212,7 +290,7 @@ FileSystemAssetProvider::resolve(const std::string &id) const {
   return resolved;
 }
 
-bool FileSystemAssetProvider::contains(const std::string &id) const {
+bool FileSystemAssetProvider::containsAsset(const std::string &id) const {
   try {
     std::error_code error;
     return std::filesystem::is_regular_file(resolve(id), error);
@@ -221,7 +299,8 @@ bool FileSystemAssetProvider::contains(const std::string &id) const {
   }
 }
 
-std::vector<Uint8> FileSystemAssetProvider::read(const std::string &id) const {
+std::vector<Uint8>
+FileSystemAssetProvider::readAsset(const std::string &id) const {
   const auto path = resolve(id);
   std::error_code error;
   const auto size = std::filesystem::file_size(path, error);
@@ -238,7 +317,7 @@ std::vector<Uint8> FileSystemAssetProvider::read(const std::string &id) const {
 }
 
 std::vector<std::string>
-FileSystemAssetProvider::list(const std::string &prefix) const {
+FileSystemAssetProvider::listAsset(const std::string &prefix) const {
   const auto base = root.empty() ? std::filesystem::current_path() : root;
   std::vector<std::string> result;
   std::error_code error;
@@ -253,7 +332,8 @@ FileSystemAssetProvider::list(const std::string &prefix) const {
   return result;
 }
 
-std::string FileSystemAssetProvider::localPath(const std::string &id) const {
+std::string
+FileSystemAssetProvider::localPathAsset(const std::string &id) const {
   return resolve(id).string();
 }
 

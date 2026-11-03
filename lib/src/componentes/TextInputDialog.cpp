@@ -1,5 +1,6 @@
 #include <Kotonoha/componentes/TextInputDialog.hpp>
 #include <Kotonoha/core/UI.hpp>
+#include <Kotonoha/events/BackAction.hpp>
 #include <cmath>
 #include <stdexcept>
 
@@ -18,19 +19,19 @@ void TextInputDialog::submitText(const std::string &text) {
 TextInputDialog::TextInputDialog(
     Engine &engineRef, std::string prompt,
     std::function<void(const std::string &)> confirmCb,
-    std::function<void()> cancelCb)
+    std::function<void()> cancelCb, const std::string &initialText)
     : Scene(engineRef) {
-  configure(prompt, std::move(confirmCb), std::move(cancelCb));
+  configure(prompt, std::move(confirmCb), std::move(cancelCb), initialText);
 }
 
 void TextInputDialog::configure(
     const std::string &prompt,
     std::function<void(const std::string &)> confirmCb,
-    std::function<void()> cancelCb) {
+    std::function<void()> cancelCb, const std::string &initialText) {
   promptText = prompt;
   onConfirm = std::move(confirmCb);
   onCancel = std::move(cancelCb);
-  input.clear();
+  input = initialText;
   editing = false;
 }
 
@@ -52,7 +53,7 @@ void TextInputDialog::onEvent(EventRef event) {
       const auto value = input;
       callback(value);
     }
-  } else if ((key && event.key.key == SDLK_ESCAPE) ||
+  } else if (BackAction(engine, event) ||
              UI::clicked(event, {620, 402, 240, 48})) {
     const auto callback = onCancel;
     if (callback)
@@ -88,6 +89,7 @@ void TextInputDialog::update() {
 
 void TextInputDialog::render(RendererRef renderer, float) {
   auto &ui = engine.GetUI();
+  ui.backdrop(renderer);
   ui.panel(renderer, {380, 240, 520, 230});
   ui.text(renderer, promptText, 400, 260, 480, {255, 215, 100, 255});
   ui.panel(renderer, {400, 330, 480, 48}, {45, 50, 70, 255});
@@ -102,10 +104,12 @@ void TextInputDialog::render(RendererRef renderer, float) {
 TextInputDialog &
 GetTextInputDialogRuntime(Engine &engineRef, const std::string &prompt,
                           std::function<void(const std::string &)> confirmCb,
-                          std::function<void()> cancelCb) {
-  static TextInputDialog dialog{engineRef, "", nullptr, nullptr};
+                          std::function<void()> cancelCb,
+                          const std::string &initialText) {
+  auto &dialog = engineRef.sharedScene<TextInputDialog>("", nullptr, nullptr);
   if (!prompt.empty() || confirmCb || cancelCb)
-    dialog.configure(prompt, std::move(confirmCb), std::move(cancelCb));
+    dialog.configure(prompt, std::move(confirmCb), std::move(cancelCb),
+                     initialText);
   return dialog;
 }
 

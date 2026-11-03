@@ -107,3 +107,13 @@ if(KOTONOHA_TEST_FFMPEG)
         FIXTURES_REQUIRED interleaved_audio
         ENVIRONMENT "SDL_VIDEO_DRIVER=dummy;SDL_AUDIO_DRIVER=dummy")
 endif()
+
+add_executable(KotonohaInputActionsTests InputActionsTests.cpp)
+target_link_libraries(KotonohaInputActionsTests PRIVATE Kotonoha::Engine)
+add_test(NAME Kotonoha.InputActions COMMAND KotonohaInputActionsTests)
+
+add_executable(KotonohaDebugTranslationTests DebugTranslationTests.cpp)
+target_link_libraries(KotonohaDebugTranslationTests PRIVATE Kotonoha::Engine)
+kotonoha_copy_assets(KotonohaDebugTranslationTests)
+add_test(NAME Kotonoha.DebugTranslation COMMAND KotonohaDebugTranslationTests)
+set_tests_properties(Kotonoha.DebugTranslation PROPERTIES ENVIRONMENT "SDL_VIDEO_DRIVER=dummy;SDL_AUDIO_DRIVER=dummy")

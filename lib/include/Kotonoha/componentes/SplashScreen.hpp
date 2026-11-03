@@ -3,9 +3,12 @@
 #include <Kotonoha/core/Scene.hpp>
 
 #include <filesystem>
+#include <memory>
 #include <vector>
 
 namespace Kotonoha {
+
+class MediaPlayer;
 
 // Each picture follows the legacy Kotonoha commercial splash envelope: fade
 // in, hold, fade out, then advance. Any direct user activation skips the splash
@@ -15,10 +18,11 @@ public:
   static constexpr double fadeSeconds = 0.8;
   static constexpr double displaySeconds = 3.0;
 
-  SplashScreen(Engine &engine, std::vector<std::filesystem::path> pictures);
+  SplashScreen(Engine &engine, std::vector<std::filesystem::path> media);
+  ~SplashScreen() override;
 
-  bool finished() const { return current >= pictures.size(); }
-  void restart();
+  bool finished() const override { return current >= media.size(); }
+  void restart() override;
 
   bool capturesInput() const override { return !finished(); }
   RenderSpace renderSpace() const override { return RenderSpace::Screen; }
@@ -27,14 +31,16 @@ public:
   void render(RendererRef renderer, float scale) override;
 
 private:
-  std::vector<std::filesystem::path> pictures;
+  std::vector<std::filesystem::path> media;
   size_t current = 0;
   TexturePtr texture;
+  std::unique_ptr<MediaPlayer> video;
   Uint64 startedNs = 0;
   bool loaded = false;
 
   void load(RendererRef renderer);
   void next();
+  bool currentIsVideo() const;
   double elapsed() const;
 };
 

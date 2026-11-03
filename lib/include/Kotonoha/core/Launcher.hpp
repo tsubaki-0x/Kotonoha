@@ -1,4 +1,5 @@
 #pragma once
+#include <Kotonoha/events/InputActions.hpp>
 
 #include <Kotonoha/core/SDL.hpp>
 #include <Kotonoha/core/Settings.hpp>
@@ -12,7 +13,9 @@
 struct ImGuiContext;
 
 namespace Kotonoha {
-namespace ImGuiTheme { class ShaderFilePicker; }
+namespace ImGuiTheme {
+class ShaderFilePicker;
+}
 
 // Pre-game configuration window (ImGui) for renderer, window, upscaling and
 // logs. It edits the same EngineSettings file the Engine loads, so the game
@@ -39,6 +42,12 @@ public:
   SDL_AppResult iterate();
   State state() const;
   EngineSettings &settings();
+  // Only these game-owned channels appear in the launcher's audio controls.
+  // Stored values for other channels remain untouched and are not displayed.
+  void setAudioChannels(std::vector<std::string> names);
+  const std::vector<std::string> &getAudioChannels() const {
+    return audioChannels;
+  }
   const std::string &getSettingsPath() const;
   const std::string &getStatus() const;
   // Validates and saves, then finishes with State::Launch. On failure keeps
@@ -61,11 +70,13 @@ protected:
 
 private:
   struct Dialog;
+  TouchPointer touchPointer;
   static void SDLCALL dialogFinished(void *data, const char *const *files,
                                      int filter);
   std::string title, settingsPath, status;
   bool statusError = false;
   EngineSettings draft, defaults;
+  std::vector<std::string> audioChannels;
   WindowPtr window;
   RendererPtr renderer;
   ImGuiContext *context = nullptr;
@@ -81,6 +92,11 @@ private:
   void drawUpscaling();
   void drawTranslation();
   void drawAdvanced();
+
+  std::string overlayChecked, overlayInfo;
+  bool overlayValid = true;
+  bool overlayCheckedOnce = false;
+  void checkOverlay(bool force = false);
 };
 
 } // namespace Kotonoha

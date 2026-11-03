@@ -1,5 +1,5 @@
-#include <Kotonoha/core/UI.hpp>
 #include <Kotonoha/core/FileSystem.hpp>
+#include <Kotonoha/core/UI.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -30,37 +30,31 @@ void eraseLastCharacter(std::string &text) {
 }
 
 UI::UI(const std::string &fontPath) {
-  if (!TTF_Init())
-    throw std::runtime_error(SDL_GetError());
-  std::string path;
   try {
-    if (!fontPath.empty()) {
-      try {
-        path = FileResolver::font(fontPath).string();
-        font.reset(TTF_OpenFont(path.c_str(), 24));
-      } catch (const std::exception &error) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "UI custom font '%s': %s", fontPath.c_str(), error.what());
+    fontData = FileResolver::loadFontMemory(fontPath);
+    if (fontData.empty()) {
+      fontData = FileResolver::loadFontMemory("");
+    }
+    if (!fontData.empty()) {
+      Kotonoha::IOStreamPtr io{
+          SDL_IOFromConstMem(fontData.data(), fontData.size())};
+      if (io) {
+        font.reset(TTF_OpenFontIO(io.release(), true, 24));
       }
     }
-    if (!font) {
-      path = FileResolver::font().string();
-      font.reset(TTF_OpenFont(path.c_str(), 24));
-    }
-  } catch (...) {
-    TTF_Quit();
-    throw;
+  } catch (const std::exception &error) {
+    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "UI font memory load error: %s",
+                error.what());
   }
   if (!font) {
-    const std::string error = "Cannot open font " + path + ": " + SDL_GetError();
-    TTF_Quit();
-    throw std::runtime_error(error);
+    throw std::runtime_error(std::string("Cannot open font via memory: ") +
+                             SDL_GetError());
   }
 }
 
 UI::~UI() {
   cache.clear();
   font.reset();
-  TTF_Quit();
 }
 
 void UI::setPixelDensity(float value) {
@@ -84,17 +78,47 @@ SDL_FPoint UI::viewSize(RendererRef renderer) {
   return {static_cast<float>(w), static_cast<float>(h)};
 }
 
+float UI::rasterDensity(RendererRef renderer) {
+  float x = 1, y = 1;
+  SDL_GetRenderScale(&renderer, &x, &y);
+  int w = 0, h = 0;
+  SDL_RendererLogicalPresentation mode;
+  SDL_GetRenderLogicalPresentation(&renderer, &w, &h, &mode);
+  if (mode != SDL_LOGICAL_PRESENTATION_DISABLED && w > 0 && h > 0) {
+    SDL_FRect area{};
+    if (SDL_GetRenderLogicalPresentationRect(&renderer, &area)) {
+      x *= area.w / w;
+      y *= area.h / h;
+    }
+  }
+  return std::max(1.0f, std::max(std::abs(x), std::abs(y)));
+}
+
 float UI::text(RendererRef renderer, const std::string &value, float x, float y,
                float wrap, SDL_Color color) {
+  return textSized(renderer, value, x, y, wrap, 24, color);
+}
+float UI::textSized(RendererRef renderer, const std::string &value, float x,
+                    float y, float wrap, float fontSize, SDL_Color color) {
   if (value.empty())
     return 0;
-  const int pixels = std::max(1, static_cast<int>(std::ceil(wrap * density)));
-  const std::string key =
-      std::to_string(density) + ":" + std::to_string(pixels) + ":" + value;
+  const float raster = rasterDensity(renderer);
+  const int pixels = std::max(1, static_cast<int>(std::ceil(wrap * raster)));
+  const std::string key = std::to_string(fontSize) + ":" +
+                          std::to_string(raster) + ":" +
+                          std::to_string(pixels) + ":" + value;
   auto found = cache.find(key);
   if (found == cache.end()) {
     if (cache.size() >= 512)
       cache.clear();
+    const auto oldSize = TTF_GetFontSize(font.get());
+    struct RestoreSize {
+      TTF_Font *font;
+      float size;
+      ~RestoreSize() { TTF_SetFontSize(font, size); }
+    } restore{font.get(), oldSize};
+    if (!TTF_SetFontSize(font.get(), fontSize * raster))
+      throw std::runtime_error(SDL_GetError());
     SurfacePtr surface{TTF_RenderText_Blended_Wrapped(
         font.get(), value.c_str(), value.size(), {255, 255, 255, 255}, pixels)};
     if (!surface)
@@ -105,8 +129,8 @@ float UI::text(RendererRef renderer, const std::string &value, float x, float y,
     found =
         cache
             .emplace(key, CachedText{std::move(texture),
-                                     static_cast<float>(surface->w) / density,
-                                     static_cast<float>(surface->h) / density})
+                                     static_cast<float>(surface->w) / raster,
+                                     static_cast<float>(surface->h) / raster})
             .first;
   }
   auto &entry = found->second;
@@ -125,6 +149,18 @@ float UI::textHeight(RendererRef renderer, const std::string &value,
 }
 
 SDL_FPoint UI::textSize(const std::string &value, float width) const {
+  return measureSized(value, width, 24);
+}
+SDL_FPoint UI::measureSized(const std::string &value, float width,
+                            float fontSize) const {
+  const float oldSize = TTF_GetFontSize(font.get());
+  struct RestoreSize {
+    TTF_Font *font;
+    float size;
+    ~RestoreSize() { TTF_SetFontSize(font, size); }
+  } restore{font.get(), oldSize};
+  if (!TTF_SetFontSize(font.get(), fontSize * density))
+    throw std::runtime_error(SDL_GetError());
   if (value.empty())
     return {0, 0};
   int w = 0, h = 0;
@@ -139,6 +175,27 @@ void UI::panel(RendererRef renderer, SDL_FRect rect, SDL_Color color) {
   SDL_SetRenderDrawBlendMode(&renderer, SDL_BLENDMODE_BLEND);
   SDL_SetRenderDrawColor(&renderer, color.r, color.g, color.b, color.a);
   SDL_RenderFillRect(&renderer, &rect);
+}
+
+void UI::backdrop(RendererRef renderer, SDL_Color color) {
+  float scaleX = 1, scaleY = 1;
+  SDL_Rect viewport{}, clip{};
+  const bool viewportSet = SDL_RenderViewportSet(&renderer);
+  const bool clipEnabled = SDL_RenderClipEnabled(&renderer);
+  SDL_GetRenderScale(&renderer, &scaleX, &scaleY);
+  SDL_GetRenderViewport(&renderer, &viewport);
+  SDL_GetRenderClipRect(&renderer, &clip);
+
+  SDL_SetRenderClipRect(&renderer, nullptr);
+  SDL_SetRenderViewport(&renderer, nullptr);
+  SDL_SetRenderScale(&renderer, 1, 1);
+  SDL_SetRenderDrawBlendMode(&renderer, SDL_BLENDMODE_BLEND);
+  SDL_SetRenderDrawColor(&renderer, color.r, color.g, color.b, color.a);
+  SDL_RenderFillRect(&renderer, nullptr);
+
+  SDL_SetRenderScale(&renderer, scaleX, scaleY);
+  SDL_SetRenderViewport(&renderer, viewportSet ? &viewport : nullptr);
+  SDL_SetRenderClipRect(&renderer, clipEnabled ? &clip : nullptr);
 }
 
 void UI::button(RendererRef renderer, SDL_FRect rect, const std::string &label,
@@ -207,8 +264,13 @@ UI::FrameScope::~FrameScope() {
 }
 
 bool UI::clicked(EventRef event, SDL_FRect rect) {
-  if (event.type != SDL_EVENT_MOUSE_BUTTON_DOWN ||
-      event.button.button != SDL_BUTTON_LEFT)
+  if (event.type != SDL_EVENT_MOUSE_BUTTON_DOWN &&
+      event.type != SDL_EVENT_MOUSE_BUTTON_UP)
+    return false;
+  const auto activation = event.button.which == SDL_TOUCH_MOUSEID
+                              ? SDL_EVENT_MOUSE_BUTTON_UP
+                              : SDL_EVENT_MOUSE_BUTTON_DOWN;
+  if (event.type != activation || event.button.button != SDL_BUTTON_LEFT)
     return false;
   const SDL_FPoint point{event.button.x, event.button.y};
   return SDL_PointInRectFloat(&point, &rect);

@@ -49,6 +49,100 @@ public:
 };
 } // namespace
 
+const std::array<UpscalePreset, 15> &UpscalePresets() {
+  static constexpr std::array<UpscalePreset, 15> values{
+      UpscalePreset::Anime4KModeAHQ,
+      UpscalePreset::Anime4KModeBHQ,
+      UpscalePreset::Anime4KModeCHQ,
+      UpscalePreset::Anime4KModeAAHQ,
+      UpscalePreset::Anime4KModeBBHQ,
+      UpscalePreset::Anime4KModeCAHQ,
+      UpscalePreset::Anime4KModeAFast,
+      UpscalePreset::Anime4KModeBFast,
+      UpscalePreset::Anime4KModeCFast,
+      UpscalePreset::Anime4KModeAAFast,
+      UpscalePreset::Anime4KModeBBFast,
+      UpscalePreset::Anime4KModeCAFast,
+      UpscalePreset::ArtCNN,
+      UpscalePreset::ArtCNNDenoise,
+      UpscalePreset::ArtCNNLarge};
+  return values;
+}
+const char *UpscalePresetName(UpscalePreset preset) {
+  switch (preset) {
+  case UpscalePreset::Anime4KModeAHQ:
+    return "Anime4K: Mode A (HQ)";
+  case UpscalePreset::Anime4KModeBHQ:
+    return "Anime4K: Mode B (HQ)";
+  case UpscalePreset::Anime4KModeCHQ:
+    return "Anime4K: Mode C (HQ)";
+  case UpscalePreset::Anime4KModeAAHQ:
+    return "Anime4K: Mode A+A (HQ)";
+  case UpscalePreset::Anime4KModeBBHQ:
+    return "Anime4K: Mode B+B (HQ)";
+  case UpscalePreset::Anime4KModeCAHQ:
+    return "Anime4K: Mode C+A (HQ)";
+  case UpscalePreset::Anime4KModeAFast:
+    return "Anime4K: Mode A (Fast)";
+  case UpscalePreset::Anime4KModeBFast:
+    return "Anime4K: Mode B (Fast)";
+  case UpscalePreset::Anime4KModeCFast:
+    return "Anime4K: Mode C (Fast)";
+  case UpscalePreset::Anime4KModeAAFast:
+    return "Anime4K: Mode A+A (Fast)";
+  case UpscalePreset::Anime4KModeBBFast:
+    return "Anime4K: Mode B+B (Fast)";
+  case UpscalePreset::Anime4KModeCAFast:
+    return "Anime4K: Mode C+A (Fast)";
+  case UpscalePreset::ArtCNN:
+    return "ArtCNN C4F16";
+  case UpscalePreset::ArtCNNDenoise:
+    return "ArtCNN C4F16 DS";
+  case UpscalePreset::ArtCNNLarge:
+    return "ArtCNN C4F32";
+  }
+  return "Unknown";
+}
+bool UpscalePresetIsAnime4K(UpscalePreset preset) {
+  return preset == UpscalePreset::Anime4K ||
+         preset >= UpscalePreset::Anime4KModeBHQ;
+}
+std::vector<std::string> UpscalePresetShaderFiles(UpscalePreset preset) {
+  if (preset == UpscalePreset::ArtCNN)
+    return {"ArtCNN_C4F16.glsl"};
+  if (preset == UpscalePreset::ArtCNNDenoise)
+    return {"ArtCNN_C4F16_DS.glsl"};
+  if (preset == UpscalePreset::ArtCNNLarge)
+    return {"ArtCNN_C4F32.glsl"};
+  const auto &values = UpscalePresets();
+  const auto found = std::find(values.begin(), values.end(), preset);
+  if (found == values.end())
+    throw std::invalid_argument("Unknown upscaler preset");
+  const auto index = std::distance(values.begin(), found);
+  const bool fast = index >= 6;
+  const auto mode = index % 6;
+  const std::string primary = fast ? "M" : "VL", secondary = fast ? "S" : "M";
+  std::vector<std::string> files{"Anime4K_Clamp_Highlights.glsl"};
+  if (mode == 2 || mode == 5)
+    files.push_back("Anime4K_Upscale_Denoise_CNN_x2_" + primary + ".glsl");
+  else {
+    files.push_back(std::string("Anime4K_Restore_CNN_") +
+                    ((mode == 1 || mode == 4) ? "Soft_" : "") + primary +
+                    ".glsl");
+    files.push_back("Anime4K_Upscale_CNN_x2_" + primary + ".glsl");
+  }
+  if (mode == 3)
+    files.push_back("Anime4K_Restore_CNN_" + secondary + ".glsl");
+  files.push_back("Anime4K_AutoDownscalePre_x2.glsl");
+  files.push_back("Anime4K_AutoDownscalePre_x4.glsl");
+  if (mode == 4)
+    files.push_back("Anime4K_Restore_CNN_Soft_" + secondary + ".glsl");
+  if (mode == 5)
+    files.push_back("Anime4K_Restore_CNN_" + secondary + ".glsl");
+  files.push_back("Anime4K_Upscale_CNN_x2_" + secondary + ".glsl");
+  return files;
+}
+
 bool UpscaleSettings::enabled() const {
   return backend != UpscaleBackend::None && factor > 1;
 }
@@ -106,9 +200,9 @@ std::string UpscaleShaderFileList(const std::vector<std::string> &files) {
 
 void UpscaleSettings::validate() const {
   if (backend < UpscaleBackend::None || backend > UpscaleBackend::Auto ||
-      preset < UpscalePreset::Anime4K || preset > UpscalePreset::ArtCNNLarge ||
-      !std::isfinite(factor) || factor < 1 || factor > 4 ||
-      shaderFiles.find('\0') != std::string::npos)
+      preset < UpscalePreset::Anime4K ||
+      preset > UpscalePreset::Anime4KModeCAFast || !std::isfinite(factor) ||
+      factor < 1 || factor > 4 || shaderFiles.find('\0') != std::string::npos)
     throw std::invalid_argument("Invalid upscaler settings (factor: 1..4)");
 }
 
@@ -126,13 +220,37 @@ const Upscaler *Upscaling::getImplementation() const {
   return implementation.get();
 }
 
+struct Upscaling::TextureCache {
+  TexturePtr texture;
+  Uint64 serial = 0, retryAt = 0;
+  bool failed = false;
+};
+
+void Upscaling::clearTextureCaches() {
+  for (auto &weak : textureCaches)
+    if (auto entry = weak.lock()) {
+      entry->texture.reset();
+      entry->failed = false;
+    }
+  textureCaches.clear();
+}
+
 Upscaling::Upscaling(RendererRef value) : renderer(value) {
   if (activeUpscaling)
     throw std::logic_error(
         "The migrated native backends support one active Upscaler");
   activeUpscaling = this;
+  SDL_SetPointerProperty(SDL_GetRendererProperties(&renderer),
+                         "kotonoha.upscaling", this);
 }
+Upscaling *Upscaling::forRenderer(RendererRef renderer) {
+  return static_cast<Upscaling *>(SDL_GetPointerProperty(
+      SDL_GetRendererProperties(&renderer), "kotonoha.upscaling", nullptr));
+}
+
 Upscaling::~Upscaling() {
+  clearTextureCaches();
+  SDL_ClearProperty(SDL_GetRendererProperties(&renderer), "kotonoha.upscaling");
   implementation.reset();
   activeUpscaling = nullptr;
 }
@@ -248,6 +366,10 @@ SDL_Texture &Upscaler::process(TextureRef texture, Uint64 contentSerial) {
 
 void Upscaling::configure(const UpscaleSettings &value) {
   value.validate();
+  const bool changed = settings.backend != value.backend ||
+                       settings.preset != value.preset ||
+                       settings.factor != value.factor ||
+                       settings.shaderFiles != value.shaderFiles;
   if (!supports(value.backend))
     throw std::invalid_argument(
         "Upscaler is unavailable for the current renderer");
@@ -279,14 +401,87 @@ void Upscaling::configure(const UpscaleSettings &value) {
                 UpscaleBackendName(value.backend),
                 UpscaleBackendName(concrete.backend), value.factor);
   }
+  if (changed)
+    clearTextureCaches();
   settings = value;
 }
 
 SDL_Texture &Upscaling::process(TextureRef texture, Uint64 serial) {
-  return implementation ? implementation->process(texture, serial) : texture;
+  if (!implementation)
+    return texture;
+  try {
+    constexpr const char *key = "kotonoha.upscale-cache";
+    using Owner = std::shared_ptr<TextureCache>;
+    const auto properties = SDL_GetTextureProperties(&texture);
+    auto *owner =
+        static_cast<Owner *>(SDL_GetPointerProperty(properties, key, nullptr));
+    if (!owner) {
+      auto created = std::make_unique<Owner>(std::make_shared<TextureCache>());
+      if (!SDL_SetPointerPropertyWithCleanup(
+              properties, key, created.get(),
+              [](void *, void *value) { delete static_cast<Owner *>(value); },
+              nullptr))
+        throw std::runtime_error(SDL_GetError());
+      owner = created.release();
+    }
+    auto &entry = **owner;
+    if (entry.failed && entry.serial == serial)
+      return texture;
+    if (entry.texture && entry.serial == serial &&
+        (!entry.retryAt || SDL_GetTicks() < entry.retryAt))
+      return *entry.texture;
+    // Modulation belongs to drawing, rather than to the cached source pixels.
+    Uint8 r, g, b, a;
+    SDL_GetTextureColorMod(&texture, &r, &g, &b);
+    SDL_GetTextureAlphaMod(&texture, &a);
+    struct RestoreMod {
+      SDL_Texture &texture;
+      Uint8 r, g, b, a;
+      ~RestoreMod() {
+        SDL_SetTextureColorMod(&texture, r, g, b);
+        SDL_SetTextureAlphaMod(&texture, a);
+      }
+    } restore{texture, r, g, b, a};
+    SDL_SetTextureColorMod(&texture, 255, 255, 255);
+    SDL_SetTextureAlphaMod(&texture, 255);
+    if (!entry.texture)
+      textureCaches.push_back(*owner);
+    auto &processed = implementation->process(texture, serial);
+    if (!entry.texture || entry.texture->w != processed.w ||
+        entry.texture->h != processed.h) {
+      entry.texture.reset(SDL_CreateTexture(&renderer, SDL_PIXELFORMAT_RGBA32,
+                                            SDL_TEXTUREACCESS_TARGET,
+                                            processed.w, processed.h));
+      if (!entry.texture)
+        throw std::runtime_error(SDL_GetError());
+      textureCaches.erase(
+          std::remove_if(textureCaches.begin(), textureCaches.end(),
+                         [](const auto &weak) { return weak.expired(); }),
+          textureCaches.end());
+    }
+    copy(renderer, processed, *entry.texture);
+    SDL_SetBooleanProperty(SDL_GetTextureProperties(entry.texture.get()),
+                           "kotonoha.upscaled", true);
+    entry.failed = false;
+    entry.serial = serial;
+    entry.retryAt = implementation->retryDeadline();
+    return *entry.texture;
+  } catch (const std::exception &error) {
+    auto *owner = static_cast<std::shared_ptr<TextureCache> *>(
+        SDL_GetPointerProperty(SDL_GetTextureProperties(&texture),
+                               "kotonoha.upscale-cache", nullptr));
+    if (owner) {
+      (*owner)->texture.reset();
+      (*owner)->serial = serial;
+      (*owner)->failed = true;
+    }
+    SDL_LogWarn(LogUpscaler, "Cannot upscale texture; using original: %s",
+                error.what());
+    return texture;
+  }
 }
-
 void Upscaling::clear() {
+  clearTextureCaches();
   if (implementation)
     implementation->clear();
 }
@@ -296,9 +491,9 @@ TexturePtr Upscaling::scaled(TextureRef texture, float scale) {
     throw std::invalid_argument("Scale must be in (0, 16]");
   const int w = std::max(1, static_cast<int>(std::lround(texture.w * scale)));
   const int h = std::max(1, static_cast<int>(std::lround(texture.h * scale)));
-  const auto maximum = SDL_GetNumberProperty(
-      SDL_GetRendererProperties(&renderer),
-      SDL_PROP_RENDERER_MAX_TEXTURE_SIZE_NUMBER, 0);
+  const auto maximum =
+      SDL_GetNumberProperty(SDL_GetRendererProperties(&renderer),
+                            SDL_PROP_RENDERER_MAX_TEXTURE_SIZE_NUMBER, 0);
   if (maximum > 0 && (w > maximum || h > maximum))
     throw std::runtime_error("Scaled picture exceeds the texture size limit");
   TexturePtr result(SDL_CreateTexture(&renderer, SDL_PIXELFORMAT_RGBA32,
@@ -315,10 +510,13 @@ TexturePtr Upscaling::scaled(TextureRef texture, float scale) {
     try {
       implementation->configure(still);
       source = &implementation->process(texture, ++stillSerial);
-    } catch (...) {
+    } catch (const std::exception &error) {
       implementation->configure(active);
       implementation->clear();
-      throw;
+      source = &texture;
+      SDL_LogWarn(LogUpscaler,
+                  "Cannot upscale picture; using original pixels: %s",
+                  error.what());
     }
   }
   SDL_ScaleMode mode = SDL_SCALEMODE_LINEAR;
@@ -343,6 +541,9 @@ TexturePtr Upscaling::scaled(TextureRef texture, float scale) {
   requireSDL(SDL_SetTextureScaleMode(result.get(), SDL_SCALEMODE_LINEAR));
   SDL_LogDebug(LogUpscaler, "Scaled still %dx%d -> %dx%d (%s)", texture.w,
                texture.h, w, h, upscale ? "upscaler" : "linear");
+  if (upscale)
+    SDL_SetBooleanProperty(SDL_GetTextureProperties(result.get()),
+                           "kotonoha.upscaled", true);
   return result;
 }
 
@@ -361,10 +562,56 @@ SurfacePtr Upscaling::scaled(const SDL_Surface &surface, float scale) {
     throw std::runtime_error("Cannot read scaled pixels: " + error);
   if (pixels->format == SDL_PIXELFORMAT_RGBA32)
     return pixels;
-  SurfacePtr converted(SDL_ConvertSurface(pixels.get(), SDL_PIXELFORMAT_RGBA32));
+  SurfacePtr converted(
+      SDL_ConvertSurface(pixels.get(), SDL_PIXELFORMAT_RGBA32));
   if (!converted)
     throw std::runtime_error(SDL_GetError());
   return converted;
+}
+
+bool RenderUpscaledTexture(SDL_Renderer *renderer, SDL_Texture *texture,
+                           const SDL_FRect *source,
+                           const SDL_FRect *destination, Uint64 contentSerial) {
+  return RenderUpscaledTextureRotated(renderer, texture, source, destination, 0,
+                                      nullptr, SDL_FLIP_NONE, contentSerial);
+}
+bool RenderUpscaledTextureRotated(SDL_Renderer *renderer, SDL_Texture *texture,
+                                  const SDL_FRect *source,
+                                  const SDL_FRect *destination, double angle,
+                                  const SDL_FPoint *center, SDL_FlipMode flip,
+                                  Uint64 contentSerial) {
+  if (!renderer || !texture)
+    return SDL_SetError("Missing renderer or texture");
+  auto draw = [&](SDL_Texture *input, const SDL_FRect *crop) {
+    // Keep the ordinary SDL copy path for atlas crops. Some renderers round
+    // fractional source rectangles differently in the rotated-copy path.
+    return angle == 0 && flip == SDL_FLIP_NONE && !center
+               ? SDL_RenderTexture(renderer, input, crop, destination)
+               : SDL_RenderTextureRotated(renderer, input, crop, destination,
+                                          angle, center, flip);
+  };
+  auto *pipeline = Upscaling::forRenderer(*renderer);
+  if (!pipeline || !pipeline->getSettings().enabled() ||
+      SDL_GetBooleanProperty(SDL_GetTextureProperties(texture),
+                             "kotonoha.upscaled", false))
+    return draw(texture, source);
+  auto &processed = pipeline->process(*texture, contentSerial);
+  Uint8 r, g, b, a;
+  SDL_GetTextureColorMod(texture, &r, &g, &b);
+  SDL_GetTextureAlphaMod(texture, &a);
+  SDL_SetTextureColorMod(&processed, r, g, b);
+  SDL_SetTextureAlphaMod(&processed, a);
+  SDL_BlendMode blend;
+  if (!SDL_GetTextureBlendMode(texture, &blend) ||
+      !SDL_SetTextureBlendMode(&processed, blend))
+    return false;
+  SDL_FRect crop{};
+  if (source) {
+    const float x = static_cast<float>(processed.w) / texture->w;
+    const float y = static_cast<float>(processed.h) / texture->h;
+    crop = {source->x * x, source->y * y, source->w * x, source->h * y};
+  }
+  return draw(&processed, source ? &crop : nullptr);
 }
 
 } // namespace Kotonoha

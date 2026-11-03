@@ -46,8 +46,40 @@ std::string GameLauncher::rememberedPath(const std::string &settingsPath,
   return readFirstLine(rememberFilePath(settingsPath, rememberFile));
 }
 
+std::string GameLauncher::findGamePath(
+    const std::string &game, const std::vector<std::string> &preferred,
+    const std::function<bool(const std::string &, std::string &)> &validator,
+    const std::vector<std::string> &relative) {
+  auto valid = [&](const std::string &path) {
+    if (path.empty())
+      return false;
+    std::string info;
+    try {
+      return validator(path, info);
+    } catch (const std::exception &) {
+      return false;
+    }
+  };
+  for (const auto &path : preferred)
+    if (valid(path))
+      return path;
+  for (const auto &root : FileResolver::roots(game))
+    for (const auto &base :
+         {std::filesystem::path("game-assets"),
+          std::filesystem::path("games") / game / "game-assets",
+          std::filesystem::path()})
+      for (const auto &tail : relative) {
+        const auto path = (root / base / tail).lexically_normal().string();
+        if (valid(path))
+          return path;
+      }
+  return {};
+}
+
 void GameLauncher::loadPath(std::string path) {
   setPath(path.empty() ? readFirstLine(game.rememberPath) : std::move(path));
+  if (!pathValid())
+    setPath({});
 }
 
 const std::string &GameLauncher::path() const { return game.current; }
@@ -108,7 +140,12 @@ void GameLauncher::check(PathField &field, bool force) {
     return;
   }
   field.info.clear();
-  field.valid = field.validator(field.current, field.info);
+  std::filesystem::path fullPath = field.current;
+  std::error_code ec;
+  auto absPath = std::filesystem::absolute(field.current, ec);
+  if (!ec)
+    fullPath = absPath;
+  field.valid = field.validator(fullPath.string(), field.info);
   if (!field.valid && field.info.empty())
     field.info = "Invalid " + field.options.label;
 }
@@ -163,6 +200,8 @@ void GameLauncher::drawGameOptions() {
 }
 
 bool GameLauncher::validate(std::string &error) {
+  if (!Launcher::validate(error))
+    return false;
   check(game);
   if (!game.valid) {
     error = game.info;
@@ -186,6 +225,23 @@ void GameLauncher::save() {
   remember(game);
   for (const auto &field : additionalPaths)
     remember(*field);
+}
+
+FolderGameLauncher::FolderGameLauncher(std::string title,
+                                       std::string settingsPath,
+                                       std::string path, Validator check,
+                                       EngineSettings defaults)
+    : GameLauncher(std::move(title), std::move(settingsPath),
+                   {"Game data", PathKind::Folder, {}, "dir.txt", {}},
+                   std::move(defaults)),
+      validator(std::move(check)) {
+  if (!validator)
+    throw std::invalid_argument("A game data validator is required");
+  loadPath(std::move(path));
+}
+
+bool FolderGameLauncher::checkPath(const std::string &path, std::string &info) {
+  return validator(path, info);
 }
 
 } // namespace Kotonoha

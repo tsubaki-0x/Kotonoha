@@ -29,11 +29,7 @@ std::string normalize(std::string_view path) {
 } // namespace
 
 struct DiscImage::Stream {
-  SDL_IOStream *io = nullptr;
-  ~Stream() {
-    if (io)
-      SDL_CloseIO(io);
-  }
+  IOStreamPtr io;
 };
 
 DiscImage::DiscImage() = default;
@@ -50,7 +46,7 @@ void DiscImage::open(const std::filesystem::path &file) {
 bool DiscImage::tryOpen(const std::filesystem::path &file, std::string *error) {
   close();
   auto next = std::make_unique<Stream>();
-  next->io = SDL_IOFromFile(file.string().c_str(), "rb");
+  next->io.reset(SDL_IOFromFile(file.string().c_str(), "rb"));
   if (!next->io) {
     if (error)
       *error = SDL_GetError();
@@ -62,8 +58,8 @@ bool DiscImage::tryOpen(const std::filesystem::path &file, std::string *error) {
   };
   // Cooked ISO, raw MODE1 (16-byte sync + header), raw MODE2 form 1 (24-byte
   // sync + header + subheader) and MODE2 without the sync pattern.
-  for (const Layout layout : {Layout{2048, 0}, Layout{2352, 16},
-                              Layout{2352, 24}, Layout{2336, 8}}) {
+  for (const Layout layout :
+       {Layout{2048, 0}, Layout{2352, 16}, Layout{2352, 24}, Layout{2336, 8}}) {
     sector = layout.sector;
     dataOffset = layout.offset;
     std::vector<Uint8> pvd;
@@ -123,8 +119,9 @@ bool DiscImage::readSectors(Uint32 lba, Uint32 count,
   out.assign(std::size_t(count) * logicalSector, 0);
   for (Uint32 i = 0; i < count; ++i) {
     const Sint64 at = Sint64(lba + i) * sector + dataOffset;
-    if (SDL_SeekIO(stream->io, at, SDL_IO_SEEK_SET) < 0 ||
-        SDL_ReadIO(stream->io, out.data() + std::size_t(i) * logicalSector,
+    if (SDL_SeekIO(stream->io.get(), at, SDL_IO_SEEK_SET) < 0 ||
+        SDL_ReadIO(stream->io.get(),
+                   out.data() + std::size_t(i) * logicalSector,
                    logicalSector) != logicalSector)
       return false;
   }
@@ -177,7 +174,8 @@ bool DiscImage::readInto(const Entry &entry, Uint64 offset, Uint64 size,
     return true;
   }
   const Uint32 first = Uint32(offset / logicalSector);
-  const Uint32 last = Uint32((offset + size + logicalSector - 1) / logicalSector);
+  const Uint32 last =
+      Uint32((offset + size + logicalSector - 1) / logicalSector);
   std::vector<Uint8> sectors;
   if (!readSectors(entry.lba + first, last - first, sectors))
     return false;
@@ -230,16 +228,17 @@ std::string DiscImageAssetProvider::name() const {
          ")";
 }
 
-bool DiscImageAssetProvider::contains(const std::string &id) const {
+bool DiscImageAssetProvider::containsAsset(const std::string &id) const {
   return disc->find(id) != nullptr;
 }
 
-std::vector<Uint8> DiscImageAssetProvider::read(const std::string &id) const {
+std::vector<Uint8>
+DiscImageAssetProvider::readAsset(const std::string &id) const {
   return disc->read(id);
 }
 
 std::vector<std::string>
-DiscImageAssetProvider::list(const std::string &prefix) const {
+DiscImageAssetProvider::listAsset(const std::string &prefix) const {
   const std::string wanted = normalize(prefix);
   std::vector<std::string> ids;
   for (const auto &entry : disc->files())

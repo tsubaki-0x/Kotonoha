@@ -60,7 +60,3 @@ foreach(dependency IN LISTS resolved)
         file(COPY "${dependency}" DESTINATION "${APP_DESTINATION}")
     endif()
 endforeach()
-
-
-
-\n

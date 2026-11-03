@@ -7,6 +7,11 @@
     "harfbuzz",
     "json-c",
     "libass",
+    "libiconv",
+    {
+      "name": "python3",
+      "platform": "android | (windows & !mingw)"
+    },
     {
       "name": "fontconfig",
       "platform": "ios"
@@ -16,32 +21,21 @@
       "platform": "ios"
     },
     {
-      "name": "libiconv",
-      "platform": "android"
-    },
-    {
       "name": "plutosvg",
-      "features": ["freetype"]
+      "features": [
+        "freetype"
+      ]
     },
     "zlib",
     {
       "name": "ffmpeg",
-      "features": ["zlib"]
+      "features": [
+        "zlib"
+      ]
     },
     {
       "name": "pkgconf",
       "host": true
     }
-  ],
-  "features": {
-    "android-python": {
-      "description": "Embedded CPython runtime for the Android DDLC app",
-      "dependencies": [
-        {
-          "name": "python3",
-          "platform": "android"
-        }
-      ]
-    }
-  }
+  ]
 }

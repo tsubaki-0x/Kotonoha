@@ -26,6 +26,8 @@ remain out of Git. Supply your own legally obtained data:
 | Snow Radish Vacation | `games/snow-radish-vacation/game-assets/SCRIPT.DAT` and the other DAT archives |
 | DDLC | `games/doki-doki-literature-club/game-assets/game/*.rpa` and `game-assets/characters/*.chr` |
 | School Days | Original game archives in `games/school-days/game-assets/` |
+| [AIR Standard Edition (initial port)](games/air/README.md) | `Seen.txt`, `Gameexe.ini` and original resource folders; `--air DIRECTORY` |
+| [Amagami PS2 (playable prologue)](games/amagami/PORT_STATUS.md) | Original Japan ISO (`SLPS_259.18`); `--amagami DISC.iso`. Calendar and later routes are in development. |
 
 The port does not download or supply commercial game data.
 
@@ -45,7 +47,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Disable individual games with `KOTONOHA_BUILD_EXAMPLE`, `KOTONOHA_BUILD_ZERO`,
+Disable individual games with `KOTONOHA_BUILD_AMAGAMI`, `KOTONOHA_BUILD_EXAMPLE`, `KOTONOHA_BUILD_ZERO`,
 `KOTONOHA_BUILD_SNOW`, `KOTONOHA_BUILD_DDLC` or `KOTONOHA_BUILD_SCHOOL_DAYS`. Each game can also be configured
 independently from its own directory.
 
@@ -90,23 +92,23 @@ target using native Resources phases; frameworks use Embed Frameworks with
 Code Sign on Copy. Each game's `game-assets` directory is copied directly as
 a folder reference, preserving its name without build scripts.
 
-Schemes: `Kotonoha`, `ZeroNoTsukaima`, `SnowRadish`, `DokiDoki`, `SchoolDays`,
+Schemes: `Kotonoha`, `ZeroNoTsukaima`, `SnowRadish`, `DokiDoki`, `SchoolDays`, `Air`, `SummerRadish`,
 `KotonohaIOSSmoke` and `DdlcIOSScriptSmoke`. KotonohaEngine is a static framework;
 apps embed the dynamic KotonohaImGui, SDL3 and SDL3_ttf frameworks.
 
 The example executable/app is `Kotonoha`; its C++ namespace is
 `KotonohaExample`, separate from the engine's `Kotonoha` namespace.
 After changing School Days' library sources, run
-`python3 Xcode/UpdateGameTargets.py` manually to synchronize its native target.
+`ruby Xcode/UpdateGameTargets.rb` manually to synchronize its native target.
 This preserves existing native Python modules and refuses concurrent project edits.
 
 Prepare native dependencies before opening/building:
 
 ```sh
 "$VCPKG_ROOT/vcpkg" install --x-manifest-root="$PWD" \
-  --x-install-root="$PWD/vcpkg_installed" --triplet=arm64-ios
+  --x-install-root="$PWD/build/iOS-deps/ios" --triplet=arm64-ios
 "$VCPKG_ROOT/vcpkg" install --x-manifest-root="$PWD" \
-  --x-install-root="$PWD/build/ios-deps/simulator" --triplet=arm64-ios-simulator
+  --x-install-root="$PWD/build/iOS-deps/simulator" --triplet=arm64-ios-simulator
 ```
 
 The simulator setup targets Apple Silicon. Configure equivalent triplets and
@@ -117,10 +119,10 @@ the installed SDK's version.
 DDLC additionally needs BeeWare's CPython iOS SDK:
 
 ```sh
-mkdir -p build/ios-deps/python
+mkdir -p build/iOS-deps/python
 curl -fL https://github.com/beeware/Python-Apple-support/releases/download/3.15-b3/Python-3.15-iOS-support.b3.tar.gz \
-  -o build/ios-deps/python/Python-iOS.tar.gz
-python3 tools/PrepareApplePython.py --archive build/ios-deps/python/Python-iOS.tar.gz
+  -o build/iOS-deps/python/Python-iOS.tar.gz
+python3 tools/PrepareApplePython.py --archive build/iOS-deps/python/Python-iOS.tar.gz
 xcodebuild -project Xcode/Kotonoha.xcodeproj -scheme DokiDoki \
   -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
   -derivedDataPath build/xcode-ios CODE_SIGNING_ALLOWED=NO build
@@ -269,12 +271,16 @@ real-time playback and simulated frame stalls.
 Scale `1.0` disables upscaling; values above `1.0` enable it, up to `4.0`.
 Automatic selects MetalFX on Metal, MPV on OpenGL and Linear elsewhere.
 
-When using MPV, the launcher and F10 inspector expose a preset selector and
-an ordered shader-file list. Choose multiple `.glsl` files using the native
-dialog or select bundled files; remove/reorder items as needed. An empty
-list uses the preset. Full paths are supported and persisted one per line;
-legacy colon-separated lists still work. MetalFX has no method/preset or
-GLSL-file selector, only its applicable backend and scale settings.
+The launcher, F10 inspector and in-game settings offer Anime4K modes A, B,
+C, A+A, B+B and C+A in both HQ and Fast variants, plus the ArtCNN presets.
+The Anime4K profiles use the ordered Clamp/Restore/Upscale/AutoDownscale
+chains supplied for mpv. These GLSL profiles execute on the OpenGL backend;
+selecting one does not change a MetalFX or Linear backend.
+
+On OpenGL, an ordered shader-file list also supports custom `.glsl` files.
+An empty list uses the preset; explicitly selecting a preset clears custom
+files and enables at least 2× scaling. Full paths are persisted one per line; legacy colon-separated lists
+still work. Scale `1.0` turns processing off without losing the selected profile.
 
 ## Controls and diagnostics
 
@@ -301,3 +307,5 @@ DPI scaling and is persisted with the other settings.
 The [Portuguese reference](README.pt-BR.md) documents the complete component,
 media, scripting and MCP APIs and the existing port limitations. ZNT/SRV
 dialogue translations and DDLC's later acts have not been fully validated.
+
+Shared overlay, gesture and live translation behavior: [documentation](docs/ASSET_OVERLAYS.md).

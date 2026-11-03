@@ -5,7 +5,6 @@
 #include <SDL3/SDL.h>
 
 #include <atomic>
-#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -34,6 +33,8 @@ public:
 
   bool Play(std::shared_ptr<AudioChannel> channel, Clip clip);
   void Stop();
+  // Suspend output and preserve the current playback position.
+  void SetPaused(bool paused);
   // Still producing sound (always while looping).
   bool Playing() const;
   bool Active() const { return stream_ != nullptr; }
@@ -55,7 +56,8 @@ private:
     std::atomic<uint64_t> fed{0};  // frames queued so far
     std::atomic<bool> ended{false};
   };
-  static void SDLCALL Feed(void *user, SDL_AudioStream *stream, int additional, int total);
+  static void SDLCALL Feed(void *user, SDL_AudioStream *stream, int additional,
+                           int total);
   uint64_t Consumed() const;
 
   std::unique_ptr<Voice> voice_;
