@@ -2891,7 +2891,10 @@ void Runtime::renderGameplay(Kotonoha::RendererRef renderer, float) {
         // not advance past the authored END; publish that terminal frame once,
         // or keep it while an adjacent decoder is still waiting for frame 0.
         const bool hadVideoFrame = it->player->hasVideoFrame();
-        it->player->render(renderer, area, &engine->GetUpscaler());
+        // Retail movies cover the authored 1280x720 canvas. Letterboxing a
+        // slightly different WMV sample aspect exposes the previous scene at
+        // the edges, including while the terminal movie frame is retained.
+        it->player->render(renderer, area, &engine->GetUpscaler(), true);
         if (hadVideoFrame) primaryReady = true;
         it->terminalFramePresented = true;
       } catch (const std::exception &error) {
@@ -2910,7 +2913,9 @@ void Runtime::renderGameplay(Kotonoha::RendererRef renderer, float) {
           state->second.MarkEof();
       }
       const bool hadVideoFrame = item.movie && item.player->hasVideoFrame();
-      item.player->render(renderer, area, item.movie ? &engine->GetUpscaler() : nullptr);
+      item.player->render(renderer, area,
+                          item.movie ? &engine->GetUpscaler() : nullptr,
+                          item.movie);
       if (hadVideoFrame) primaryReady = true;
       if (!item.loop.empty() && item.player->finished()) {
         const auto channel = item.player->getChannel();
