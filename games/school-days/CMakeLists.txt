@@ -33,6 +33,13 @@ add_library(school_days STATIC
     src/SchoolDaysConfigMenuModel.cpp
     src/SchoolDaysConfigMenuRenderPlan.cpp
     src/SchoolDaysRetailConfigPolicy.cpp
+    src/SchoolDaysDisplayPolicy.cpp
+    src/SchoolDaysConfigStorage.cpp
+    src/SchoolDaysMenuBarPresenter.cpp
+    src/SchoolDaysMenuBarLayout.cpp
+    src/SchoolDaysTopMeterModel.cpp
+    src/SchoolDaysTopMeterRenderPlan.cpp
+    src/SchoolDaysChoiceTextPlan.cpp
     src/SchoolDaysSaveLoadModel.cpp
     src/SchoolDaysSaveLoadRenderPlan.cpp
     src/SchoolDaysSaveFeelModel.cpp
@@ -41,6 +48,9 @@ add_library(school_days STATIC
     src/SchoolDaysExitViewRenderPlan.cpp
     src/SchoolDaysReplayModel.cpp
     src/SchoolDaysReplayRenderPlan.cpp
+    src/SchoolDaysReplayScriptOracle.cpp
+    src/SchoolDaysReplayPlaybackSession.cpp
+    src/SchoolDaysPlayDataSession.cpp
     src/SchoolDaysRouteMapRenderPlan.cpp
     src/SchoolDaysFontData.cpp
     src/SchoolDaysSaveProfile.cpp
@@ -62,6 +72,14 @@ target_include_directories(school_days PUBLIC include src)
 target_link_libraries(school_days PUBLIC Kotonoha::Engine PRIVATE ZLIB::ZLIB)
 target_compile_features(school_days PUBLIC cxx_std_17)
 set_target_properties(school_days PROPERTIES CXX_EXTENSIONS OFF)
+if(KOTONOHA_DEV_CONTROL AND WIN32 AND NOT ANDROID)
+    find_package(json-c CONFIG REQUIRED)
+    target_sources(school_days PRIVATE src/SchoolDaysDevBridge.cpp)
+    # SchoolDaysRuntime.hpp adds DEV members to the class layout. Every
+    # consumer that constructs Runtime must see the same definition.
+    target_compile_definitions(school_days PUBLIC KOTONOHA_DEV_CONTROL=1)
+    target_link_libraries(school_days PRIVATE ws2_32 json-c::json-c)
+endif()
 
 kotonoha_add_app(SchoolDays src/main.cpp)
 target_link_libraries(SchoolDays PRIVATE school_days)

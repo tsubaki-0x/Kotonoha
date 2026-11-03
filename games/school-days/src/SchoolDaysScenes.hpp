@@ -1,7 +1,10 @@
 #pragma once
 
 #include <Kotonoha/componentes/SubtitleScene.hpp>
+#include <Kotonoha/core/SDL.hpp>
 #include <Kotonoha/parsers/Ors.h>
+#include <Kotonoha/routing/SchoolDaysMenuBarPresenter.hpp>
+#include <SDL3_ttf/SDL_ttf.h>
 
 namespace SchoolDays {
 class Assets;
@@ -24,6 +27,9 @@ public:
   bool finished() const { return done; }
   bool available() const { return !logo.empty(); }
   bool capturesInput() const override { return !done; }
+  Kotonoha::RenderSpace renderSpace() const override {
+    return Kotonoha::RenderSpace::Screen;
+  }
   bool handleEvent(Kotonoha::EventRef event) override;
   void update() override;
   void render(Kotonoha::RendererRef renderer, float scale) override;
@@ -37,21 +43,28 @@ public:
 
 class GameScene final : public Kotonoha::Scene {
   Runtime &runtime;
-  std::string bar, chips;
-  int hovered = -1, selectedChoice = -1;
+  Kotonoha::SchoolDaysMenuBarPresenter menuBar;
+  Kotonoha::SchoolDaysSaveFeelModel::Variant menuBarVariant =
+      Kotonoha::SchoolDaysSaveFeelModel::Variant::Standard;
   const Kotonoha_orsEvent *lastChoice = nullptr;
-  bool pointerInBar = false;
-  float barAlpha = 0;
-  Uint64 lastUpdate = 0;
+  bool menuBarAttempted = false;
+  Kotonoha::SDLHandle<TTF_Font, TTF_CloseFont> choiceFont;
+  Kotonoha::TexturePtr choiceScratch;
+  const Kotonoha_orsEvent *choiceScratchEvent = nullptr;
   void syncChoice();
+  bool ensureMenuBar();
   std::vector<int> choices() const;
-  SDL_FRect choiceArea(int index, int count) const;
-  void renderBar(Kotonoha::RendererRef renderer);
+  bool normalizedPointer(float windowX, float windowY, float *x, float *y) const;
+  bool ensureChoiceScratch(Kotonoha::RendererRef renderer,
+                           const std::vector<int> &visible);
+  void renderChoices(Kotonoha::RendererRef renderer);
 
 public:
   GameScene(Kotonoha::Engine &engine, Runtime &runtime);
   void update() override;
   bool handleEvent(Kotonoha::EventRef event) override;
   void render(Kotonoha::RendererRef renderer, float scale) override;
+  bool handleMenuBarEvent(Kotonoha::EventRef event);
+  void renderMenuBar(Kotonoha::RendererRef renderer);
 };
 } // namespace SchoolDays

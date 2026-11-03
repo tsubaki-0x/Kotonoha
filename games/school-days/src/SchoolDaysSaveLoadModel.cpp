@@ -84,9 +84,8 @@ bool SchoolDaysSaveLoadModel::Activate(Output* output) {
         return true;
     }
 
-    // Control 21 dispatches RouteMap only from LOAD mode.
+    // The visible RouteMap control is available in both Save and Load panels.
     if (selection_ == 21) {
-        if (mode_ != Mode::Load) return false;
         output->action = Action::RouteMap;
         return true;
     }

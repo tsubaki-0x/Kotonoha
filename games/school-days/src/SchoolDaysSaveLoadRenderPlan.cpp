@@ -134,9 +134,8 @@ SchoolDaysSaveLoadRenderPlan::Build(const SchoolDaysSaveLoadModel& model) {
                                                       layout)));
     }
 
-    // The fixed RouteMap CHIP object is drawn in both SAVE and LOAD.  Only the
-    // control21 highlight/action path is LOAD-only; SAVE leaves the decoration
-    // inert rather than omitting it.
+    // The fixed RouteMap CHIP object is drawn in both SAVE and LOAD. The host
+    // now accepts its visible control in either mode and returns to its owner.
     sprites.push_back(Chip(Role::RouteMap, 21, {1.0f, 1.0f, 194.0f, 38.0f},
                            ScaleSpriteDestination(10.0f, 54.0f, 194.0f,
                                                   38.0f, layout)));

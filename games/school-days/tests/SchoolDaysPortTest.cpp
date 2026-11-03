@@ -47,8 +47,12 @@ int main(int argc, char **argv) {
     std::string info;
     Require(SchoolDays::Assets::checkDirectory(root, info), info);
     auto assets = std::make_shared<SchoolDays::Assets>(root);
-    Require(assets->resolve("movie/casetest.wmv") == (root / "Movie/CaseTest.WMV").string(),
-            "Case-insensitive media discovery failed");
+    const auto caseResolved = assets->resolve("movie/casetest.wmv");
+    const auto caseExpected = (root / "Movie/CaseTest.WMV").string();
+    std::error_code caseError;
+    Require(fs::equivalent(fs::path(caseResolved), fs::path(caseExpected), caseError) && !caseError,
+            "Case-insensitive media discovery failed: got '" + caseResolved +
+                "', expected '" + caseExpected + "'");
     Require(assets->read(assets->resolve("Movie/CaseTest.WMV")).size() == 9, "Provider byte read failed");
     Require(assets->localPath(assets->resolve("Movie/CaseTest.WMV")).size() > 0,
             "Loose media must stream directly");

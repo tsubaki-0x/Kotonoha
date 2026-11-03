@@ -18,6 +18,170 @@
 #include <limits>
 
 namespace Kotonoha {
+namespace {
+
+// The old host dialog paints FONTDATA into a physical-pixel field roughly
+// 872 px wide at a 26/48 glyph scale.  2048 source pixels retain that full
+// field width without horizontally compressing long comments.
+constexpr int kCommentTextureWidth = 2048;
+constexpr int kCommentTextureHeight = 192;
+constexpr float kCommentTextHeight = 26.0f;
+
+bool IsHighSurrogate(char16_t value) {
+    return value >= 0xd800u && value <= 0xdbffu;
+}
+
+bool IsLowSurrogate(char16_t value) {
+    return value >= 0xdc00u && value <= 0xdfffu;
+}
+
+void PopUtf16CodePoint(std::u16string* text) {
+    if (text == nullptr || text->empty()) return;
+    const char16_t tail = text->back();
+    text->pop_back();
+    if (IsLowSurrogate(tail) && !text->empty() && IsHighSurrogate(text->back())) {
+        text->pop_back();
+    }
+}
+
+void DropFirstUtf16CodePoint(std::u16string* text) {
+    if (text == nullptr || text->empty()) return;
+    size_t count = 1u;
+    if (IsHighSurrogate((*text)[0]) && text->size() > 1u &&
+        IsLowSurrogate((*text)[1])) {
+        count = 2u;
+    }
+    text->erase(0u, count);
+}
+
+std::u16string TruncateUtf16(std::u16string text, size_t limit) {
+    if (text.size() <= limit) return text;
+    text.resize(limit);
+    if (!text.empty() && IsHighSurrogate(text.back())) text.pop_back();
+    return text;
+}
+
+void AppendUtf8Limited(std::u16string* text, const char* utf8, size_t limit) {
+    if (text == nullptr || utf8 == nullptr || text->size() >= limit) return;
+    const char* cursor = utf8;
+    size_t left = std::char_traits<char>::length(utf8);
+    while (left > 0u) {
+        uint32_t codepoint = SDL_StepUTF8(&cursor, &left);
+        if (codepoint == 0u) break;
+        if (codepoint > 0x10ffffu) continue;
+        const size_t units = codepoint >= 0x10000u ? 2u : 1u;
+        if (text->size() + units > limit) break;
+        if (units == 2u) {
+            codepoint -= 0x10000u;
+            text->push_back(static_cast<char16_t>(0xd800u + (codepoint >> 10u)));
+            text->push_back(static_cast<char16_t>(0xdc00u + (codepoint & 0x3ffu)));
+        } else if (codepoint < 0xd800u || codepoint > 0xdfffu) {
+            text->push_back(static_cast<char16_t>(codepoint));
+        }
+    }
+}
+
+int MeasureCommentText(const std::u16string& text, bool useEnglish) {
+    int width = 0;
+    for (size_t i = 0u; i < text.size(); ++i) {
+        const char16_t glyph = text[i];
+        if (IsHighSurrogate(glyph) && i + 1u < text.size() &&
+            IsLowSurrogate(text[i + 1u])) {
+            ++i;
+            continue;
+        }
+        if (IsHighSurrogate(glyph) || IsLowSurrogate(glyph)) continue;
+        width += SchoolDaysSaveLoadRenderPlan::GlyphAdvance(
+            static_cast<uint16_t>(glyph), useEnglish);
+    }
+    return width;
+}
+
+bool DrawCommentTextPixels(const SchoolDaysFontData& font, bool useEnglish,
+                           const std::u16string& text, int startX, int startY,
+                           std::vector<uint32_t>* pixels, std::string* error) {
+    if (pixels == nullptr || pixels->size() !=
+            static_cast<size_t>(kCommentTextureWidth) * kCommentTextureHeight) {
+        if (error != nullptr) *error = "School Days comment text pixel buffer is invalid";
+        return false;
+    }
+    int x = startX;
+    SchoolDaysFontData::Glyph decoded;
+    for (size_t i = 0u; i < text.size(); ++i) {
+        const char16_t glyph = text[i];
+        if (IsHighSurrogate(glyph) && i + 1u < text.size() &&
+            IsLowSurrogate(text[i + 1u])) {
+            ++i;
+            continue;
+        }
+        if (IsHighSurrogate(glyph) || IsLowSurrogate(glyph)) continue;
+        const uint16_t code = static_cast<uint16_t>(glyph);
+        if (!font.DecodeGlyph(code, &decoded, error)) return false;
+        if (startY >= 0 && startY + SchoolDaysFontData::kGlyphHeight <=
+                               kCommentTextureHeight &&
+            x < kCommentTextureWidth) {
+            for (int gy = 0; gy < SchoolDaysFontData::kGlyphHeight; ++gy) {
+                for (int gx = 0; gx < SchoolDaysFontData::kGlyphWidth; ++gx) {
+                    const int destinationX = x + gx;
+                    if (destinationX < 0 || destinationX >= kCommentTextureWidth) continue;
+                    const size_t source = static_cast<size_t>(gy) *
+                                              SchoolDaysFontData::kGlyphWidth +
+                                          static_cast<size_t>(gx);
+                    const uint8_t alpha = decoded.alpha[source];
+                    const uint8_t gray = decoded.gray[source];
+                    const uint32_t packed = (static_cast<uint32_t>(alpha) << 24u) |
+                                            (static_cast<uint32_t>(gray) << 16u) |
+                                            (static_cast<uint32_t>(gray) << 8u) |
+                                            static_cast<uint32_t>(gray);
+                    uint32_t& destination = (*pixels)[
+                        static_cast<size_t>(startY + gy) * kCommentTextureWidth +
+                        static_cast<size_t>(destinationX)];
+                    if (destination < packed) destination = packed;
+                }
+            }
+        }
+        x += SchoolDaysSaveLoadRenderPlan::GlyphAdvance(code, useEnglish);
+    }
+    return true;
+}
+
+struct CommentEditorLayout {
+    SDL_FRect box{};
+    SDL_FRect field{};
+    SDL_FRect ok{};
+    SDL_FRect cancel{};
+};
+
+CommentEditorLayout BuildCommentEditorLayout(SDL_Point area) {
+    const float width = static_cast<float>(std::max(area.x, 1));
+    const float height = static_cast<float>(std::max(area.y, 1));
+    const float boxWidth = std::min(width * 0.94f, 900.0f);
+    constexpr float boxHeight = 170.0f;
+    CommentEditorLayout layout;
+    layout.box = {(width - boxWidth) * 0.5f, (height - boxHeight) * 0.5f,
+                  boxWidth, boxHeight};
+    layout.field = {layout.box.x + 14.0f, layout.box.y + 50.0f,
+                    boxWidth - 28.0f, 38.0f};
+    layout.ok = {layout.box.x + boxWidth - 230.0f,
+                 layout.box.y + boxHeight - 50.0f, 100.0f, 38.0f};
+    layout.cancel = {layout.box.x + boxWidth - 120.0f,
+                     layout.box.y + boxHeight - 50.0f, 110.0f, 38.0f};
+    return layout;
+}
+
+std::u16string VisibleCommentEditorText(const std::u16string& text,
+                                        bool useEnglish, int maxSourceWidth,
+                                        bool cursorVisible) {
+    std::u16string shown = text;
+    if (cursorVisible) shown.push_back(u'_');
+    while (!shown.empty() &&
+           MeasureCommentText(shown, useEnglish) > maxSourceWidth) {
+        DropFirstUtf16CodePoint(&shown);
+    }
+    return shown;
+}
+
+} // namespace
 
 SDL_Texture* SchoolDaysSystemUi::LoadTexture(SDL_Renderer* renderer,
                                              const std::string& physical) const {
@@ -57,6 +221,10 @@ void SchoolDaysSystemUi::DestroyTextures() {
         SDL_DestroyTexture(saveLoadTextTexture_);
         saveLoadTextTexture_ = nullptr;
     }
+    if (saveLoadCommentTextTexture_ != nullptr) {
+        SDL_DestroyTexture(saveLoadCommentTextTexture_);
+        saveLoadCommentTextTexture_ = nullptr;
+    }
     if (routeMapTextTexture_ != nullptr) {
         SDL_DestroyTexture(routeMapTextTexture_);
         routeMapTextTexture_ = nullptr;
@@ -81,11 +249,18 @@ void SchoolDaysSystemUi::DestroyTextures() {
     routeMapFont_.Clear();
     replayFont_.Clear();
     saveLoadTextPixels_.clear();
+    saveLoadCommentTextPixels_.clear();
     routeMapTextPixels_.clear();
     replayTextPixels_.clear();
     saveLoadMetadata_.clear();
     replayMetadata_.clear();
     saveLoadCommentAdvances_.clear();
+    saveLoadCommentEditorOpen_ = false;
+    saveLoadCommentSlot_ = -1;
+    saveLoadCommentText_.clear();
+    saveLoadCommentWindow_ = nullptr;
+    saveLoadCommentTextDirty_ = false;
+    saveLoadCommentCursorPhase_ = UINT32_MAX;
     saveLoadUseEnglish_ = false;
     routeMapUseEnglish_ = false;
     replayTextInputEnabled_ = false;
@@ -100,6 +275,7 @@ void SchoolDaysSystemUi::DestroyTextures() {
 }
 
 void SchoolDaysSystemUi::Close() {
+    EndSaveLoadCommentEditorTextInput();
     DestroyTextures();
     saveFeel_.Close();
     saveLoad_.Close();
@@ -736,6 +912,21 @@ bool SchoolDaysSystemUi::OpenSaveLoad(
         Close();
         return false;
     }
+    if (textInputEnabled) {
+        saveLoadCommentTextTexture_ = SDL_CreateTexture(
+            renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
+            kCommentTextureWidth, kCommentTextureHeight);
+        if (saveLoadCommentTextTexture_ == nullptr ||
+            !SDL_SetTextureBlendMode(saveLoadCommentTextTexture_, SDL_BLENDMODE_BLEND)) {
+            if (error != nullptr)
+                *error = std::string("School Days comment FONTDATA texture setup failed: ") +
+                         SDL_GetError();
+            Close();
+            return false;
+        }
+        saveLoadCommentTextPixels_.assign(
+            static_cast<size_t>(kCommentTextureWidth) * kCommentTextureHeight, 0u);
+    }
     saveLoadTextPixels_.assign(static_cast<size_t>(2048) * 1024u, 0u);
     saveLoadMetadata_.assign(10u, SchoolDaysSaveService::SlotMetadata{});
     saveLoadCommentAdvances_.assign(10u, 0);
@@ -971,12 +1162,267 @@ bool SchoolDaysSystemUi::EmitModelResult(SchoolDaysSaveFeelModel::Result result,
     return true;
 }
 
+bool SchoolDaysSystemUi::BeginSaveLoadCommentEditor(SDL_Renderer* renderer,
+                                                    int slot) {
+    if (renderer == nullptr || !saveLoad_.IsOpen() ||
+        !saveLoad_.CommentInputPending() || saveLoadCommentEditorOpen_ ||
+        saveLoadCommentTextTexture_ == nullptr || slot < 0 || slot >= 100 ||
+        slot / 10 != saveLoad_.Page()) {
+        return false;
+    }
+    const int row = slot % 10;
+    if (row < 0 || static_cast<size_t>(row) >= saveLoadMetadata_.size()) return false;
+
+    SDL_Window* window = SDL_GetRenderWindow(renderer);
+    if (window == nullptr) return false;
+
+    const size_t limit = saveLoadUseEnglish_ ? 120u : 60u;
+    saveLoadCommentText_ = TruncateUtf16(
+        saveLoadMetadata_[static_cast<size_t>(row)].occupied
+            ? saveLoadMetadata_[static_cast<size_t>(row)].comment
+            : std::u16string{},
+        limit);
+    saveLoadCommentSlot_ = slot;
+    saveLoadCommentWindow_ = window;
+    saveLoadCommentTextDirty_ = true;
+    saveLoadCommentCursorPhase_ = UINT32_MAX;
+
+    if (!SDL_StartTextInput(window)) {
+        saveLoadCommentSlot_ = -1;
+        saveLoadCommentWindow_ = nullptr;
+        saveLoadCommentText_.clear();
+        saveLoadCommentTextDirty_ = false;
+        return false;
+    }
+    saveLoadCommentEditorOpen_ = true;
+
+    // Keep IME composition anchored to the same field rendered below. Failure
+    // to publish the hint is non-fatal; SDL text events are already active.
+    const auto layout = BuildCommentEditorLayout(area_);
+    float left = 0.0f, top = 0.0f, right = 0.0f, bottom = 0.0f;
+    if (SDL_RenderCoordinatesToWindow(renderer, layout.field.x, layout.field.y,
+                                      &left, &top) &&
+        SDL_RenderCoordinatesToWindow(renderer,
+                                      layout.field.x + layout.field.w,
+                                      layout.field.y + layout.field.h,
+                                      &right, &bottom)) {
+        const SDL_Rect area{
+            static_cast<int>(std::floor(left)),
+            static_cast<int>(std::floor(top)),
+            std::max(1, static_cast<int>(std::ceil(right - left))),
+            std::max(1, static_cast<int>(std::ceil(bottom - top)))};
+        (void)SDL_SetTextInputArea(window, &area, 0);
+    }
+    return true;
+}
+
+void SchoolDaysSystemUi::EndSaveLoadCommentEditorTextInput() {
+    if (saveLoadCommentWindow_ != nullptr &&
+        SDL_TextInputActive(saveLoadCommentWindow_)) {
+        if (!SDL_StopTextInput(saveLoadCommentWindow_)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "School Days comment text input stop failed: %s",
+                        SDL_GetError());
+        }
+    }
+    saveLoadCommentWindow_ = nullptr;
+}
+
+bool SchoolDaysSystemUi::HandleSaveLoadCommentEditorEvent(const SDL_Event* event) {
+    if (!saveLoadCommentEditorOpen_ || event == nullptr) return false;
+    const size_t limit = saveLoadUseEnglish_ ? 120u : 60u;
+    if (event->type == SDL_EVENT_TEXT_INPUT) {
+        AppendUtf8Limited(&saveLoadCommentText_, event->text.text, limit);
+        saveLoadCommentTextDirty_ = true;
+        return true;
+    }
+    if (event->type == SDL_EVENT_KEY_DOWN) {
+        if (event->key.key == SDLK_BACKSPACE) {
+            PopUtf16CodePoint(&saveLoadCommentText_);
+            saveLoadCommentTextDirty_ = true;
+        } else if (event->key.key == SDLK_RETURN ||
+                   event->key.key == SDLK_KP_ENTER) {
+            const std::u16string comment = saveLoadCommentText_;
+            if (!SubmitSaveLoadComment(comment)) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                             "School Days comment submit was rejected");
+            }
+        } else if (event->key.key == SDLK_ESCAPE) {
+            if (!CancelSaveLoadComment()) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                             "School Days comment cancel was rejected");
+            }
+        }
+        return true;
+    }
+    if (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+        event->button.button == SDL_BUTTON_LEFT) {
+        const auto layout = BuildCommentEditorLayout(area_);
+        const SDL_FPoint point{event->button.x, event->button.y};
+        if (SDL_PointInRectFloat(&point, &layout.ok)) {
+            const std::u16string comment = saveLoadCommentText_;
+            if (!SubmitSaveLoadComment(comment)) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                             "School Days comment mouse submit was rejected");
+            }
+        } else if (SDL_PointInRectFloat(&point, &layout.cancel)) {
+            if (!CancelSaveLoadComment()) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                             "School Days comment mouse cancel was rejected");
+            }
+        }
+        return true;
+    }
+    // The editor is modal to the SaveLoad model. Swallow pointer/gamepad input
+    // so the retained page cannot change underneath the pending comment slot.
+    return true;
+}
+
+bool SchoolDaysSystemUi::UpdateSaveLoadCommentEditorTexture(std::string* error) {
+    if (!saveLoadCommentEditorOpen_) return true;
+    if (saveLoadCommentTextTexture_ == nullptr || !saveLoadFont_.IsLoaded()) {
+        if (error != nullptr) *error = "School Days comment FONTDATA presenter is unavailable";
+        return false;
+    }
+    const uint32_t cursorPhase = (SDL_GetTicks() / 500u) & 1u;
+    if (!saveLoadCommentTextDirty_ && cursorPhase == saveLoadCommentCursorPhase_) {
+        return true;
+    }
+
+    std::fill(saveLoadCommentTextPixels_.begin(),
+              saveLoadCommentTextPixels_.end(), 0u);
+    const std::u16string title = saveLoadUseEnglish_
+        ? u"Insert comments (120 characters or less)"
+        : u"Insert comments (60 characters or less)";
+    const auto layout = BuildCommentEditorLayout(area_);
+    const int inputWidth = std::max(
+        1, static_cast<int>(std::floor((layout.field.w - 16.0f) *
+                                      SchoolDaysFontData::kGlyphHeight /
+                                      kCommentTextHeight)));
+    const std::u16string shown = VisibleCommentEditorText(
+        saveLoadCommentText_, saveLoadUseEnglish_,
+        std::min(inputWidth, kCommentTextureWidth), cursorPhase == 0u);
+    if (!DrawCommentTextPixels(saveLoadFont_, saveLoadUseEnglish_, title,
+                               0, 0, &saveLoadCommentTextPixels_, error) ||
+        !DrawCommentTextPixels(saveLoadFont_, saveLoadUseEnglish_, shown,
+                               0, 48, &saveLoadCommentTextPixels_, error) ||
+        !DrawCommentTextPixels(saveLoadFont_, saveLoadUseEnglish_, u"OK",
+                               0, 96, &saveLoadCommentTextPixels_, error) ||
+        !DrawCommentTextPixels(saveLoadFont_, saveLoadUseEnglish_, u"Cancel",
+                               0, 144, &saveLoadCommentTextPixels_, error)) {
+        return false;
+    }
+    if (!SDL_UpdateTexture(saveLoadCommentTextTexture_, nullptr,
+                           saveLoadCommentTextPixels_.data(),
+                           kCommentTextureWidth *
+                               static_cast<int>(sizeof(uint32_t)))) {
+        if (error != nullptr) *error = SDL_GetError();
+        return false;
+    }
+    saveLoadCommentTextDirty_ = false;
+    saveLoadCommentCursorPhase_ = cursorPhase;
+    return true;
+}
+
+bool SchoolDaysSystemUi::RenderSaveLoadCommentEditor(SDL_Renderer* renderer,
+                                                     std::string* error) {
+    if (!saveLoadCommentEditorOpen_) return true;
+    if (renderer == nullptr || !UpdateSaveLoadCommentEditorTexture(error)) return false;
+
+    const auto layout = BuildCommentEditorLayout(area_);
+    SDL_BlendMode oldBlend = SDL_BLENDMODE_NONE;
+    Uint8 oldR = 0, oldG = 0, oldB = 0, oldA = 0;
+    (void)SDL_GetRenderDrawBlendMode(renderer, &oldBlend);
+    (void)SDL_GetRenderDrawColor(renderer, &oldR, &oldG, &oldB, &oldA);
+    (void)SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+    (void)SDL_SetRenderDrawColor(renderer, 0, 0, 0, 150);
+    (void)SDL_RenderFillRect(renderer, nullptr);
+    (void)SDL_SetRenderDrawColor(renderer, 24, 26, 40, 245);
+    (void)SDL_RenderFillRect(renderer, &layout.box);
+    (void)SDL_SetRenderDrawColor(renderer, 200, 210, 235, 255);
+    (void)SDL_RenderRect(renderer, &layout.box);
+    (void)SDL_SetRenderDrawColor(renderer, 8, 9, 18, 255);
+    (void)SDL_RenderFillRect(renderer, &layout.field);
+    (void)SDL_SetRenderDrawColor(renderer, 200, 210, 235, 255);
+    (void)SDL_RenderRect(renderer, &layout.field);
+    (void)SDL_SetRenderDrawColor(renderer, 60, 80, 130, 255);
+    (void)SDL_RenderFillRect(renderer, &layout.ok);
+    (void)SDL_SetRenderDrawColor(renderer, 70, 70, 80, 255);
+    (void)SDL_RenderFillRect(renderer, &layout.cancel);
+    (void)SDL_SetRenderDrawColor(renderer, 200, 210, 235, 255);
+    (void)SDL_RenderRect(renderer, &layout.ok);
+    (void)SDL_RenderRect(renderer, &layout.cancel);
+
+    const float textScale = kCommentTextHeight /
+                            static_cast<float>(SchoolDaysFontData::kGlyphHeight);
+    const std::u16string title = saveLoadUseEnglish_
+        ? u"Insert comments (120 characters or less)"
+        : u"Insert comments (60 characters or less)";
+    const int inputWidth = std::max(
+        1, static_cast<int>(std::floor((layout.field.w - 16.0f) /
+                                      textScale)));
+    const bool cursorVisible = saveLoadCommentCursorPhase_ == 0u;
+    const std::u16string shown = VisibleCommentEditorText(
+        saveLoadCommentText_, saveLoadUseEnglish_,
+        std::min(inputWidth, kCommentTextureWidth), cursorVisible);
+    auto drawRow = [&](int sourceY, const std::u16string& text, float x,
+                       float y) -> bool {
+        const int measured = std::max(1, std::min(
+            MeasureCommentText(text, saveLoadUseEnglish_), kCommentTextureWidth));
+        const SDL_FRect source{0.0f, static_cast<float>(sourceY),
+                               static_cast<float>(measured),
+                               static_cast<float>(SchoolDaysFontData::kGlyphHeight)};
+        const SDL_FRect destination{x, y, measured * textScale,
+                                    kCommentTextHeight};
+        return SDL_RenderTexture(renderer, saveLoadCommentTextTexture_,
+                                 &source, &destination);
+    };
+    const int okWidth = MeasureCommentText(u"OK", saveLoadUseEnglish_);
+    const int cancelWidth = MeasureCommentText(u"Cancel", saveLoadUseEnglish_);
+    const bool rendered =
+        drawRow(0, title, layout.box.x + 14.0f, layout.box.y + 12.0f) &&
+        drawRow(48, shown, layout.field.x + 8.0f, layout.field.y + 6.0f) &&
+        drawRow(96, u"OK",
+                layout.ok.x + (layout.ok.w - okWidth * textScale) * 0.5f,
+                layout.ok.y + 5.0f) &&
+        drawRow(144, u"Cancel",
+                layout.cancel.x +
+                    (layout.cancel.w - cancelWidth * textScale) * 0.5f,
+                layout.cancel.y + 5.0f);
+
+    (void)SDL_SetRenderDrawColor(renderer, oldR, oldG, oldB, oldA);
+    (void)SDL_SetRenderDrawBlendMode(renderer, oldBlend);
+    if (!rendered) {
+        if (error != nullptr) *error = SDL_GetError();
+        return false;
+    }
+    return true;
+}
+
 bool SchoolDaysSystemUi::SubmitSaveLoadComment(const std::u16string& comment) {
-    return saveLoad_.SubmitComment(comment);
+    if (!saveLoad_.SubmitComment(comment)) return false;
+    if (saveLoadCommentEditorOpen_) {
+        EndSaveLoadCommentEditorTextInput();
+        saveLoadCommentEditorOpen_ = false;
+        saveLoadCommentSlot_ = -1;
+        saveLoadCommentText_.clear();
+        saveLoadCommentTextDirty_ = false;
+        saveLoadCommentCursorPhase_ = UINT32_MAX;
+    }
+    return true;
 }
 
 bool SchoolDaysSystemUi::CancelSaveLoadComment() {
-    return saveLoad_.CancelComment();
+    if (!saveLoad_.CancelComment()) return false;
+    if (saveLoadCommentEditorOpen_) {
+        EndSaveLoadCommentEditorTextInput();
+        saveLoadCommentEditorOpen_ = false;
+        saveLoadCommentSlot_ = -1;
+        saveLoadCommentText_.clear();
+        saveLoadCommentTextDirty_ = false;
+        saveLoadCommentCursorPhase_ = UINT32_MAX;
+    }
+    return true;
 }
 
 bool SchoolDaysSystemUi::Activate(Output* output) {
@@ -1000,6 +1446,10 @@ bool SchoolDaysSystemUi::HandleEvent(SDL_Renderer* renderer,
          !configMenu_.IsOpen() && !exitView_.IsOpen() && !replay_.IsOpen() &&
          !routeMap_.IsOpen()) ||
         event == nullptr || (resultEmitted_ && !saveLoad_.IsOpen())) return false;
+
+    if (saveLoadCommentEditorOpen_) {
+        return HandleSaveLoadCommentEditorEvent(event);
+    }
 
     float x = 0.0f;
     float y = 0.0f;
@@ -1117,6 +1567,17 @@ bool SchoolDaysSystemUi::HandleEvent(SDL_Renderer* renderer,
             }
             SchoolDaysSaveLoadModel::Output modelOutput;
             if (!saveLoad_.Activate(&modelOutput)) return false;
+            if (modelOutput.action ==
+                SchoolDaysSaveLoadModel::Action::CommentInputRequested) {
+                if (!BeginSaveLoadCommentEditor(renderer, modelOutput.slot)) {
+                    (void)saveLoad_.CancelComment();
+                    SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                                 "School Days comment editor could not start: %s",
+                                 SDL_GetError());
+                }
+                output->uiSfx = UiSfxCue::Click;
+                return true;
+            }
             if (modelOutput.action != SchoolDaysSaveLoadModel::Action::None &&
                 output != nullptr) {
                 output->hasSaveLoadOutput = true;
@@ -1470,6 +1931,7 @@ bool SchoolDaysSystemUi::Render(SDL_Renderer* renderer, std::string* error) {
                 return false;
             }
         }
+        if (!RenderSaveLoadCommentEditor(renderer, error)) return false;
         return true;
     }
 

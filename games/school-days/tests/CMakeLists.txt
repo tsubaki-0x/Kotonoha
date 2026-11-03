@@ -25,6 +25,116 @@ add_executable(SchoolDaysSceneTimelineTest SchoolDaysSceneTimelineTest.cpp)
 target_link_libraries(SchoolDaysSceneTimelineTest PRIVATE school_days)
 add_test(NAME SchoolDaysSceneTimelineTest COMMAND SchoolDaysSceneTimelineTest)
 
+add_executable(SchoolDaysAudioEventStateTest SchoolDaysAudioEventStateTest.cpp)
+target_link_libraries(SchoolDaysAudioEventStateTest PRIVATE school_days)
+add_test(NAME SchoolDaysAudioEventStateTest COMMAND SchoolDaysAudioEventStateTest)
+
+add_executable(SchoolDaysAssetsListTest SchoolDaysAssetsListTest.cpp)
+target_link_libraries(SchoolDaysAssetsListTest PRIVATE school_days)
+add_test(NAME SchoolDaysAssetsListTest COMMAND SchoolDaysAssetsListTest)
+
+add_executable(SchoolDaysGpkStreamingTest SchoolDaysGpkStreamingTest.cpp)
+target_link_libraries(SchoolDaysGpkStreamingTest PRIVATE school_days ZLIB::ZLIB)
+add_test(NAME SchoolDaysGpkStreamingTest COMMAND SchoolDaysGpkStreamingTest)
+
+add_executable(SchoolDaysTitleMovieClockTest SchoolDaysTitleMovieClockTest.cpp)
+target_link_libraries(SchoolDaysTitleMovieClockTest PRIVATE school_days)
+add_test(NAME SchoolDaysTitleMovieClockTest COMMAND SchoolDaysTitleMovieClockTest)
+
+add_executable(SchoolDaysEpisodeOverlayTest SchoolDaysEpisodeOverlayTest.cpp)
+target_link_libraries(SchoolDaysEpisodeOverlayTest PRIVATE school_days)
+add_test(NAME SchoolDaysEpisodeOverlayTest COMMAND SchoolDaysEpisodeOverlayTest)
+
+add_executable(SchoolDaysMenuBarRuntimeTest SchoolDaysMenuBarRuntimeTest.cpp)
+target_link_libraries(SchoolDaysMenuBarRuntimeTest PRIVATE school_days)
+add_test(NAME SchoolDaysMenuBarRuntimeTest COMMAND SchoolDaysMenuBarRuntimeTest
+    "${SCHOOL_DAYS_ROUTE}"
+    "${CMAKE_CURRENT_BINARY_DIR}/fixtures")
+set_tests_properties(SchoolDaysMenuBarRuntimeTest PROPERTIES
+    FIXTURES_REQUIRED school_days_assets
+    ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy")
+
+foreach(_school_days_policy_test IN ITEMS
+        SchoolDaysChoiceTextPlanTest
+        SchoolDaysDisplayPolicyTest
+        SchoolDaysFrontendTransitionTest
+        SchoolDaysInputPolicyTest
+        SchoolDaysMenuBarLayoutTest
+        SchoolDaysPromptPolicyTest
+        SchoolDaysTopMeterModelTest)
+    add_executable(${_school_days_policy_test} ${_school_days_policy_test}.cpp)
+    target_link_libraries(${_school_days_policy_test} PRIVATE school_days)
+    add_test(NAME ${_school_days_policy_test} COMMAND ${_school_days_policy_test})
+endforeach()
+
+add_executable(SchoolDaysNextChoiceRuntimeTest SchoolDaysNextChoiceRuntimeTest.cpp)
+target_link_libraries(SchoolDaysNextChoiceRuntimeTest PRIVATE school_days)
+add_test(NAME SchoolDaysNextChoiceRuntimeTest COMMAND SchoolDaysNextChoiceRuntimeTest
+    "${SCHOOL_DAYS_ROUTE}")
+set_tests_properties(SchoolDaysNextChoiceRuntimeTest PROPERTIES
+    ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy")
+
+add_executable(SchoolDaysBackRuntimeTest SchoolDaysBackRuntimeTest.cpp)
+target_link_libraries(SchoolDaysBackRuntimeTest PRIVATE school_days)
+kotonoha_copy_assets(SchoolDaysBackRuntimeTest)
+add_test(NAME SchoolDaysBackRuntimeTest COMMAND SchoolDaysBackRuntimeTest
+    "${SCHOOL_DAYS_ROUTE}")
+set_tests_properties(SchoolDaysBackRuntimeTest PROPERTIES
+    ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy")
+
+add_executable(SchoolDaysConfigStorageTest SchoolDaysConfigStorageTest.cpp)
+target_link_libraries(SchoolDaysConfigStorageTest PRIVATE school_days)
+add_test(NAME SchoolDaysConfigStorageTest COMMAND SchoolDaysConfigStorageTest)
+
+add_executable(SchoolDaysRuntimeConfigStorageTest SchoolDaysRuntimeConfigStorageTest.cpp)
+target_link_libraries(SchoolDaysRuntimeConfigStorageTest PRIVATE school_days)
+add_test(NAME SchoolDaysRuntimeConfigStorageTest COMMAND SchoolDaysRuntimeConfigStorageTest
+    "${SCHOOL_DAYS_ROUTE}"
+    "${CMAKE_CURRENT_BINARY_DIR}/fixtures")
+set_tests_properties(SchoolDaysRuntimeConfigStorageTest PROPERTIES
+    FIXTURES_REQUIRED school_days_assets
+    ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy")
+
+add_executable(SchoolDaysHandoffRuntimeTest SchoolDaysHandoffRuntimeTest.cpp)
+target_link_libraries(SchoolDaysHandoffRuntimeTest PRIVATE school_days)
+add_test(NAME SchoolDaysHandoffRuntimeTest COMMAND SchoolDaysHandoffRuntimeTest
+    "${SCHOOL_DAYS_ROUTE}"
+    "${CMAKE_CURRENT_BINARY_DIR}/fixtures")
+set_tests_properties(SchoolDaysHandoffRuntimeTest PROPERTIES
+    FIXTURES_REQUIRED school_days_assets
+    ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy")
+
+add_executable(SchoolDaysReplayScriptOracleTest SchoolDaysReplayScriptOracleTest.cpp)
+target_link_libraries(SchoolDaysReplayScriptOracleTest PRIVATE school_days)
+add_test(NAME SchoolDaysReplayScriptOracleTest COMMAND SchoolDaysReplayScriptOracleTest)
+
+add_executable(SchoolDaysReplayPlaybackSessionTest SchoolDaysReplayPlaybackSessionTest.cpp)
+target_link_libraries(SchoolDaysReplayPlaybackSessionTest PRIVATE school_days)
+add_test(NAME SchoolDaysReplayPlaybackSessionTest COMMAND SchoolDaysReplayPlaybackSessionTest)
+
+add_executable(SchoolDaysPlayDataSessionTest SchoolDaysPlayDataSessionTest.cpp)
+target_link_libraries(SchoolDaysPlayDataSessionTest PRIVATE school_days)
+add_test(NAME SchoolDaysPlayDataSessionTest COMMAND SchoolDaysPlayDataSessionTest
+    "${SCHOOL_DAYS_ROUTE}"
+    "${CMAKE_CURRENT_BINARY_DIR}/fixtures/Script/English")
+set_tests_properties(SchoolDaysPlayDataSessionTest PROPERTIES
+    FIXTURES_REQUIRED school_days_assets)
+
+add_executable(SchoolDaysReplayRuntimeIsolationTest SchoolDaysReplayRuntimeIsolationTest.cpp)
+target_link_libraries(SchoolDaysReplayRuntimeIsolationTest PRIVATE school_days)
+add_test(NAME SchoolDaysReplayRuntimeIsolationTest COMMAND SchoolDaysReplayRuntimeIsolationTest
+    "${SCHOOL_DAYS_ROUTE}"
+    "${CMAKE_CURRENT_BINARY_DIR}/fixtures")
+set_tests_properties(SchoolDaysReplayRuntimeIsolationTest PROPERTIES
+    FIXTURES_REQUIRED school_days_assets)
+
+add_executable(SchoolDaysReplayRuntimeUiTest SchoolDaysReplayRuntimeUiTest.cpp)
+target_link_libraries(SchoolDaysReplayRuntimeUiTest PRIVATE school_days)
+add_test(NAME SchoolDaysReplayRuntimeUiTest COMMAND SchoolDaysReplayRuntimeUiTest
+    "${SCHOOL_DAYS_ROUTE}")
+set_tests_properties(SchoolDaysReplayRuntimeUiTest PROPERTIES
+    ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy")
+
 add_test(NAME SchoolDaysRuntimeSmoke COMMAND SchoolDays
     --school-days "${CMAKE_CURRENT_BINARY_DIR}/fixtures"
     --documents "${CMAKE_CURRENT_BINARY_DIR}/documents"
@@ -58,6 +168,55 @@ set_tests_properties(SchoolDaysMediaTest PROPERTIES
 add_executable(SchoolDaysUiModelTest SchoolDaysUiModelTest.cpp)
 target_link_libraries(SchoolDaysUiModelTest PRIVATE school_days)
 add_test(NAME SchoolDaysUiModelTest COMMAND SchoolDaysUiModelTest)
+
+add_executable(SchoolDaysSystemUiCommentEditorTest SchoolDaysSystemUiCommentEditorTest.cpp)
+target_link_libraries(SchoolDaysSystemUiCommentEditorTest PRIVATE school_days)
+add_test(NAME SchoolDaysSystemUiCommentEditorTest COMMAND SchoolDaysSystemUiCommentEditorTest)
+set_tests_properties(SchoolDaysSystemUiCommentEditorTest PROPERTIES
+    ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy")
+
+# On Windows the test executables are emitted in a directory separate from the
+# shared Kotonoha runtime.  Make CTest resolve the same runtime DLLs that the
+# packaged application receives instead of blocking on an invisible loader
+# error dialog when a test is launched directly by CTest.
+if(WIN32)
+    set(_school_days_test_runtime_env
+        "PATH=path_list_prepend:$<TARGET_FILE_DIR:KotonohaEngine>")
+    set_tests_properties(
+        SchoolDaysPortTest
+        SchoolDaysSessionTest
+        SchoolDaysBridgeTest
+        SchoolDaysSceneTimelineTest
+        SchoolDaysAudioEventStateTest
+        SchoolDaysAssetsListTest
+        SchoolDaysGpkStreamingTest
+        SchoolDaysTitleMovieClockTest
+        SchoolDaysEpisodeOverlayTest
+        SchoolDaysMenuBarRuntimeTest
+        SchoolDaysChoiceTextPlanTest
+        SchoolDaysDisplayPolicyTest
+        SchoolDaysFrontendTransitionTest
+        SchoolDaysInputPolicyTest
+        SchoolDaysMenuBarLayoutTest
+        SchoolDaysPromptPolicyTest
+        SchoolDaysTopMeterModelTest
+        SchoolDaysNextChoiceRuntimeTest
+        SchoolDaysBackRuntimeTest
+        SchoolDaysConfigStorageTest
+        SchoolDaysRuntimeConfigStorageTest
+        SchoolDaysHandoffRuntimeTest
+        SchoolDaysReplayScriptOracleTest
+        SchoolDaysReplayPlaybackSessionTest
+        SchoolDaysPlayDataSessionTest
+        SchoolDaysReplayRuntimeIsolationTest
+        SchoolDaysReplayRuntimeUiTest
+        SchoolDaysRuntimeSmoke
+        SchoolDaysLauncherTest
+        SchoolDaysMediaTest
+        SchoolDaysUiModelTest
+        SchoolDaysSystemUiCommentEditorTest
+        PROPERTIES ENVIRONMENT_MODIFICATION "${_school_days_test_runtime_env}")
+endif()
 
 # Manual visual check with retail data (see SchoolDaysPanelCapture.cpp).
 add_executable(SchoolDaysPanelCapture SchoolDaysPanelCapture.cpp)

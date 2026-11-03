@@ -34,15 +34,16 @@ bundled route. `--no-config` disables remembering either path.
 Saves and GlobalFlag use `preferredDocumentsDirectory("school-days")`; use
 `--documents directory` for isolated tests. Quick save/load and slots 0–99 use
 the original FlgH/SLog codecs, restarting the saved script as the original did.
-Slot filenames and the generic UI differ from retail; retail save thumbnails,
-comments and its metadata browser are not implemented. Existing compatible SLog
-files can be loaded through the engine save/load API.
+The game-owned SaveLoad UI includes the retail asynchronous comment editor and
+preserves existing comment text/metadata while editing. Existing compatible SLog
+files can also be loaded through the engine save/load API.
 
 Space pauses; Left navigates the original semantic Back rules; Right skips to
-the original choice/end boundary; 1–9 select choices; F5/F9 quick-save/load.
-The engine may reserve F9 for its debugger. The on-screen controls remain
-available. Escape opens game audio configuration. Engine video/upscaling and
-persistent settings are available through the launcher/engine settings.
+the original choice/end boundary; F5/F6 quick-save/load. Retail choices are
+mouse-only: pointer motion updates the stored selection and a left-button-down
+activates only the currently stored hit region. Keyboard, touch and gamepad do
+not select a choice. The on-screen controls remain available. Escape opens game
+configuration. Engine video/upscaling remains available through the launcher.
 
 ## Preserved
 
@@ -54,7 +55,25 @@ persistent settings are available through the launcher/engine settings.
 - Still backgrounds, timed WMV movies/end rolls, voice, SE slots, BGM intro/loop
   and ending tracks, subtitle text and black/white fades through Kotonoha media.
 - Original title CMAP/model/render plan and title/end-background configuration
-  when the corresponding retail resources exist; a generic menu is the fallback.
+  when the corresponding retail resources exist; title movie playback uses the
+  authenticated 24 Hz clock/fallback behavior and retains its terminal frame.
+- Replay frontend playback and isolated Replay Data/PlayData sessions are wired
+  through the original routing/save data without replacing the live narrative
+  state. Replay ownership and ordinary gameplay state remain separated.
+- Episode telops use the game-owned authenticated timing/alpha model on natural
+  episode handoff. The MenuBar and TopMeter use retail assets/state, including
+  `001`/`002` refresh behavior and the authenticated playback-speed controls.
+- Retail `SetSELECT` interaction uses the authenticated mouse-only prompt policy:
+  full-canvas one-choice hit testing, top/bottom two-choice geometry, stored
+  selection/stale-click rules, timeout at `endTick-1`, AUTO `rand%(span+1)-1`,
+  immediate semantic commit, and 24/48-tick presentation tails with the final
+  alpha-zero frame rendered before scene advance.
+- `Config.DAT` is loaded/cached/flushed through the game-owned retail config
+  storage, preserving unknown/malformed material where the storage policy can do
+  so. MenuBar Auto state is persisted through that path.
+- SaveLoad comments are edited asynchronously inside the retail SystemUi flow;
+  Escape cancels the editor without accidentally closing the owning SaveLoad or
+  pending handoff flow.
 - Recorded route checkpoint loading and completion statistics using the original
   route-map model/oracle. Chapter/ending handoffs offer save/continue.
 - `debugNode`, node enumeration/jumps, original binary `loadKtrf` and byte-exact
@@ -62,25 +81,33 @@ persistent settings are available through the launcher/engine settings.
 
 ## Not yet equivalent to retail
 
-- Replay/gallery/PlayData playback, title movies, episode telops and retail
-  transition choreography are not ported. The native title's replay action reports
-  this rather than pretending to start it.
-- Character ABC/lip-sync layers, MoveSom spatial transforms, exact ASS styling,
-  original glyph rasterization, retail choice geometry/fade tails, top meters and
-  complete retail configuration UI remain unsupported.
-- Subtitle content is shown in the accessible game control panel, not the
-  original styled subtitle renderer. Timed choice behavior is retained but its
-  visual layout is generic.
+- Character ABC/lip-sync presentation is still missing from the v3 runtime.
+- Runtime display-variant coverage is not yet retail-equivalent; the currently
+  exercised WideFull path must not be read as proof for every original display
+  variant or runtime variant switch.
+- Frontend transition/carry-frame choreography is not yet exact across all title,
+  Replay, Replay Data and gameplay transitions.
+- PlayData/Replay Data does not yet expose nested Save/Load/BackLog through an
+  isolated temporary-session host; those actions remain inhibited rather than
+  mutating the retained narrative session.
+- Replay SystemBGM ownership/restoration is not yet verified as retail-equivalent.
+- Exact original glyph rasterization/styling is not claimed. Choice and other
+  game-owned text use the authenticated geometry/advance plans with Kotonoha TTF
+  typography, so glyph shape/outline/shadow can still differ from retail pixels.
 - GPK media entries are read into memory through Kotonoha's AssetProvider;
   extracted media streams from disk. Very large packed movies may require more
   memory than the original streaming bridge.
 - Missing optional media reports a status/log warning without stopping routing.
   Invalid/missing ORS or unresolved routing is not silently treated as success.
 
-No retail data was available for end-to-end verification in this checkout.
-Regression fixtures are synthetic scripts and newly generated PNG/WMV/OGG media,
-never copied game assets. The media test asserts a decoded red WMV frame and
-active BGM/Voice/Movie audio streams over a decoded blue PNG background.
+Current v3 validation has also been run against the original retail 29-GPK data
+set. Save/routing comparisons were kept isolated with separate baseline,
+A-full, B-global and current-save document/save clones so one validation path
+could not silently contaminate another. Synthetic regression fixtures remain in
+the automated suite for deterministic parser/media/unit coverage; they are not
+the only evidence used for the current School Days parity work.
+
+This status is a record of verified behavior, not a claim of 100% retail parity.
 
 ## Build and tests
 
@@ -92,8 +119,10 @@ ctest --test-dir build/school-days-port -R '^SchoolDays' --output-on-failure
 ```
 
 Tests cover asset discovery/traversal, original binary compatibility, all node
-enumeration, transactional routing/save/load/Back/handoffs, ORS tick scheduling
-and headless Kotonoha engine/frontend and actual media presentation runs.
+enumeration, transactional routing/save/load/Back/handoffs, ORS tick scheduling,
+Config.DAT storage, Replay/PlayData isolation, MenuBar/TopMeter policy, title/telop
+helpers, SaveLoad handoff/comment behavior, retail prompt interaction and choice
+text/tail timing, plus headless Kotonoha engine/frontend and media presentation.
 The custom-runtime test also edits a binary NODE label, rebuilds its integrity
 envelope, reloads it, jumps to a numeric node and verifies byte-exact dumping.
 
