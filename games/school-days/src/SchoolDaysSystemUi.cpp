@@ -827,7 +827,10 @@ bool SchoolDaysSystemUi::OpenExit(
         Close();
         return false;
     }
-    SDL_SetTextureBlendMode(baseTexture_, SDL_BLENDMODE_NONE);
+    // The retail popup base carries a translucent dark veil (alpha 221).
+    // Compositing it over the retained title/gameplay frame is part of the
+    // confirmation view; SDL_BLENDMODE_NONE turns the veil opaque black.
+    SDL_SetTextureBlendMode(baseTexture_, SDL_BLENDMODE_BLEND);
     if (!SDL_SetTextureBlendMode(chipTexture_, SDL_BLENDMODE_BLEND)) {
         if (error != nullptr)
             *error = std::string("School Days ExitView CHIP blend setup failed: ") +

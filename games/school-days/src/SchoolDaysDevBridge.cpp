@@ -168,6 +168,35 @@ struct DevBridge::State {
     json_object_object_add(o.get(), "nearBlackRatio", json_object_new_double(screenFrame.nearBlackRatio));
     put(o.get(), "abcGroupCount", static_cast<int64_t>(r.abcGroups.size()));
     put(o.get(), "abcVoiceCount", static_cast<int64_t>(r.abcVoices.size()));
+    put(o.get(), "backgroundStartTick", static_cast<int64_t>(r.backgroundStartTick));
+    put(o.get(), "backgroundEndTick", static_cast<int64_t>(r.backgroundEndTick));
+    put(o.get(), "abcAnalysisGeneration", static_cast<int64_t>(r.abcAnalysisGeneration));
+    put(o.get(), "abcAnalysisQueued", static_cast<int64_t>(r.abcAnalysisQueued.size()));
+    Json abcGroups = object();
+    for (const auto &group : r.abcGroups) {
+      Json entry = object();
+      put(entry.get(), "complete", group.Complete());
+      put(entry.get(), "collision", group.collision);
+      json_object *paths = json_object_new_array();
+      for (const auto &path : group.paths)
+        json_object_array_add(paths, json_object_new_string(path.c_str()));
+      json_object_object_add(entry.get(), "paths", paths);
+      json_object_object_add(abcGroups.get(), group.key.c_str(), json_object_get(entry.get()));
+    }
+    json_object_object_add(o.get(), "abcGroups", json_object_get(abcGroups.get()));
+    json_object *abcVoices = json_object_new_array();
+    for (const auto &voice : r.abcVoices) {
+      Json entry = object();
+      put(entry.get(), "key", voice.key);
+      put(entry.get(), "groupIndex", voice.groupIndex);
+      put(entry.get(), "activityRecords", static_cast<int64_t>(voice.activity.size()));
+      put(entry.get(), "frame", static_cast<int64_t>(voice.cursor.state.activeIndex));
+      put(entry.get(), "counter", static_cast<int64_t>(voice.cursor.state.counter));
+      put(entry.get(), "startTick", voice.event ? static_cast<int64_t>(voice.event->startTick) : -1);
+      put(entry.get(), "endTick", voice.event ? static_cast<int64_t>(voice.event->endTick) : -1);
+      json_object_array_add(abcVoices, json_object_get(entry.get()));
+    }
+    json_object_object_add(o.get(), "abcVoices", abcVoices);
     put(o.get(), "playingMediaCount", static_cast<int64_t>(r.playing.size()));
     json_object *media = json_object_new_array();
     for (const auto &item : r.playing) {

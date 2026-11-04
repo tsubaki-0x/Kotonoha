@@ -273,13 +273,14 @@ SchoolDaysRouteMapRenderPlan::Build(const SchoolDaysRouteMapModel &model) {
   out.reserve(static_cast<size_t>(page->count + 24));
   out.push_back(Base(layout));
 
-  // Native first pass: exactly one locked/available record per local node.
+  // In the retail title -> LOAD -> RouteMap path, an absent SP checkpoint
+  // leaves the node as drawn by the base image; a present SP adds band 1.
+  // Band 3 is a separate state and must not stand in for an unlock.
   for (int i = 0; i < page->count; ++i) {
-    const NodeBand band =
-        model.NodeAvailable(i) ? NodeBand::Available : NodeBand::Locked;
-    const Role role =
-        model.NodeAvailable(i) ? Role::NodeAvailable : Role::NodeLocked;
-    out.push_back(FromRecord(role, i, NodeRecordIndex(major, subpage, i, band),
+    if (!model.NodeAvailable(i)) continue;
+    constexpr NodeBand band = NodeBand::Locked;
+    out.push_back(FromRecord(Role::NodeAvailable, i,
+                             NodeRecordIndex(major, subpage, i, band),
                              NodeRecord(major, subpage, i, band), layout));
   }
 

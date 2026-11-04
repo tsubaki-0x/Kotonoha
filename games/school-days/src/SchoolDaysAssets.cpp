@@ -39,6 +39,8 @@ bool HasAsciiCaseInsensitivePrefix(const std::string &value,
 
 Assets::Assets(std::filesystem::path root, const std::string &scripts)
     : directory(std::move(root)) {
+  if (!scripts.empty() && !std::filesystem::is_directory(scripts))
+    throw std::runtime_error("School Days script directory does not exist");
   setOverlay(scripts);
   std::string info;
   if (!checkDirectory(directory, info))
@@ -75,9 +77,17 @@ Assets::~Assets() {
 
 std::string Assets::resolve(const std::string &logical, bool image) const {
   if (Kotonoha::IsSchoolDaysGpkUri(logical)) return logical;
-  const auto found = image
+  auto found = image
       ? Kotonoha::ResolveSchoolDaysImageAsset(directory.string().c_str(), logical)
       : Kotonoha::ResolveSchoolDaysAssetPath(directory.string().c_str(), logical);
+  // The retail ORS 03-BK-H00 contains one accidental space in this voice path.
+  // Its correctly named file exists in Voice03.GPK. Keep an exact file or
+  // overlay with the scripted spelling if one is supplied.
+  if (!image && found.status == Kotonoha::SchoolDaysAssetResolutionStatus::Missing &&
+      logical == "Voice03/03-BK/03-BK-H00/03-B K-H00-0410.OGG")
+    found = Kotonoha::ResolveSchoolDaysAssetPath(
+        directory.string().c_str(),
+        "Voice03/03-BK/03-BK-H00/03-BK-H00-0410.OGG");
   if (!found.present || found.collision) {
     const char *reason = "Invalid";
     switch (found.status) {

@@ -229,6 +229,10 @@ if(SCHOOL_DAYS_DATA_DIR)
     target_link_libraries(SchoolDaysRetailTest PRIVATE school_days)
     add_test(NAME SchoolDays.Retail COMMAND SchoolDaysRetailTest "${SCHOOL_DAYS_DATA_DIR}" "${SCHOOL_DAYS_ROUTE}")
     set_tests_properties(SchoolDays.Retail PROPERTIES TIMEOUT 180)
+    if(WIN32)
+        set_tests_properties(SchoolDays.Retail PROPERTIES
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:KotonohaEngine>")
+    endif()
 endif()
 
 add_executable(SchoolDaysLogoTest SchoolDaysLogoTest.cpp)

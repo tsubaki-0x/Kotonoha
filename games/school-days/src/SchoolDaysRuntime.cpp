@@ -53,6 +53,19 @@ using FrontendTransition = Kotonoha::SchoolDaysFrontendTransition;
 constexpr Uint64 StatusMilliseconds = 6000;
 constexpr double SchoolDaysMediaCacheSeconds = 2.0;
 
+Kotonoha::SchoolDaysBgmResources BgmResourcesForPlayback(
+    const Assets &assets, const std::string &path) {
+  auto resources = Kotonoha::SchoolDaysBgmResources::Normal(path);
+  try {
+    (void)assets.resolve(resources.intro);
+  } catch (const std::runtime_error &) {
+    // Several retail tracks contain only _loop.ogg. Start with that file and
+    // keep it as the repeat source instead of dropping the whole BGM event.
+    resources.intro = resources.loop;
+  }
+  return resources;
+}
+
 struct FittedViewport {
   float x = 0.0f;
   float y = 0.0f;
@@ -519,7 +532,8 @@ public:
     std::vector<Kotonoha::SchoolDaysAbcGroupResources> backgroundGroups;
     std::vector<std::pair<std::string, Kotonoha::SurfacePtr>> backgroundAbcSurfaces;
   };
-  explicit AbcAnalysisWorker(Assets &source) : assets(source), worker([this] { run(); }) {}
+  explicit AbcAnalysisWorker(Assets &source, uint64_t generation)
+      : assets(source), currentGeneration(generation), worker([this] { run(); }) {}
   ~AbcAnalysisWorker() {
     {
       std::lock_guard<std::mutex> lock(mutex);
@@ -620,7 +634,7 @@ private:
             const auto directory = slash == std::string::npos ? std::string()
                                        : resolved.substr(0, slash + 1u);
             result.backgroundGroups = Kotonoha::SchoolDaysGroupAbcSiblings(
-                resolved, assets.list(directory));
+                resolved, assets.listAsset(directory));
             result.backgroundGroups.erase(
                 std::remove_if(result.backgroundGroups.begin(),
                                result.backgroundGroups.end(),
@@ -1025,11 +1039,13 @@ bool Runtime::panelOpen() const {
          (engine && engine->GetSettingsMenu().isOpen());
 }
 
-bool Runtime::modal() const { return panelOpen() || (engine && engine->isStoryPaused()); }
+bool Runtime::modal() const {
+  return panelOpen() || exitTransition.Active() || systemPanelTransition.Active() ||
+         (engine && engine->isStoryPaused());
+}
 
 void Runtime::closePanels() {
   systemUi.Close();
-  mainMenuConfirmOpen = false;
   backlogModel.Close();
   backlogPresenter.Close();
   if (saveMenu && saveMenu->isOpen()) saveMenu->close();
@@ -1160,6 +1176,145 @@ void Runtime::renderFrontendTransition(Kotonoha::RendererRef renderer, uint64_t 
                           ? 255u : 0u;
   (void)SDL_SetRenderDrawColor(&renderer, value, value, value, alpha);
   (void)SDL_RenderFillRect(&renderer, &area);
+  (void)SDL_SetRenderDrawColor(&renderer, r, g, b, a);
+  (void)SDL_SetRenderDrawBlendMode(&renderer, previousBlend);
+}
+
+void Runtime::updateExitTransition(uint64_t nowMs) {
+  using Transition = Kotonoha::SchoolDaysExitTransition;
+  const auto target = exitTransition.CurrentTarget();
+  switch (exitTransition.Update(nowMs)) {
+  case Transition::Event::None:
+  case Transition::Event::Closed:
+    return;
+  case Transition::Event::OpenDialog:
+    openExitDialog(target == Transition::Target::Title);
+    return;
+  case Transition::Event::Confirmed:
+    if (target == Transition::Target::Title) {
+      finishMainMenuReturn();
+      frontendTransition.BeginIncoming(FrontendTransition::Color::Black, 500u, nowMs);
+    } else {
+      closePanels();
+      SDL_Event quit{};
+      quit.type = SDL_EVENT_QUIT;
+      SDL_PushEvent(&quit);
+    }
+    return;
+  }
+}
+
+void Runtime::renderExitTransition(Kotonoha::RendererRef renderer, uint64_t nowMs) {
+  using Transition = Kotonoha::SchoolDaysExitTransition;
+  const auto phase = exitTransition.CurrentPhase();
+  if (phase != Transition::Phase::Opening && phase != Transition::Phase::Closing &&
+      phase != Transition::Phase::Confirming) return;
+  int virtualWidth = 1280, virtualHeight = 720;
+  switch (uiVariant) {
+  case DisplayPolicy::Variant::Standard: virtualWidth = 800; virtualHeight = 600; break;
+  case DisplayPolicy::Variant::Wide: virtualWidth = 800; virtualHeight = 450; break;
+  case DisplayPolicy::Variant::WideFull: break;
+  case DisplayPolicy::Variant::WideNote: virtualWidth = 1024; virtualHeight = 576; break;
+  }
+  // renderScreen uses physical output coordinates. Match SystemUi's fitted
+  // viewport so SYSBASE and the popup cover the same pixels at any resolution.
+  const SDL_FPoint screen = engine->screenSize();
+  const float scale = std::min(screen.x / static_cast<float>(virtualWidth),
+                               screen.y / static_cast<float>(virtualHeight));
+  const SDL_FRect area{(screen.x - virtualWidth * scale) * 0.5f,
+                       (screen.y - virtualHeight * scale) * 0.5f,
+                       virtualWidth * scale, virtualHeight * scale};
+  if (phase == Transition::Phase::Confirming) {
+    SDL_BlendMode previousBlend = SDL_BLENDMODE_NONE;
+    Uint8 r = 0, g = 0, b = 0, a = 0;
+    (void)SDL_GetRenderDrawBlendMode(&renderer, &previousBlend);
+    (void)SDL_GetRenderDrawColor(&renderer, &r, &g, &b, &a);
+    (void)SDL_SetRenderDrawBlendMode(&renderer, SDL_BLENDMODE_BLEND);
+    (void)SDL_SetRenderDrawColor(&renderer, 0, 0, 0, exitTransition.Alpha(nowMs));
+    (void)SDL_RenderFillRect(&renderer, &area);
+    (void)SDL_SetRenderDrawColor(&renderer, r, g, b, a);
+    (void)SDL_SetRenderDrawBlendMode(&renderer, previousBlend);
+    return;
+  }
+  try {
+    auto &texture = assets->texture(
+        renderer, assets->resolve("System/SYSTEM/SYSBASE", true));
+    Uint8 previousAlpha = 255u;
+    (void)SDL_GetTextureAlphaMod(&texture, &previousAlpha);
+    (void)SDL_SetTextureAlphaMod(&texture, exitTransition.Alpha(nowMs));
+    const float fraction = exitTransition.RevealedFraction(nowMs);
+    const SDL_FRect source{0, 0, 800.0f, 450.0f * fraction};
+    const SDL_FRect destination{area.x, area.y, area.w, area.h * fraction};
+    (void)SDL_RenderTexture(&renderer, &texture, &source, &destination);
+    (void)SDL_SetTextureAlphaMod(&texture, previousAlpha);
+  } catch (const std::exception &error) {
+    SDL_LogWarn(Kotonoha::LogUI, "School Days SYSBASE transition: %s", error.what());
+  }
+}
+
+void Runtime::beginSystemPanel(Kotonoha::SchoolDaysSystemPanelTransition::Target target) {
+  if (currentState != Kotonoha::GameState::Gameplay || panelOpen() ||
+      exitTransition.Active() || systemPanelTransition.Active()) return;
+  systemPanelTransition.Begin(target, SDL_GetTicks());
+}
+
+bool Runtime::beginSystemPanelClose() {
+  using Phase = Kotonoha::SchoolDaysSystemPanelTransition::Phase;
+  if (currentState != Kotonoha::GameState::Gameplay ||
+      systemPanelTransition.CurrentPhase() != Phase::Open) return false;
+  systemPanelTransition.BeginClose(SDL_GetTicks());
+  return true;
+}
+
+void Runtime::updateSystemPanelTransition(uint64_t nowMs) {
+  using Transition = Kotonoha::SchoolDaysSystemPanelTransition;
+  if (systemPanelTransition.CurrentPhase() == Transition::Phase::Open && !panelOpen()) {
+    systemPanelTransition.Reset();
+    return;
+  }
+  switch (systemPanelTransition.Update(nowMs)) {
+  case Transition::Event::None:
+    return;
+  case Transition::Event::OpenPanel:
+    try {
+      switch (systemPanelTransition.CurrentTarget()) {
+      case Transition::Target::Save: openSaveLoad(true); break;
+      case Transition::Target::Load: openSaveLoad(false); break;
+      case Transition::Target::BackLog: openBacklog(); break;
+      case Transition::Target::Config:
+        openConfig(Kotonoha::SchoolDaysConfigMenuModel::Page::Def);
+        break;
+      }
+      if (!panelOpen()) systemPanelTransition.Reset();
+    } catch (...) {
+      systemPanelTransition.Reset();
+      throw;
+    }
+    return;
+  case Transition::Event::ClosePanel:
+    closePanels();
+    return;
+  }
+}
+
+void Runtime::renderSystemPanelTransition(Kotonoha::RendererRef renderer,
+                                          uint64_t nowMs) {
+  using Phase = Kotonoha::SchoolDaysSystemPanelTransition::Phase;
+  const auto phase = systemPanelTransition.CurrentPhase();
+  if (phase != Phase::Opening && phase != Phase::Closing &&
+      phase != Phase::Revealing) return;
+  SDL_BlendMode previousBlend = SDL_BLENDMODE_NONE;
+  Uint8 r = 0, g = 0, b = 0, a = 0;
+  (void)SDL_GetRenderDrawBlendMode(&renderer, &previousBlend);
+  (void)SDL_GetRenderDrawColor(&renderer, &r, &g, &b, &a);
+  (void)SDL_SetRenderDrawBlendMode(&renderer, SDL_BLENDMODE_BLEND);
+  if (systemPanelTransition.OpeningFromBlack()) {
+    (void)SDL_SetRenderDrawColor(&renderer, 0, 0, 0, 255);
+    (void)SDL_RenderFillRect(&renderer, nullptr);
+  }
+  (void)SDL_SetRenderDrawColor(&renderer, 255, 255, 255,
+                               systemPanelTransition.WhiteAlpha(nowMs));
+  (void)SDL_RenderFillRect(&renderer, nullptr);
   (void)SDL_SetRenderDrawColor(&renderer, r, g, b, a);
   (void)SDL_SetRenderDrawBlendMode(&renderer, previousBlend);
 }
@@ -1625,7 +1780,8 @@ void Runtime::prepareAbcActivity(Kotonoha_orsEvent &event,
   }
   if (!candidate || !abcAnalysisQueued.insert(ordinal).second) return;
   if (!abcAnalysisWorker)
-    abcAnalysisWorker = std::make_unique<AbcAnalysisWorker>(*assets);
+    abcAnalysisWorker = std::make_unique<AbcAnalysisWorker>(*assets,
+                                                            abcAnalysisGeneration);
   const uint64_t durationMs = std::max<uint64_t>(
       1u, Kotonoha_SceneTickToMillisecondsCeil(event.endTick - event.startTick));
   if (!abcAnalysisWorker->enqueue(abcAnalysisGeneration, ordinal, logical,
@@ -1743,7 +1899,8 @@ bool Runtime::prepareMediaEvent(Kotonoha_orsEvent &event) {
     }
     if (!candidate) return false;
     if (!abcAnalysisWorker)
-      abcAnalysisWorker = std::make_unique<AbcAnalysisWorker>(*assets);
+      abcAnalysisWorker = std::make_unique<AbcAnalysisWorker>(*assets,
+                                                              abcAnalysisGeneration);
     std::vector<std::string> abcKeys;
     for (auto *voice = script.data; voice; voice = voice->next) {
       if (voice->command != PLAY_VOICE ||
@@ -1783,7 +1940,7 @@ bool Runtime::prepareMediaEvent(Kotonoha_orsEvent &event) {
     break;
   case PLAY_BGM: {
     const auto resources =
-        Kotonoha::SchoolDaysBgmResources::Normal(Text(event.data.path_end->path));
+        BgmResourcesForPlayback(*assets, Text(event.data.path_end->path));
     logical = resources.intro;
     loop = resources.loop;
     channel = "BGM";
@@ -1826,7 +1983,8 @@ bool Runtime::prepareMediaEvent(Kotonoha_orsEvent &event) {
     }
     if (!candidate) return true;
     if (!abcAnalysisWorker)
-      abcAnalysisWorker = std::make_unique<AbcAnalysisWorker>(*assets);
+      abcAnalysisWorker = std::make_unique<AbcAnalysisWorker>(*assets,
+                                                              abcAnalysisGeneration);
     if (!abcAnalysisWorker->enqueueMedia(abcAnalysisGeneration, ordinal,
                                          logical, !movie, loop)) {
       // A full queue is retried on the next update, without marking this ORS
@@ -1899,7 +2057,9 @@ void Runtime::discoverAbcForBackground() {
                               : background.substr(0, separator + 1u);
   std::vector<std::string> siblings;
   try {
-    siblings = assets->list(directory);
+    // School Days GPK references and extracted absolute paths must retain
+    // every sibling. The generic overlay list normalizes both to an empty key.
+    siblings = assets->listAsset(directory);
   } catch (const std::exception &error) {
     SDL_LogWarn(Kotonoha::LogUI, "School Days ABC sibling listing failed: %s",
                 error.what());
@@ -2233,7 +2393,7 @@ void Runtime::dispatch(Kotonoha_orsEvent &event) {
     break;
   case PLAY_BGM: {
     stop(PLAY_BGM);
-    auto resources = Kotonoha::SchoolDaysBgmResources::Normal(Text(event.data.path_end->path));
+    auto resources = BgmResourcesForPlayback(*assets, Text(event.data.path_end->path));
     play(event, resources.intro, "BGM", resources.loop);
     break;
   }
@@ -2712,6 +2872,8 @@ void Runtime::update() {
   // Frontend handoffs occur exactly at fade opacity, before retained scenes or
   // panel models get another update in the old ownership state.
   updateFrontendTransition(now);
+  updateExitTransition(now);
+  updateSystemPanelTransition(now);
   gameScene->update();
   if (backlogFallback->isVisible()) backlogFallback->update();
   updateHandoffUi();
@@ -2823,7 +2985,9 @@ void Runtime::renderMenu(Kotonoha::RendererRef renderer, float) {
         titleBgm->open(*assets, assets->resolve(stem + "_loop.ogg"), true, "BGM");
     }
   }
-  if (!systemUi.IsOpen() && titleArtwork) try {
+  // ExitView is a translucent confirmation over the title, so retain the
+  // title overlay beneath it. Other frontend panels replace the title.
+  if ((!systemUi.IsOpen() || systemUi.IsExitOpen()) && titleArtwork) try {
     for (const auto &sprite : Kotonoha::SchoolDaysTitleRenderPlan::Build(title)) {
       const auto stem = sprite.texture == Kotonoha::SchoolDaysTitleRenderPlan::Texture::Overlay
           ? Kotonoha::SchoolDaysTitleModel::ResourceStem(title.CurrentFamily())
@@ -3013,22 +3177,26 @@ void Runtime::renderScreen(Kotonoha::RendererRef renderer, float scale) {
   Kotonoha::Runtime::renderScreen(renderer, scale);
   // A native SystemUi or BackLog panel owns the screen while open. The menu
   // belongs to gameplay and must not be projected over that owner.
-  if (currentState == Kotonoha::GameState::Gameplay && gameScene && !panelOpen())
+  if (currentState == Kotonoha::GameState::Gameplay && gameScene &&
+      !panelOpen() && !exitTransition.Active())
     gameScene->renderMenuBar(renderer);
-  if (!systemUi.IsOpen()) return;
-  const SDL_FPoint screen = engine->screenSize();
-  systemUi.SetArea({std::max(1, static_cast<int>(std::lround(screen.x))),
-                    std::max(1, static_cast<int>(std::lround(screen.y)))});
-  std::string failure;
-  if (!systemUi.Render(&renderer, &failure)) {
-    SDL_LogWarn(Kotonoha::LogUI, "School Days panel: %s", failure.c_str());
-    systemUi.Close();
-    setStatus("School Days panel failed: " + failure);
-    return;
+  if (systemUi.IsOpen()) {
+    const SDL_FPoint screen = engine->screenSize();
+    systemUi.SetArea({std::max(1, static_cast<int>(std::lround(screen.x))),
+                      std::max(1, static_cast<int>(std::lround(screen.y)))});
+    std::string failure;
+    if (!systemUi.Render(&renderer, &failure)) {
+      SDL_LogWarn(Kotonoha::LogUI, "School Days panel: %s", failure.c_str());
+      systemUi.Close();
+      setStatus("School Days panel failed: " + failure);
+      return;
+    }
+    // The commercial remaster covers the retired SOMCON tab over the physical
+    // presentation, not over an already-letterboxed 1280x720 intermediate.
+    if (systemUi.IsConfigOpen()) renderDisplayPanel(renderer);
   }
-  // The commercial remaster covers the retired SOMCON tab over the physical
-  // presentation, not over an already-letterboxed 1280x720 intermediate.
-  if (systemUi.IsConfigOpen()) renderDisplayPanel(renderer);
+  renderExitTransition(renderer, SDL_GetTicks());
+  renderSystemPanelTransition(renderer, SDL_GetTicks());
 }
 
 bool Runtime::displayPanelOpen() const {
@@ -3652,8 +3820,11 @@ bool Runtime::onScreenEvent(Kotonoha::EventRef event) {
     }
   }
   if (!engine) return false;
+  if (exitTransition.InputLocked()) return true;
+  if (systemPanelTransition.InputLocked()) return true;
   if (!systemUi.IsOpen()) {
     return currentState == Kotonoha::GameState::Gameplay && gameScene &&
+           !panelOpen() &&
            !frontendTransition.Active(SDL_GetTicks()) &&
            gameScene->handleMenuBarEvent(event);
   }
@@ -3710,6 +3881,8 @@ void Runtime::onEvent(Kotonoha::EventRef event) {
     Kotonoha::Runtime::onEvent(event);
     return;
   }
+  if (exitTransition.InputLocked() && FrontendInputEvent(event.type)) return;
+  if (systemPanelTransition.InputLocked() && FrontendInputEvent(event.type)) return;
   if (frontendTransition.Active(SDL_GetTicks()) && FrontendInputEvent(event.type))
     return;
   const bool escape = event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
@@ -3725,7 +3898,7 @@ void Runtime::onEvent(Kotonoha::EventRef event) {
   if (backlogModel.IsOpen()) {
     if (escape) {
       playSound(Ui::UiSfxCue::Cancel);
-      closePanels();
+      if (!beginSystemPanelClose()) closePanels();
     } else if (event.type == SDL_EVENT_MOUSE_MOTION) {
       int x = -1, y = -1;
       if (pointerToBackLog(event.motion.x, event.motion.y, &x, &y))
@@ -3737,7 +3910,7 @@ void Runtime::onEvent(Kotonoha::EventRef event) {
           backlogModel.ActivatePointer(x, y, &action) &&
           action.kind == Kotonoha::SchoolDaysBackLogModel::ActionKind::Close) {
         playSound(Ui::UiSfxCue::Cancel);
-        closePanels();
+        if (!beginSystemPanelClose()) closePanels();
       }
     }
     return;
@@ -3770,7 +3943,7 @@ void Runtime::onEvent(Kotonoha::EventRef event) {
                (frontendChild == FrontendChild::Config && systemUi.IsConfigOpen()) ||
                (frontendChild == FrontendChild::Replay && systemUi.IsReplayOpen()))
         beginChildToTitle(SDL_GetTicks());
-      else closePanels();
+      else if (!beginSystemPanelClose()) closePanels();
       return;
     }
     Ui::Output output;
@@ -3996,12 +4169,15 @@ void Runtime::activateMenuAction(
       setStatus("Save/Load/BackLog is unavailable during HScene Replay");
       return;
     }
-    if (action.kind == Kind::OpenSave) openSaveLoad(true);
-    else if (action.kind == Kind::OpenLoad) openSaveLoad(false);
-    else openBacklog();
+    if (action.kind == Kind::OpenSave)
+      beginSystemPanel(Kotonoha::SchoolDaysSystemPanelTransition::Target::Save);
+    else if (action.kind == Kind::OpenLoad)
+      beginSystemPanel(Kotonoha::SchoolDaysSystemPanelTransition::Target::Load);
+    else
+      beginSystemPanel(Kotonoha::SchoolDaysSystemPanelTransition::Target::BackLog);
     return;
   case Kind::OpenConfig:
-    openConfig(Kotonoha::SchoolDaysConfigMenuModel::Page::Def);
+    beginSystemPanel(Kotonoha::SchoolDaysSystemPanelTransition::Target::Config);
     return;
   case Kind::OpenMainMenuConfirm:
     openMainMenuConfirm();
@@ -4193,7 +4369,7 @@ void Runtime::handleConfig(const Kotonoha::SchoolDaysConfigMenuModel::Action &ac
   case Kind::Close:
     if (frontendChild == FrontendChild::Config)
       beginChildToTitle(SDL_GetTicks());
-    else
+    else if (!beginSystemPanelClose())
       closePanels();
     return;
   case Kind::SelectPage:
@@ -4414,15 +4590,19 @@ void Runtime::refreshRouteMap() {
   const int major = systemUi.RouteMap().Major(), subpage = systemUi.RouteMap().Subpage();
   const auto page = Kotonoha::SchoolDaysRouteMapModel::Page(major, subpage);
   const auto &state = bridge.Session().State();
+  const auto &persistence = bridge.Session().Persistence();
   for (int i = 0; i < page.nodeCount; ++i) {
-    int64_t value = 0;
-    Kotonoha_KtrfError error{};
     const auto key = Kotonoha::SchoolDaysRouteMapModel::NodeSpKey(major, subpage, i);
-    systemUi.SetRouteMapNodeAvailable(i, state.ReadSessionInt(key.c_str(), &value, &error) && value);
+    // RouteMap's unlocked nodes reflect the persisted global checkpoints.
+    // KTRF global defaults can also be nonzero on a fresh profile, so the
+    // sparse GlobalFlag document is the authoritative unlock source.
+    systemUi.SetRouteMapNodeAvailable(i, persistence.GlobalIntegerIsSet(key));
   }
   int marker = -1;
   Kotonoha_KtrfError error{};
-  if (Kotonoha::SchoolDaysRouteMapOracle::GetRouteMapPage(state, major, &error) == subpage &&
+  // LOAD from the title has no active narrative cursor to highlight.
+  if (currentState == Kotonoha::GameState::Gameplay &&
+      Kotonoha::SchoolDaysRouteMapOracle::GetRouteMapPage(state, major, &error) == subpage &&
       error.code == KOTONOHA_KTRF_OK) {
     const int check = Kotonoha::SchoolDaysRouteMapOracle::CheckScript(state, major, &error);
     if (error.code == KOTONOHA_KTRF_OK) marker = check - page.nodeOffset;
@@ -4434,30 +4614,59 @@ void Runtime::refreshRouteMap() {
 
 void Runtime::openExit() {
   closePanels();
-  std::string failure;
-  if (systemUi.OpenExit(&engine->GetRenderer(), assets->root().string(),
-                        ExitVariant(uiVariant),
-                        Kotonoha::SchoolDaysExitViewModel::BaseArtwork::Exit, &failure)) {
-    playSound(Ui::UiSfxCue::View);
-    return;
-  }
-  SDL_Event quit{};
-  quit.type = SDL_EVENT_QUIT;
-  SDL_PushEvent(&quit);
+  exitTransition.Begin(Kotonoha::SchoolDaysExitTransition::Target::Quit,
+                       SDL_GetTicks());
 }
 
 void Runtime::openMainMenuConfirm() {
   closePanels();
+  exitTransition.Begin(Kotonoha::SchoolDaysExitTransition::Target::Title,
+                       SDL_GetTicks());
+}
+
+void Runtime::openExitDialog(bool returnToTitle) {
   std::string failure;
   if (systemUi.OpenExit(&engine->GetRenderer(), assets->root().string(),
                         ExitVariant(uiVariant),
-                        Kotonoha::SchoolDaysExitViewModel::BaseArtwork::Title,
+                        returnToTitle
+                            ? Kotonoha::SchoolDaysExitViewModel::BaseArtwork::Title
+                            : Kotonoha::SchoolDaysExitViewModel::BaseArtwork::Exit,
                         &failure)) {
-    mainMenuConfirmOpen = true;
     playSound(Ui::UiSfxCue::View);
     return;
   }
-  setStatus("Main Menu confirmation unavailable: " + failure);
+  exitTransition.Reset();
+  setStatus(std::string(returnToTitle ? "Main Menu" : "Exit") +
+            " confirmation unavailable: " + failure);
+}
+
+void Runtime::finishMainMenuReturn() {
+  if (temporaryPlaybackActive()) {
+    finishTemporaryPlayback(false);
+    return;
+  }
+  retireSceneEventPointers();
+  moveSom.Reset();
+  Kotonoha_KtrfError error{};
+  Kotonoha::KtrfStateStore::Snapshot stateBefore;
+  Check(bridge.Session().State().Capture(&stateBefore, &error), error);
+  const auto persistenceBefore = bridge.Session().Persistence();
+  Check(bridge.Session().Persistence().WriteGlobalInteger(
+            "FLAG_LOGO", 11, -1, &bridge.Session().State(), &error),
+        error);
+  if (!bridge.ReleaseCurrentGameplayForFrontend(&error)) {
+    Kotonoha_KtrfError ignored{};
+    (void)bridge.Session().State().Restore(stateBefore, &ignored);
+    bridge.Session().Persistence() = persistenceBefore;
+    Check(false, error);
+  }
+  script = {};
+  backlogStore.ResetTransient();
+  if (backlogFallback) backlogFallback->clear();
+  backlogIndex = 0;
+  backlogScene.clear();
+  flushGlobal();
+  openTitle();
 }
 
 void Runtime::openBacklog() {
@@ -4530,45 +4739,13 @@ void Runtime::handlePanel(const Ui::Output &output) {
   if (output.hasExitActivation) {
     const bool confirm =
         output.exitActivation.outcome == Kotonoha::SchoolDaysExitViewModel::Outcome::ConfirmExit;
-    if (mainMenuConfirmOpen) {
-      if (!confirm) {
-        closePanels();
-        return;
-      }
-      if (temporaryPlaybackActive()) {
-        finishTemporaryPlayback(false);
-        return;
-      }
-      retireSceneEventPointers();
-      moveSom.Reset();
-      Kotonoha_KtrfError error{};
-      Kotonoha::KtrfStateStore::Snapshot stateBefore;
-      Check(bridge.Session().State().Capture(&stateBefore, &error), error);
-      const auto persistenceBefore = bridge.Session().Persistence();
-      Check(bridge.Session().Persistence().WriteGlobalInteger(
-                "FLAG_LOGO", 11, -1, &bridge.Session().State(), &error),
-            error);
-      if (!bridge.ReleaseCurrentGameplayForFrontend(&error)) {
-        Kotonoha_KtrfError ignored{};
-        (void)bridge.Session().State().Restore(stateBefore, &ignored);
-        bridge.Session().Persistence() = persistenceBefore;
-        Check(false, error);
-      }
-      script = {};
-      backlogStore.ResetTransient();
-      if (backlogFallback) backlogFallback->clear();
-      backlogIndex = 0;
-      backlogScene.clear();
-      flushGlobal();
-      openTitle();
-      return;
-    }
     if (confirm) {
-      SDL_Event quit{};
-      quit.type = SDL_EVENT_QUIT;
-      SDL_PushEvent(&quit);
+      exitTransition.Confirm(SDL_GetTicks());
+    } else {
+      closePanels();
+      exitTransition.Cancel(SDL_GetTicks());
     }
-    closePanels();
+    return;
   }
   if (output.hasRouteMapAction) {
     using Kind = Kotonoha::SchoolDaysRouteMapModel::ActionKind;
@@ -4599,7 +4776,7 @@ void Runtime::handlePanel(const Ui::Output &output) {
         continueHandoff();
       } else if (frontendChild == FrontendChild::Load) {
         beginChildToTitle(SDL_GetTicks());
-      } else {
+      } else if (!beginSystemPanelClose()) {
         closePanels();
       }
       break;

@@ -90,32 +90,46 @@ def main():
                 continue
             fields = payload[1:].split("\t")
             commands[command] += 1
-            name = None
+            names = []
             if command == "CreateBG" and len(fields) >= 3:
-                name = fields[2] + ".PNG"
+                names = [fields[2] + ".PNG"]
             elif command == "PlayMovie" and len(fields) >= 2:
-                name = fields[1] + ".wmv"
+                names = [fields[1] + ".wmv"]
+            elif command == "EndRoll" and len(fields) >= 2:
+                names = [fields[1] + ".wmv"]
             elif command == "PlayVoice" and len(fields) >= 2:
-                name = fields[1] + ".OGG"
+                names = [fields[1] + ".OGG"]
             elif command == "PlaySe" and len(fields) >= 3:
-                name = fields[2] + ".OGG"
-            if not name or not name.strip():
-                continue
-            name = name.replace("\\", "/")
-            if name.lower().startswith("music/bgm/"):
-                name = "BGM/SD_BGM/" + name[10:]
-            elif name.lower().startswith("music/vocal/"):
-                name = "BGM/VOCAL/" + name[12:]
-            elif name.lower().startswith("se/se"):
-                name = name[3:]
-            if name.casefold() not in all_entries:
-                missing[(command, name)] += 1
-                if len(examples[(command, name)]) < 3:
-                    examples[(command, name)].append(logical)
+                names = [fields[2] + ".OGG"]
+            elif command == "PlayBgm" and len(fields) >= 2:
+                names = [fields[1] + "_int.ogg", fields[1] + "_loop.ogg"]
+            elif command == "EndBgm" and len(fields) >= 2:
+                names = [fields[1] + ".ogg"]
+            for name in names:
+                if not name.strip():
+                    continue
+                name = name.replace("\\", "/")
+                if name.lower().startswith("music/bgm/"):
+                    name = "BGM/SD_BGM/" + name[10:]
+                elif name.lower().startswith("music/vocal/"):
+                    name = "BGM/VOCAL/" + name[12:]
+                elif name.lower().startswith("se/se"):
+                    name = name[3:]
+                if name.casefold() not in all_entries:
+                    missing[(command, name)] += 1
+                    if len(examples[(command, name)]) < 3:
+                        examples[(command, name)].append(logical)
         inspected += 1
     print("inspected", inspected, "commands", commands.most_common(12))
     print("missing distinct", len(missing), "total references", sum(missing.values()))
     print("missing by command", collections.Counter({command: sum(count for (kind, _), count in missing.items() if kind == command) for command, _ in missing}))
+    for (command, name), count in missing.items():
+        if " " not in name:
+            continue
+        compact = name.replace(" ", "")
+        if compact.casefold() in all_entries:
+            print("RECOVERABLE_SPACE_TYPO", command, count, repr(name),
+                  "->", all_entries[compact.casefold()][0])
     for (command, name), count in missing.most_common():
         print("MISSING", command, count, name, ",".join(examples[(command, name)]))
 

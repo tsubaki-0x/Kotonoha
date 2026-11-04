@@ -19,6 +19,8 @@
 #include <Kotonoha/routing/SchoolDaysConfigStorage.hpp>
 #include <Kotonoha/routing/SchoolDaysDisplayPolicy.hpp>
 #include <Kotonoha/routing/SchoolDaysFrontendTransition.hpp>
+#include <Kotonoha/routing/SchoolDaysExitTransition.hpp>
+#include <Kotonoha/routing/SchoolDaysSystemPanelTransition.hpp>
 #include <Kotonoha/routing/SchoolDaysPlayDataSession.hpp>
 #include <Kotonoha/routing/SchoolDaysReplayPlaybackSession.hpp>
 #include <Kotonoha/routing/SchoolDaysRetailConfigPolicy.hpp>
@@ -139,6 +141,8 @@ class Runtime final : public Kotonoha::Runtime {
   Kotonoha::SchoolDaysDisplayPolicy::Variant uiVariant =
       Kotonoha::SchoolDaysDisplayPolicy::Variant::WideFull;
   Kotonoha::SchoolDaysFrontendTransition frontendTransition;
+  Kotonoha::SchoolDaysExitTransition exitTransition;
+  Kotonoha::SchoolDaysSystemPanelTransition systemPanelTransition;
   Kotonoha::SchoolDaysRetailConfigPolicy::State config =
       Kotonoha::SchoolDaysRetailConfigPolicy::Defaults();
   std::vector<std::unique_ptr<Kotonoha::MediaPlayer>> sounds;
@@ -220,7 +224,6 @@ class Runtime final : public Kotonoha::Runtime {
   Uint64 lastClock = 0;
   bool paused = false, committed = false;
   bool backAtSceneStart = false;
-  bool mainMenuConfirmOpen = false;
   bool titleHasPresented = false;
   FrontendBgmOwner frontendBgmOwner = FrontendBgmOwner::None;
   FrontendHandoff frontendHandoff = FrontendHandoff::None;
@@ -324,6 +327,14 @@ class Runtime final : public Kotonoha::Runtime {
   void beginChildToTitle(uint64_t nowMs);
   void updateFrontendTransition(uint64_t nowMs);
   void renderFrontendTransition(Kotonoha::RendererRef renderer, uint64_t nowMs);
+  void updateExitTransition(uint64_t nowMs);
+  void renderExitTransition(Kotonoha::RendererRef renderer, uint64_t nowMs);
+  void updateSystemPanelTransition(uint64_t nowMs);
+  void renderSystemPanelTransition(Kotonoha::RendererRef renderer, uint64_t nowMs);
+  void beginSystemPanel(Kotonoha::SchoolDaysSystemPanelTransition::Target target);
+  bool beginSystemPanelClose();
+  void openExitDialog(bool returnToTitle);
+  void finishMainMenuReturn();
   bool pointerToTitle(float x, float y, int *virtualX, int *virtualY) const;
   bool pointerToBackLog(float x, float y, int *virtualX, int *virtualY) const;
   void refreshDisplayProjection();

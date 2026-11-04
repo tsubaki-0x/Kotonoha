@@ -81,15 +81,16 @@ configuration. Engine video/upscaling remains available through the launcher.
 
 ## Not yet equivalent to retail
 
-- Character ABC/lip-sync presentation is still missing from the v3 runtime.
+- Character ABC/lip-sync presentation is implemented and was observed with a
+  complete ABC group in `00/00-00-A02`; full visual parity remains unverified.
 - Runtime display-variant coverage is not yet retail-equivalent; the currently
   exercised WideFull path must not be read as proof for every original display
   variant or runtime variant switch.
 - Frontend transition/carry-frame choreography is not yet exact across all title,
   Replay, Replay Data and gameplay transitions.
-- PlayData/Replay Data does not yet expose nested Save/Load/BackLog through an
-  isolated temporary-session host; those actions remain inhibited rather than
-  mutating the retained narrative session.
+- PlayData/Replay Data exposes nested Save/Load/BackLog through an isolated
+  temporary session. The RouteMap handoff from nested Replay Data LOAD remains
+  inhibited pending retail verification.
 - Replay SystemBGM ownership/restoration is not yet verified as retail-equivalent.
 - Exact original glyph rasterization/styling is not claimed. Choice and other
   game-owned text use the authenticated geometry/advance plans with Kotonoha TTF
@@ -108,6 +109,8 @@ the automated suite for deterministic parser/media/unit coverage; they are not
 the only evidence used for the current School Days parity work.
 
 This status is a record of verified behavior, not a claim of 100% retail parity.
+The current release-readiness verdict and runtime evidence are in
+[`docs/RELEASE_READINESS_AUDIT.md`](docs/RELEASE_READINESS_AUDIT.md).
 
 ## Build and tests
 

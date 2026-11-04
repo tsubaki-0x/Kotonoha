@@ -227,6 +227,10 @@ public:
     return runtime.bridge.CurrentGameplay() != nullptr;
   }
 
+  static bool ExitFailureReported(const Runtime &runtime) {
+    return runtime.status.rfind("Exit confirmation unavailable:", 0u) == 0u;
+  }
+
   static void SetFeelings(Runtime &runtime, int64_t one, int64_t two) {
     Kotonoha_KtrfError error{};
     Require(runtime.bridge.Session().State().WriteSessionInt("001", one, &error),
@@ -283,6 +287,10 @@ public:
     output.hasExitActivation = true;
     output.exitActivation.outcome = outcome;
     runtime.handlePanel(output);
+  }
+
+  static void TickExit(Runtime &runtime, uint64_t now) {
+    runtime.updateExitTransition(now);
   }
 
   static Kotonoha::Gameplay *GameplayOwner(const Runtime &runtime) {
@@ -476,6 +484,7 @@ void TestMainMenuConfirmNarrative(const char *route, const fs::path &root) {
   using Outcome = Kotonoha::SchoolDaysExitViewModel::Outcome;
   SchoolDays::RuntimeHandoffTestAccess::ApplyMenu(
       app.runtime, MenuKind::OpenMainMenuConfirm);
+  SchoolDays::RuntimeHandoffTestAccess::TickExit(app.runtime, SDL_GetTicks() + 500u);
   Require(app.runtime.panels().IsExitOpen() &&
               SchoolDays::RuntimeHandoffTestAccess::GameplayOwner(app.runtime) == owner &&
               app.runtime.debugNode() == node &&
@@ -488,11 +497,16 @@ void TestMainMenuConfirmNarrative(const char *route, const fs::path &root) {
               app.runtime.debugNode() == node &&
               app.runtime.GetState() == Kotonoha::GameState::Gameplay,
           "MainMenu NO did not resume the same narrative owner");
+  SchoolDays::RuntimeHandoffTestAccess::TickExit(app.runtime, SDL_GetTicks() + 500u);
 
   SchoolDays::RuntimeHandoffTestAccess::ApplyMenu(
       app.runtime, MenuKind::OpenMainMenuConfirm);
+  SchoolDays::RuntimeHandoffTestAccess::TickExit(app.runtime, SDL_GetTicks() + 500u);
   SchoolDays::RuntimeHandoffTestAccess::SubmitExit(
       app.runtime, Outcome::ConfirmExit);
+  Require(SchoolDays::RuntimeHandoffTestAccess::GameplayOwner(app.runtime) == owner,
+          "MainMenu YES released narrative Gameplay before fade completed");
+  SchoolDays::RuntimeHandoffTestAccess::TickExit(app.runtime, SDL_GetTicks() + 500u);
   Require(SchoolDays::RuntimeHandoffTestAccess::GameplayOwner(app.runtime) == nullptr &&
               app.runtime.GetState() == Kotonoha::GameState::Menu,
           "MainMenu YES did not release narrative Gameplay and return to Title");
@@ -514,6 +528,7 @@ void TestMainMenuConfirmTemporary(const char *route, const fs::path &root) {
   using Outcome = Kotonoha::SchoolDaysExitViewModel::Outcome;
   SchoolDays::RuntimeHandoffTestAccess::ApplyMenu(
       app.runtime, MenuKind::OpenMainMenuConfirm);
+  SchoolDays::RuntimeHandoffTestAccess::TickExit(app.runtime, SDL_GetTicks() + 500u);
   Require(app.runtime.panels().IsExitOpen() &&
               SchoolDays::RuntimeHandoffTestAccess::Temporary(app.runtime) &&
               app.runtime.debugNode() == replayNode,
@@ -524,15 +539,35 @@ void TestMainMenuConfirmTemporary(const char *route, const fs::path &root) {
               SchoolDays::RuntimeHandoffTestAccess::Temporary(app.runtime) &&
               app.runtime.debugNode() == replayNode,
           "MainMenu NO did not resume the same temporary playback owner");
+  SchoolDays::RuntimeHandoffTestAccess::TickExit(app.runtime, SDL_GetTicks() + 500u);
 
   SchoolDays::RuntimeHandoffTestAccess::ApplyMenu(
       app.runtime, MenuKind::OpenMainMenuConfirm);
+  SchoolDays::RuntimeHandoffTestAccess::TickExit(app.runtime, SDL_GetTicks() + 500u);
   SchoolDays::RuntimeHandoffTestAccess::SubmitExit(
       app.runtime, Outcome::ConfirmExit);
+  SchoolDays::RuntimeHandoffTestAccess::TickExit(app.runtime, SDL_GetTicks() + 500u);
   Require(!SchoolDays::RuntimeHandoffTestAccess::Temporary(app.runtime) &&
               app.runtime.GetState() == Kotonoha::GameState::Menu &&
               SchoolDays::RuntimeHandoffTestAccess::GameplayOwner(app.runtime) == liveOwner,
           "MainMenu YES did not end only temporary playback and return to Title");
+}
+
+void TestMissingExitPopupDoesNotQuit(const char *route, const fs::path &root) {
+  // Popup_Title exists in this fixture, but Popup_Exit is added only by the
+  // later frontend test. A failed confirmation must not bypass the question.
+  const auto documents = root / "documents-missing-exit-popup";
+  fs::create_directories(documents);
+  auto assets = std::make_shared<SchoolDays::Assets>(root);
+  Application app(assets, route, documents);
+  app.runtime.debugJumpToNode("00/00-00-A00");
+  SDL_FlushEvent(SDL_EVENT_QUIT);
+  app.runtime.openPanel(16);
+  SchoolDays::RuntimeHandoffTestAccess::TickExit(app.runtime, SDL_GetTicks() + 500u);
+  Require(!app.runtime.panels().IsExitOpen() &&
+              SchoolDays::RuntimeHandoffTestAccess::ExitFailureReported(app.runtime) &&
+              !SDL_HasEvent(SDL_EVENT_QUIT),
+          "missing EXIT popup bypassed confirmation and queued process shutdown");
 }
 
 void TestFrontendTransitions(const char *route, const fs::path &root) {
@@ -625,11 +660,14 @@ void TestFrontendTransitions(const char *route, const fs::path &root) {
 
   SchoolDays::RuntimeHandoffTestAccess::PrepareTitle(app.runtime);
   app.runtime.openPanel(16);
+  Require(!app.runtime.panels().IsExitOpen(),
+          "Title Exit opened before the SYSBASE wipe completed");
+  SchoolDays::RuntimeHandoffTestAccess::TickExit(app.runtime, SDL_GetTicks() + 500u);
   Require(app.runtime.panels().IsExitOpen() &&
               SchoolDays::RuntimeHandoffTestAccess::FrontendPhase(app.runtime,
                                                                   SDL_GetTicks()) ==
                   Transition::Phase::Idle,
-          "Title Exit incorrectly armed a frontend fade");
+          "Title Exit did not open after its game-owned SYSBASE wipe");
 }
 
 void TestTimeoutSkip(const char *route, const fs::path &root) {
@@ -718,6 +756,7 @@ int main(int argc, char **argv) {
     TestOrdinaryCommentEscape(argv[1], temporary.path);
     TestMainMenuConfirmNarrative(argv[1], temporary.path);
     TestMainMenuConfirmTemporary(argv[1], temporary.path);
+    TestMissingExitPopupDoesNotQuit(argv[1], temporary.path);
     TestFrontendTransitions(argv[1], temporary.path);
     TestSaveFeelAndSaveLoad(argv[1], temporary.path);
     TestExplicitSkip(argv[1], temporary.path);

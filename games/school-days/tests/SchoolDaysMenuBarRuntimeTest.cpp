@@ -95,6 +95,12 @@ public:
   static void StartOrdinaryReplay(Runtime &runtime) {
     runtime.startReplayPlayback(1);
   }
+  static void TickPanel(Runtime &runtime, uint64_t nowMs) {
+    runtime.updateSystemPanelTransition(nowMs);
+  }
+  static bool ClosePanel(Runtime &runtime) {
+    return runtime.beginSystemPanelClose();
+  }
 };
 
 } // namespace SchoolDays
@@ -110,6 +116,28 @@ int main(int argc, char **argv) {
 
     using Access = SchoolDays::RuntimeMenuBarTestAccess;
     using Kind = Kotonoha::SchoolDaysMenuBarPresenter::ActionKind;
+    {
+      Application app(assets, argv[1], documents);
+      Access::Apply(app.runtime, Kind::OpenLoad);
+      const uint64_t openedAt = SDL_GetTicks();
+      Check(!app.runtime.anyPanelOpen(),
+            "gameplay LOAD opened before its white transition");
+      Access::TickPanel(app.runtime, openedAt + 600u);
+      Check(!app.runtime.anyPanelOpen(),
+            "gameplay LOAD opened before the 750 ms boundary");
+      Access::TickPanel(app.runtime, openedAt + 800u);
+      Check(app.runtime.anyPanelOpen(),
+            "gameplay LOAD did not open at the white boundary");
+      Check(Access::ClosePanel(app.runtime), "gameplay LOAD close did not arm fade");
+      const uint64_t closedAt = SDL_GetTicks();
+      Access::TickPanel(app.runtime, closedAt + 400u);
+      Check(app.runtime.anyPanelOpen(),
+            "gameplay LOAD released its owner before close fade completed");
+      Access::TickPanel(app.runtime, closedAt + 600u);
+      Check(!app.runtime.anyPanelOpen(),
+            "gameplay LOAD remained open after close fade");
+      Access::TickPanel(app.runtime, closedAt + 1200u);
+    }
     {
       Application app(assets, argv[1], documents);
       Check(!app.runtime.retailConfig().autoMode,

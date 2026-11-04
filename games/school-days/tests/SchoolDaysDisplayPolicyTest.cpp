@@ -1,6 +1,10 @@
 #include <Kotonoha/routing/SchoolDaysDisplayPolicy.hpp>
+#include <Kotonoha/routing/SchoolDaysConfigMenuModel.hpp>
 
 #include <cstdlib>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 
 namespace {
@@ -169,8 +173,38 @@ int main() {
     // DisplayType source swap: control 7 (action.value==0) enters W=1, while
     // control 6 (action.value==1) returns to W=0.
     {
+        using Menu = Kotonoha::SchoolDaysConfigMenuModel;
+        const auto fixture = std::filesystem::temp_directory_path() /
+            ("schooldays-config-menu-" + std::to_string(
+                std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(fixture / "System/Option");
+        {
+            const unsigned char cmap[] = {2, 0, 0, 0, 1, 0, 0, 0, 7, 8};
+            std::ofstream file(fixture / "System/Option/Option_Def.cmap",
+                               std::ios::binary);
+            file.write(reinterpret_cast<const char*>(cmap), sizeof(cmap));
+            Check(static_cast<bool>(file), "ConfigMenu fixture could not be written");
+        }
+        Menu menu;
+        Check(menu.Open(fixture.string(), Menu::Variant::Standard,
+                        Menu::Page::Def),
+              "ConfigMenu fixture could not be opened");
+        Menu::Action control7;
+        Menu::Action control6;
+        menu.SetSelectionFromPointer(1, 0);
+        Check(menu.Activate(&control7), "ConfigMenu control 7 did not activate");
+        menu.SetSelectionFromPointer(0, 0);
+        Check(menu.Activate(&control6) &&
+                  control7.kind == Menu::ActionKind::RequestFull &&
+                  control6.kind == Menu::ActionKind::RequestFull,
+              "ConfigMenu Full controls did not produce Full requests");
+        menu.Close();
+        std::filesystem::remove(fixture / "System/Option/Option_Def.cmap");
+        std::filesystem::remove(fixture / "System/Option");
+        std::filesystem::remove(fixture / "System");
+        std::filesystem::remove(fixture);
         Policy::RetailBackendState state{0, 1, 0, 0};
-        Check(Policy::ApplyRetailConfigRequest(Request::Full, 0,
+        Check(Policy::ApplyRetailConfigRequest(Request::Full, control7.value,
                                                allCapabilities, &state),
               "control 7 Full request was not accepted from WindowMode 0");
         Check(state.baseDisplayType == 0 && state.deviceDisplayType == 1 &&
@@ -184,7 +218,7 @@ int main() {
                   state.windowMode == after.windowMode,
               "control 7 was not inert when WindowMode was already 1");
 
-        Check(Policy::ApplyRetailConfigRequest(Request::Full, 1,
+        Check(Policy::ApplyRetailConfigRequest(Request::Full, control6.value,
                                                allCapabilities, &state),
               "control 6 Full request was not accepted from WindowMode 1");
         Check(state.baseDisplayType == 0 && state.deviceDisplayType == 1 &&

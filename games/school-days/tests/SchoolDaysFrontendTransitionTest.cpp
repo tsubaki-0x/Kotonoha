@@ -1,4 +1,5 @@
 #include <Kotonoha/routing/SchoolDaysFrontendTransition.hpp>
+#include <Kotonoha/routing/SchoolDaysExitTransition.hpp>
 
 #include <cstdlib>
 #include <iostream>
@@ -86,6 +87,31 @@ int main() {
               transition.CurrentPhase(6000u) == Transition::Phase::Idle,
           "Reset did not restore idle state");
 
+    using Exit = Kotonoha::SchoolDaysExitTransition;
+    Exit exit;
+    exit.Begin(Exit::Target::Title, 7000u);
+    Check(exit.InputLocked() && exit.RevealedFraction(7250u) == 0.5f &&
+              exit.Update(7499u) == Exit::Event::None &&
+              exit.Update(7500u) == Exit::Event::OpenDialog &&
+              !exit.InputLocked(),
+          "title confirmation must open after the 500 ms vertical wipe");
+    exit.Cancel(7600u);
+    Check(exit.InputLocked() && exit.Alpha(7850u) == 128u &&
+              exit.Update(8100u) == Exit::Event::Closed && !exit.Active(),
+          "cancel must fade SYSBASE away over 500 ms");
+    exit.Begin(Exit::Target::Title, 9000u);
+    Check(exit.Update(9500u) == Exit::Event::OpenDialog, "title dialog did not open");
+    exit.Confirm(9600u);
+    Check(exit.ConfirmMs() == 500u && exit.Alpha(9850u) == 127u &&
+              exit.Update(10100u) == Exit::Event::Confirmed,
+          "TOPMENU confirmation fade timing drifted");
+    exit.Begin(Exit::Target::Quit, 11000u);
+    Check(exit.Update(11500u) == Exit::Event::OpenDialog, "exit dialog did not open");
+    exit.Confirm(11600u);
+    Check(exit.ConfirmMs() == 750u && exit.Update(12349u) == Exit::Event::None &&
+              exit.Update(12350u) == Exit::Event::Confirmed,
+          "EXIT shutdown fade timing drifted");
+
     std::cout << "SCHOOL DAYS FRONTEND TRANSITION GATE PASS\n"
               << "profile_specs=PASS\n"
               << "integer_alpha=PASS\n"
@@ -94,5 +120,9 @@ int main() {
               << "child_title_profile=PASS\n"
               << "explicit_incoming=PASS\n"
               << "clock_regression_clamp=PASS\n";
+    std::cout << "exit_title_sysbase_500ms=PASS\n"
+              << "exit_cancel_500ms=PASS\n"
+              << "topmenu_confirm_500ms=PASS\n"
+              << "exit_confirm_750ms=PASS\n";
     return 0;
 }

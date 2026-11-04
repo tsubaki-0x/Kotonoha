@@ -85,9 +85,11 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
   SDL_SetAppMetadata("School Days HQ", "0.1.0", "me.hirameki.kotonoha.schooldays");
   try {
     auto app = std::make_unique<App>();
-    bool launcher = false;
     std::string directory;
     app->options.persistSettings = true;
+    // The retail profile starts the game directly. CommandLine already owns
+    // --launcher/--no-launcher and writes this EngineOptions field.
+    app->options.launcher = false;
 #if defined(_WIN32) && !defined(__ANDROID__)
     // The School Days commercial-test profile exposed Anime4K/ArtCNN to the
     // player.  In v3 the MPV-compatible upscaler is hosted by SDL's OpenGL
@@ -121,7 +123,6 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     arguments.option("--documents", "DIRECTORY", "Save-game and GlobalFlag directory", app->documents);
     arguments.option("--node", "ID", "Start at an index or scene key", app->startNode);
     arguments.option("--dump-ktrf", "FILE", "Export the active routing graph", app->dump);
-    arguments.flag("--launcher", "Open the game/data selection launcher", launcher);
     arguments.parse(argc, argv);
     DevStartupLog("arguments-parsed");
     if (arguments.wantsHelp()) { std::fputs(arguments.help().c_str(), stdout); return SDL_APP_SUCCESS; }
@@ -143,24 +144,58 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
 #endif
     }
     const std::string settings = app->options.persistSettings ? app->options.settingsPath : "";
+    // Physical display settings stay next to this executable, but a relocated
+    // Windows build must still recognize paths selected by the older AppData
+    // launcher. Only reuse the path files, never the old display settings.
+    std::string legacySettings;
+#if defined(_WIN32) && !defined(__ANDROID__)
+    // defaultPath() uses the *current* SDL app identifier. The former v3
+    // launcher stored dir.txt under SDL_GetPrefPath("Kotonoha", "school-days")
+    // instead, so looking up defaultPath("school-days") cannot find it.
+    if (app->options.persistSettings) {
+      if (char *legacyDir = SDL_GetPrefPath("Kotonoha", "school-days")) {
+        legacySettings =
+            (std::filesystem::path(legacyDir) / "settings.json").string();
+        SDL_free(legacyDir);
+      }
+    }
+#endif
     
     // Route precedence is part of the launcher contract: an explicit --ktrf
     // wins, then the user's remembered selection, and only then the bundled
     // original-profile route.  Looking up the bundled route first made a valid
     // remembered custom route impossible to reuse on the next launch.
-    if (app->route.empty() && !settings.empty())
-      app->route = Kotonoha::GameLauncher::rememberedPath(
-          settings, SchoolDays::Launcher::RouteRememberFile);
+    const auto rememberedValidRoute = [](const std::string &settingsPath) {
+      if (settingsPath.empty()) return std::string{};
+      const auto path = Kotonoha::GameLauncher::rememberedPath(
+          settingsPath, SchoolDays::Launcher::RouteRememberFile);
+      std::string info;
+      return !path.empty() && SchoolDays::Launcher::validateRoute(path, info)
+                 ? path : std::string{};
+    };
+    if (app->route.empty()) app->route = rememberedValidRoute(settings);
+    if (app->route.empty() && !legacySettings.empty() &&
+        legacySettings != settings)
+      app->route = rememberedValidRoute(legacySettings);
     if (app->route.empty())
       app->route = SchoolDays::Assets::defaultRoute().string();
         
     if (directory.empty())
       if (const char *env = std::getenv("SCHOOL_DAYS_DIR")) directory = env;
-    if (directory.empty() && !settings.empty())
-      directory = Kotonoha::GameLauncher::rememberedPath(settings, "dir.txt");
+    const auto rememberedValidDirectory = [](const std::string &settingsPath) {
+      if (settingsPath.empty()) return std::string{};
+      const auto path = Kotonoha::GameLauncher::rememberedPath(settingsPath, "dir.txt");
+      std::string info;
+      return !path.empty() && SchoolDays::Assets::checkDirectory(path, info)
+                 ? path : std::string{};
+    };
+    if (directory.empty()) directory = rememberedValidDirectory(settings);
+    if (directory.empty() && !legacySettings.empty() &&
+        legacySettings != settings)
+      directory = rememberedValidDirectory(legacySettings);
     if (directory.empty()) directory = SchoolDays::Assets::defaultDirectory().string();
     DevStartupLog("data-directory-selected", directory);
-    if (launcher) {
+    if (app->options.launcher) {
       app->launcher = std::make_unique<SchoolDays::Launcher>(settings, directory, app->route);
       app->launcher->open();
     } else {

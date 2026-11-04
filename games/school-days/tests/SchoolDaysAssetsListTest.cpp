@@ -59,16 +59,25 @@ int main() {
     put(root / "Event00/Scene/face.png");
     put(root / "Event00/Scene/nested/mouth.png");
     put(root / "Event01/other.png");
+    put(root / "Voice03/03-BK/03-BK-H00/03-BK-H00-0410.OGG");
 
     SchoolDays::Assets assets(root);
-    const auto loose = assets.list("Event00/Scene/");
+    const auto mistypedVoice = "Voice03/03-BK/03-BK-H00/03-B K-H00-0410.OGG";
+    require(fs::path(assets.resolve(mistypedVoice)) ==
+                root / "Voice03/03-BK/03-BK-H00/03-BK-H00-0410.OGG",
+            "retail ORS voice typo did not resolve to the existing asset");
+    put(root / "Voice03/03-BK/03-BK-H00/03-B K-H00-0410.OGG");
+    require(fs::path(assets.resolve(mistypedVoice)) ==
+                root / "Voice03/03-BK/03-BK-H00/03-B K-H00-0410.OGG",
+            "exact scripted asset did not take priority over voice typo fallback");
+    const auto loose = assets.listAsset("Event00/Scene/");
     require(loose.size() == 2, "loose recursive enumeration count drifted");
     require(fs::path(loose[0]) == root / "Event00" / "Scene" / "face.png" &&
                 fs::path(loose[1]) == root / "Event00" / "Scene" / "nested" / "mouth.png",
             "loose enumeration did not preserve readable physical references");
 
     Kotonoha::InstallSchoolDaysVirtualAssetIo(&fakeIsReference, &fakeRead, &fakeList);
-    const auto packed = assets.list("sdgpk://Event00/Scene/");
+    const auto packed = assets.listAsset("sdgpk://Event00/Scene/");
     Kotonoha::InstallSchoolDaysVirtualAssetIo(nullptr, nullptr, nullptr);
     require(packed == std::vector<std::string>{
                           "sdgpk://Event00/Scene/face.png",
