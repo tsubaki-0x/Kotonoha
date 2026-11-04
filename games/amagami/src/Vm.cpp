@@ -1,6 +1,8 @@
 #include <Amagami/Vm.hpp>
+#include <Kotonoha/localization/Encoding.hpp>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <sstream>
 #include <stdexcept>
@@ -17,6 +19,11 @@ VmValue VmValue::str(std::string s, Kind k) {
   VmValue v;
   v.kind = k;
   v.text = std::move(s);
+  if (k == Text) {
+    v.object = std::make_shared<VmObject>();
+    v.object->type = "String";
+    v.object->stringValue = v.text;
+  }
   return v;
 }
 VmValue VmValue::ref(std::shared_ptr<VmObject> o, Kind k) {
@@ -25,14 +32,57 @@ VmValue VmValue::ref(std::shared_ptr<VmObject> o, Kind k) {
   v.object = std::move(o);
   return v;
 }
+const std::string &VmValue::asText() const {
+  return kind == Text && object && object->stringValue ? *object->stringValue
+                                                       : text;
+}
 bool VmValue::truth() const {
   return kind != Nil && (kind != Boolean || number != 0);
 }
 namespace {
+class ScriptFault : public std::runtime_error {
+public:
+  explicit ScriptFault(const std::string &message,
+                       std::string type = "Exception")
+      : std::runtime_error(message), type(std::move(type)) {}
+  std::string type;
+};
 VmValue boolean(bool b) {
   auto v = VmValue::num(b);
   v.kind = VmValue::Boolean;
   return v;
+}
+size_t collectionIndex(const VmValue &value) {
+  if (value.kind != VmValue::Number || !std::isfinite(value.number) ||
+      value.number < 0 || value.number > 0x7fffffff ||
+      std::trunc(value.number) != value.number)
+    throw ScriptFault("Invalid collection index",
+                      "ArrayIndexOutOfBoundsException");
+  return size_t(value.number);
+}
+std::vector<unsigned> stringCharacters(const std::string &text) {
+  const auto sjis = Kotonoha::ConvertEncoding(text, "UTF-8", "CP932");
+  std::vector<unsigned> out;
+  for (size_t i = 0; i < sjis.size(); ++i) {
+    const unsigned lead = uint8_t(sjis[i]);
+    if (((lead >= 0x81 && lead <= 0x9f) || (lead >= 0xe0 && lead <= 0xfc)) &&
+        i + 1 < sjis.size())
+      out.push_back((lead << 8) | uint8_t(sjis[++i]));
+    else
+      out.push_back(lead);
+  }
+  return out;
+}
+std::string charactersString(const std::vector<unsigned> &characters) {
+  std::string bytes;
+  for (const unsigned c : characters) {
+    if (c > 0xffff)
+      throw ScriptFault("Character outside CP932", "IllegalArgument");
+    if (c > 0xff)
+      bytes.push_back(char(c >> 8));
+    bytes.push_back(char(c));
+  }
+  return Kotonoha::ShiftJisToUtf8(bytes);
 }
 bool equal(const VmValue &a, const VmValue &b) {
   if (a.kind != b.kind)
@@ -41,8 +91,26 @@ bool equal(const VmValue &a, const VmValue &b) {
     return a.number == b.number;
   if (a.kind == VmValue::Text || a.kind == VmValue::Symbol ||
       a.kind == VmValue::Class)
-    return a.text == b.text;
+    return a.asText() == b.asText();
   return a.object == b.object;
+}
+std::string scfToString(const VmValue &v) {
+  switch (v.kind) {
+  case VmValue::Number:
+    if (std::trunc(v.number) == v.number)
+      return std::to_string(int64_t(v.number));
+    return std::to_string(v.number);
+  case VmValue::Boolean:
+    return v.number != 0 ? "True" : "False";
+  case VmValue::Text:
+  case VmValue::Symbol:
+  case VmValue::Class:
+    return v.asText();
+  case VmValue::Nil:
+    return "nil";
+  default:
+    return {};
+  }
 }
 } // namespace
 void Vm::add(Script s) {
@@ -54,20 +122,65 @@ Vm Vm::fork(const VmValue &receiver, const std::string &method) const {
   child.frames_.clear();
   child.paused_ = false;
   child.result_ = {};
+  child.exception_ = {};
   child.call(receiver, method);
   return child;
 }
-void Vm::reset() {
+void Vm::resetExecution() {
   frames_.clear();
-  classes_.clear();
   result_ = {};
+  exception_ = {};
   paused_ = false;
+}
+void Vm::reset() {
+  resetExecution();
+  classes_.clear();
 }
 VmValue Vm::instance(const std::string &name) {
   auto o = std::make_shared<VmObject>();
   o->type = name;
   o->fields.resize(256);
   return VmValue::ref(std::move(o));
+}
+std::string Vm::typeOf(const VmValue &v) const {
+  switch (v.kind) {
+  case VmValue::Nil:
+    return "Nil";
+  case VmValue::Boolean:
+    return v.number != 0 ? "True" : "False";
+  case VmValue::Number:
+    return v.floating ? "Float" : "Integer";
+  case VmValue::Text:
+    return "String";
+  case VmValue::Symbol:
+    return "Symbol";
+  case VmValue::Class:
+    return "Class";
+  case VmValue::Array:
+    return v.object ? v.object->type : "Array";
+  case VmValue::Object:
+  default:
+    return v.object ? v.object->type : std::string();
+  }
+}
+bool Vm::isKindOf(const std::string &type, const std::string &klass) const {
+  std::string t = type;
+  for (size_t depth = 0; depth < 256 && !t.empty(); ++depth) {
+    if (t == klass)
+      return true;
+    auto it = scripts_.find(t);
+    if (it == scripts_.end())
+      return false;
+    t = it->second.parent;
+  }
+  return false;
+}
+VmValue Vm::classFieldValue(const std::string &name, size_t slot) const {
+  const auto found = classes_.find(name);
+  return found != classes_.end() && found->second &&
+                 slot < found->second->fields.size()
+             ? found->second->fields[slot]
+             : VmValue{};
 }
 VmValue &Vm::classField(const std::string &name, size_t slot) {
   if (slot > 65535)
@@ -119,7 +232,10 @@ VmValue Vm::field(const VmValue &v, size_t slot) const {
     return it->second->fields[slot];
   }
   if (!v.object || slot >= v.object->fields.size())
-    throw std::runtime_error("VM field read outside object");
+    throw ScriptFault("VM field read outside object",
+                      v.kind == VmValue::Array
+                          ? "ArrayIndexOutOfBoundsException"
+                          : "Exception");
   return v.object->fields[slot];
 }
 void Vm::setField(const VmValue &v, size_t slot, VmValue value) {
@@ -128,7 +244,10 @@ void Vm::setField(const VmValue &v, size_t slot, VmValue value) {
     return;
   }
   if (!v.object || slot >= v.object->fields.size())
-    throw std::runtime_error("VM field write outside object");
+    throw ScriptFault("VM field write outside object",
+                      v.kind == VmValue::Array
+                          ? "ArrayIndexOutOfBoundsException"
+                          : "Exception");
   v.object->fields[slot] = std::move(value);
 }
 void Vm::deliver(VmValue v) {
@@ -148,13 +267,104 @@ void Vm::send(VmValue receiver, std::string selector, std::vector<VmValue> args,
     send(std::move(receiver), method, {});
     return;
   }
-  if (selector == "at" && args.size() == 1 && receiver.kind == VmValue::Array) {
-    deliver(field(receiver, size_t(args[0].number)));
+  if ((selector == "performWith" || selector == "performWithArguments") &&
+      args.size() >= 2 && args[0].kind == VmValue::Symbol) {
+    const auto method = args[0].text;
+    std::vector<VmValue> callArgs(args.begin() + 1, args.end());
+    if (selector == "performWithArguments" && args.size() == 2 &&
+        args[1].kind == VmValue::Array && args[1].object) {
+      callArgs = args[1].object->fields;
+    }
+    send(std::move(receiver), method, std::move(callArgs));
     return;
   }
-  if (selector == "put" && args.size() == 2 &&
+  if (receiver.kind == VmValue::Class && selector == "name" && args.empty()) {
+    deliver(VmValue::str(receiver.text));
+    return;
+  }
+  if (selector == "isKindOf" && args.size() == 1 &&
+      args[0].kind == VmValue::Class) {
+    auto result = VmValue::num(isKindOf(typeOf(receiver), args[0].text));
+    result.kind = VmValue::Boolean;
+    deliver(result);
+    return;
+  }
+  if (selector == "getClass" && args.empty()) {
+    deliver(VmValue::str(typeOf(receiver), VmValue::Class));
+    return;
+  }
+  if (receiver.kind == VmValue::Class && receiver.text == "Class" &&
+      selector == "findClass" && args.size() == 1 &&
+      (args[0].kind == VmValue::Symbol || args[0].kind == VmValue::Text)) {
+    deliver(hasClass(args[0].asText())
+                ? VmValue::str(args[0].asText(), VmValue::Class)
+                : VmValue{});
+    return;
+  }
+  if ((receiver.kind == VmValue::Text || receiver.kind == VmValue::Symbol) &&
+      selector == "length" && args.empty()) {
+    deliver(VmValue::num(stringCharacters(receiver.asText()).size()));
+    return;
+  }
+  if (receiver.kind == VmValue::Text &&
+      (selector == "at" || selector == "[]") && args.size() == 1) {
+    const auto characters = stringCharacters(receiver.asText());
+    const auto index = collectionIndex(args[0]);
+    if (index >= characters.size())
+      throw ScriptFault("String index outside text",
+                        "ArrayIndexOutOfBoundsException");
+    deliver(VmValue::num(characters[index]));
+    return;
+  }
+  if (receiver.kind == VmValue::Text &&
+      (selector == "put" || selector == "atPut") && args.size() == 2) {
+    auto characters = stringCharacters(receiver.asText());
+    const auto index = collectionIndex(args[0]);
+    if (index >= characters.size())
+      throw ScriptFault("String index outside text",
+                        "ArrayIndexOutOfBoundsException");
+    const auto character = collectionIndex(args[1]);
+    characters[index] = unsigned(character);
+    *receiver.object->stringValue = charactersString(characters);
+    deliver(receiver);
+    return;
+  }
+  if (receiver.kind == VmValue::Text && selector == "append" &&
+      args.size() == 1 && args[0].kind == VmValue::Text) {
+    *receiver.object->stringValue += args[0].asText();
+    deliver(receiver);
+    return;
+  }
+  if (receiver.kind == VmValue::Text && args.empty() &&
+      (selector == "clone" || selector == "shallowCopy")) {
+    deliver(VmValue::str(receiver.asText()));
+    return;
+  }
+  if ((receiver.kind == VmValue::Text || receiver.kind == VmValue::Symbol) &&
+      selector == "toString" && args.empty()) {
+    deliver(receiver.kind == VmValue::Symbol ? VmValue::str("#" + receiver.text)
+                                             : receiver);
+    return;
+  }
+  if (receiver.kind == VmValue::Number && args.empty() &&
+      selector == "asChar") {
+    deliver(
+        VmValue::str(charactersString({unsigned(collectionIndex(receiver))})));
+    return;
+  }
+  if (receiver.kind == VmValue::Number && args.empty() &&
+      selector == "toString") {
+    deliver(VmValue::str(scfToString(receiver)));
+    return;
+  }
+  if ((selector == "at" || selector == "[]") && args.size() == 1 &&
       receiver.kind == VmValue::Array) {
-    setField(receiver, size_t(args[0].number), args[1]);
+    deliver(field(receiver, collectionIndex(args[0])));
+    return;
+  }
+  if ((selector == "put" || selector == "atPut") && args.size() == 2 &&
+      receiver.kind == VmValue::Array) {
+    setField(receiver, collectionIndex(args[0]), args[1]);
     deliver(receiver);
     return;
   }
@@ -162,8 +372,26 @@ void Vm::send(VmValue receiver, std::string selector, std::vector<VmValue> args,
     deliver(VmValue::num(receiver.object->fields.size()));
     return;
   }
-  if (receiver.kind == VmValue::Number && args.empty() &&
-      (selector == "toInteger" || selector == "toFloat")) {
+  if (receiver.kind == VmValue::Array && receiver.object && args.empty() &&
+      (selector == "clone" || selector == "shallowCopy")) {
+    auto copy = std::make_shared<VmObject>(*receiver.object);
+    deliver(VmValue::ref(std::move(copy), VmValue::Array));
+    return;
+  }
+  if (receiver.kind == VmValue::Array && receiver.object &&
+      selector == "copyFrom" && args.size() == 1 &&
+      args[0].kind == VmValue::Array && args[0].object) {
+    const auto source = args[0].object->fields;
+    // EventNode.packNode copies a Vector's backing image into an Array
+    // sized to its logical length. Native copyFrom clips to either buffer.
+    std::copy_n(source.begin(),
+                std::min(source.size(), receiver.object->fields.size()),
+                receiver.object->fields.begin());
+    deliver(receiver);
+    return;
+  }
+  if (args.empty() && (selector == "toInteger" || selector == "toFloat") &&
+      receiver.kind == VmValue::Number) {
     deliver(VmValue::num(selector == "toInteger" ? std::trunc(receiver.number)
                                                  : receiver.number,
                          selector == "toFloat"));
@@ -174,9 +402,60 @@ void Vm::send(VmValue receiver, std::string selector, std::vector<VmValue> args,
       deliver(std::move(*result));
       return;
     }
-  std::string type = receiver.kind == VmValue::Class ? receiver.text
-                     : receiver.object               ? receiver.object->type
-                                                     : "";
+  if (receiver.kind == VmValue::Class && selector == "new") {
+    if (receiver.text == "Symbol" && args.size() == 1 &&
+        args[0].kind == VmValue::Text) {
+      deliver(VmValue::str(args[0].asText(), VmValue::Symbol));
+      return;
+    }
+    if (receiver.text == "String" && args.size() <= 1) {
+      if (args.empty() || args[0].kind == VmValue::Number)
+        deliver(VmValue::str(""));
+      else if (args[0].kind == VmValue::Text)
+        deliver(VmValue::str(args[0].asText()));
+      else
+        throw ScriptFault("Invalid String constructor", "IllegalArgument");
+      return;
+    }
+    if ((receiver.text == "Array" || receiver.text == "ByteArray" ||
+         receiver.text == "UShortArray") &&
+        args.size() == 1 && args[0].kind == VmValue::Number) {
+      const double size = args[0].number;
+      if (size < 0 || size > 65535 || std::trunc(size) != size)
+        throw ScriptFault("Invalid Array allocation size");
+      auto object = std::make_shared<VmObject>();
+      object->type = receiver.text;
+      object->fields.resize(
+          size_t(size), receiver.text == "Array" ? VmValue{} : VmValue::num(0));
+      deliver(VmValue::ref(std::move(object), VmValue::Array));
+      return;
+    }
+    // Script classes inherit the native allocator, which invokes initialize
+    // with the same arguments and returns the initialized receiver.
+    auto type = receiver.text;
+    for (unsigned depth = 0; depth < 64 && !type.empty(); ++depth) {
+      const auto found = scripts_.find(type);
+      if (found == scripts_.end())
+        break;
+      for (const auto &method : found->second.methods)
+        if (!method.classMethod && method.name == "initialize" &&
+            method.arguments == args.size()) {
+          auto object = instance(receiver.text);
+          const auto before = frames_.size();
+          send(object, "initialize", std::move(args));
+          if (frames_.size() > before)
+            frames_.back().constructedResult = object;
+          else if (frames_.empty())
+            result_ = object;
+          else
+            frames_.back().stack.back() = object;
+          return;
+        }
+      type = found->second.parent;
+    }
+  }
+  std::string type =
+      receiver.kind == VmValue::Class ? receiver.text : typeOf(receiver);
   if (super && !frames_.empty())
     type = frames_.back().script->parent;
   for (unsigned depth = 0; depth < 64 && !type.empty(); ++depth) {
@@ -216,6 +495,89 @@ void Vm::resume(std::optional<VmValue> result) {
   }
   paused_ = false;
 }
+void Vm::raise(VmValue value) {
+  const auto at = location();
+  exception_ = std::move(value);
+  while (!frames_.empty()) {
+    auto &frame = frames_.back();
+    if (!frame.handlers.empty()) {
+      const auto handler = frame.handlers.back();
+      frame.handlers.pop_back();
+      frame.stack.resize(handler.stackSize);
+      frame.pc = handler.target;
+      return;
+    }
+    frames_.pop_back();
+  }
+  throw std::runtime_error("Uncaught SCF exception at " + at + ": " +
+                           exception_.text);
+}
+const Vm::OpcodeInfo *Vm::opcodeInfo(uint8_t opcode) {
+  static const std::map<uint8_t, OpcodeInfo> table{
+      {0x00, {"nop", 0, true}},
+      {0x01, {"marker", 1, true}},
+      {0x02, {"return", 0, true}},
+      {0x03, {"returnValue", 0, true}},
+      {0x04, {"dup", 0, true}},
+      {0x05, {"pop", 0, true}},
+      {0x06, {"notEqualIdentity", 0, true}},
+      {0x07, {"equalIdentity", 0, true}},
+      {0x08, {"classField", 2, true}},
+      {0x09, {"classField16", 3, true}},
+      {0x0a, {"storeClassField", 2, true}},
+      {0x0b, {"storeClassField16", 3, true}},
+      {0x0c, {"and", 0, true}},
+      {0x0d, {"or", 0, true}},
+      {0x10, {"add", 0, true}},
+      {0x11, {"subtract", 0, true}},
+      {0x12, {"multiply", 0, true}},
+      {0x13, {"divide", 0, true}},
+      {0x14, {"modulo", 0, true}},
+      {0x15, {"bitAnd", 0, true}},
+      {0x16, {"bitOr", 0, true}},
+      {0x17, {"bitXor", 0, true}},
+      {0x18, {"equal", 0, true}},
+      {0x19, {"greater", 0, true}},
+      {0x1a, {"less", 0, true}},
+      {0x1b, {"greaterEqual", 0, true}},
+      {0x1c, {"lessEqual", 0, true}},
+      {0x1d, {"notEqual", 0, true}},
+      {0x1e, {"negate", 0, true}},
+      {0x1f, {"bitNot", 0, true}},
+      {0x20, {"field", 1, true}},
+      {0x21, {"storeField", 1, true}},
+      {0x22, {"local", 1, true}},
+      {0x23, {"storeLocal", 1, true}},
+      {0x24, {"int8", 1, true}},
+      {0x25, {"nil", 0, true}},
+      {0x26, {"self", 0, true}},
+      {0x28, {"true", 0, true}},
+      {0x29, {"false", 0, true}},
+      {0x2a, {"exception", 0, true}},
+      {0x2b, {"not", 0, true}},
+      {0x30, {"send", 2, true}},
+      {0x31, {"super", 2, true}},
+      {0x32, {"send16", 3, true}},
+      {0x33, {"super16", 3, true}},
+      {0x34, {"primitive", 1, true}},
+      {0x40, {"jump", 1, true}},
+      {0x41, {"jump16", 2, true}},
+      {0x44, {"ifFalse", 1, true}},
+      {0x45, {"ifFalse16", 2, true}},
+      {0x50, {"literal", 1, true}},
+      {0x51, {"literal16", 2, true}},
+      {0x64, {"at", 0, true}},
+      {0x65, {"put", 0, true}},
+      {0x68, {"clearException", 0, true}},
+      {0x69, {"exceptionHandler", 2, true}},
+      {0x6a, {"endHandler", 0, true}},
+      {0x6b, {"throw", 0, true}},
+      {0x6c, {"locals", 1, true}},
+      {0x6d, {"marker16", 2, true}},
+  };
+  const auto found = table.find(opcode);
+  return found == table.end() ? nullptr : &found->second;
+}
 void Vm::run(size_t budget) {
   while (!frames_.empty() && !paused_ && budget--) {
     auto &f = frames_.back();
@@ -251,210 +613,317 @@ void Vm::run(size_t budget) {
       f.pc = size_t(p);
     };
     uint8_t op = byte();
-    switch (op) {
-    case 0:
-      break;
-    case 1:
-      byte();
-      break;
-    case 2: {
-      auto value = f.result;
-      frames_.pop_back();
-      deliver(std::move(value));
-      break;
-    }
-    case 3:
-      f.result = pop();
-      break;
-    case 4: {
-      auto v = pop();
-      push(v);
-      push(v);
-      break;
-    }
-    case 5:
-      pop();
-      break;
-    case 6:
-    case 7: {
-      auto b = pop(), a = pop();
-      push(boolean(op == 7 ? equal(a, b) : !equal(a, b)));
-      break;
-    }
-    case 8:
-    case 9:
-    case 10:
-    case 11: {
-      size_t index = op & 1 ? word() : byte();
-      size_t slot = byte();
-      auto v = literal(index);
-      if (op < 10)
-        push(field(v, slot));
-      else
-        setField(v, slot, pop());
-      break;
-    }
-    case 0x20:
-      push(field(f.self, byte()));
-      break;
-    case 0x21: {
-      auto n = byte();
-      setField(f.self, n, pop());
-      break;
-    }
-    case 0x22:
-      push(f.locals.at(byte()));
-      break;
-    case 0x23: {
-      auto n = byte();
-      f.locals.at(n) = pop();
-      break;
-    }
-    case 0x24:
-      push(VmValue::num(int8_t(byte())));
-      break;
-    case 0x25:
-      push({});
-      break;
-    case 0x26:
-      push(f.self);
-      break;
-    case 0x28:
-      push(boolean(true));
-      break;
-    case 0x29:
-      push(boolean(false));
-      break;
-    case 0x2b: {
-      auto a = pop();
-      push(boolean(!a.truth()));
-      break;
-    }
-    case 0x30:
-    case 0x31:
-    case 0x32:
-    case 0x33: {
-      unsigned count = byte(), index = op & 2 ? word() : byte();
-      auto sel = f.script->constants.at(index).text;
-      std::vector<VmValue> args(count);
-      for (size_t i = count; i > 0; --i)
-        args[i - 1] = pop();
-      auto receiver = pop();
-      send(std::move(receiver), std::move(sel), std::move(args), op & 1);
-      break;
-    }
-    case 0x34:
-      throw std::runtime_error("Unhandled SCF primitive " +
-                               std::to_string(byte()) + " at " + location());
-    case 0x40:
-    case 0x41: {
-      int offset = op & 1 ? int16_t(word()) : int8_t(byte());
-      jump(offset);
-      break;
-    }
-    case 0x44:
-    case 0x45: {
-      int offset = op & 1 ? int16_t(word()) : int8_t(byte());
-      if (!pop().truth())
-        jump(offset);
-      break;
-    }
-    case 0x50:
-      push(literal(byte()));
-      break;
-    case 0x51:
-      push(literal(word()));
-      break;
-    case 0x64: {
-      auto index = pop(), a = pop();
-      push(field(a, size_t(index.number)));
-      break;
-    }
-    case 0x65: {
-      auto value = pop(), index = pop(), a = pop();
-      setField(a, size_t(index.number), value);
-      push(a);
-      break;
-    }
-    case 0x6c: {
-      unsigned n = byte();
-      f.locals.resize(f.locals.size() + n);
-      break;
-    }
-    case 0x6d:
-      word();
-      break;
-    case 0x1e: {
-      auto a = pop();
-      a.number = -a.number;
-      push(a);
-      break;
-    }
-    case 0x1f: {
-      auto a = pop();
-      a.number = ~int32_t(a.number);
-      push(a);
-      break;
-    }
-    default:
-      if (op >= 0x10 && op <= 0x1d) {
-        auto b = pop(), a = pop();
-        double x = a.number, y = b.number;
-        const bool floating = a.floating || b.floating;
-        VmValue v;
-        switch (op) {
-        case 0x10:
-          v = VmValue::num(x + y, floating);
-          break;
-        case 0x11:
-          v = VmValue::num(x - y, floating);
-          break;
-        case 0x12:
-          v = VmValue::num(x * y, floating);
-          break;
-        case 0x13:
-          if (!y)
-            throw std::runtime_error("Division by zero");
-          v = VmValue::num(floating ? x / y : std::trunc(x / y), floating);
-          break;
-        case 0x14:
-          if (!y)
-            throw std::runtime_error("Modulo by zero");
-          v = VmValue::num(std::fmod(x, y), floating);
-          break;
-        case 0x15:
-          v = VmValue::num(int32_t(x) & int32_t(y));
-          break;
-        case 0x16:
-          v = VmValue::num(int32_t(x) | int32_t(y));
-          break;
-        case 0x17:
-          v = VmValue::num(int32_t(x) ^ int32_t(y));
-          break;
-        case 0x18:
-          v = boolean(x == y);
-          break;
-        case 0x19:
-          v = boolean(x > y);
-          break;
-        case 0x1a:
-          v = boolean(x < y);
-          break;
-        case 0x1b:
-          v = boolean(x >= y);
-          break;
-        case 0x1c:
-          v = boolean(x <= y);
-          break;
-        case 0x1d:
-          v = boolean(x != y);
-          break;
-        }
-        push(std::move(v));
+    try {
+      switch (op) {
+      case 0:
+        break;
+      case 1:
+        byte();
+        break;
+      case 2: {
+        auto value = f.constructedResult.value_or(f.result);
+        frames_.pop_back();
+        deliver(std::move(value));
         break;
       }
-      throw std::runtime_error("Unsupported opcode " + std::to_string(op) +
-                               " at " + location());
+      case 3: {
+        // Jump table 0x28eeec: opcode 3 -> 0x11ed88 stores the stack
+        // value and falls through to opcode 2's frame unwind (0x11eda0).
+        // It is an immediate return, not an assignment to a future result.
+        auto value = pop();
+        if (f.constructedResult)
+          value = *f.constructedResult;
+        frames_.pop_back();
+        deliver(std::move(value));
+        break;
+      }
+      case 4: {
+        auto v = pop();
+        push(v);
+        push(v);
+        break;
+      }
+      case 5:
+        pop();
+        break;
+      case 6:
+      case 7: {
+        auto b = pop(), a = pop();
+        push(boolean(op == 7 ? equal(a, b) : !equal(a, b)));
+        break;
+      }
+      case 0x0c:
+      case 0x0d: {
+        // Native handlers 0x11f1f0 / 0x11f2d8: strict Boolean AND / OR.
+        const auto b = pop(), a = pop();
+        if (a.kind != VmValue::Boolean || b.kind != VmValue::Boolean)
+          throw std::runtime_error("Boolean operands required at " +
+                                   location());
+        push(boolean(op == 0x0c ? a.truth() && b.truth()
+                                : a.truth() || b.truth()));
+        break;
+      }
+      case 8:
+      case 9:
+      case 10:
+      case 11: {
+        size_t index = op & 1 ? word() : byte();
+        size_t slot = byte();
+        auto v = literal(index);
+        if (op < 10)
+          push(field(v, slot));
+        else
+          setField(v, slot, pop());
+        break;
+      }
+      case 0x20:
+        push(field(f.self, byte()));
+        break;
+      case 0x21: {
+        auto n = byte();
+        setField(f.self, n, pop());
+        break;
+      }
+      case 0x22:
+        push(f.locals.at(byte()));
+        break;
+      case 0x23: {
+        auto n = byte();
+        f.locals.at(n) = pop();
+        break;
+      }
+      case 0x24:
+        push(VmValue::num(int8_t(byte())));
+        break;
+      case 0x25:
+        push({});
+        break;
+      case 0x26:
+        push(f.self);
+        break;
+      case 0x28:
+        push(boolean(true));
+        break;
+      case 0x29:
+        push(boolean(false));
+        break;
+      case 0x2b: {
+        auto a = pop();
+        push(boolean(!a.truth()));
+        break;
+      }
+      case 0x30:
+      case 0x31:
+      case 0x32:
+      case 0x33: {
+        unsigned count = byte(), index = op & 2 ? word() : byte();
+        auto sel = f.script->constants.at(index).text;
+        std::vector<VmValue> args(count);
+        for (size_t i = count; i > 0; --i)
+          args[i - 1] = pop();
+        auto receiver = pop();
+        send(std::move(receiver), std::move(sel), std::move(args), op & 1);
+        break;
+      }
+      case 0x34: {
+        const unsigned prim = byte();
+        if (scopedPrimitive)
+          if (auto result = scopedPrimitive(f.script->name, f.method->name,
+                                            f.method->classMethod, f.self, prim,
+                                            f.locals)) {
+            f.result = *result;
+            push(std::move(*result));
+            break;
+          }
+        if (primitive)
+          if (auto result = primitive(f.self, prim, f.locals)) {
+            f.result = *result;
+            push(std::move(*result));
+            break;
+          }
+        const std::string owner = f.self.kind == VmValue::Class ? f.self.text
+                                  : f.self.object ? f.self.object->type
+                                                  : typeOf(f.self);
+        throw std::runtime_error("Unhandled SCF primitive " +
+                                 std::to_string(prim) + " for " + owner +
+                                 " at " + location());
+      }
+      case 0x40:
+      case 0x41: {
+        int offset = op & 1 ? int16_t(word()) : int8_t(byte());
+        jump(offset);
+        break;
+      }
+      case 0x44:
+      case 0x45: {
+        int offset = op & 1 ? int16_t(word()) : int8_t(byte());
+        if (!pop().truth())
+          jump(offset);
+        break;
+      }
+      case 0x50:
+        push(literal(byte()));
+        break;
+      case 0x51:
+        push(literal(word()));
+        break;
+      case 0x64: {
+        auto index = pop(), a = pop();
+        if ((a.kind == VmValue::Object && a.object) || a.kind == VmValue::Text)
+          send(std::move(a), "[]", {index});
+        else
+          push(field(a, collectionIndex(index)));
+        break;
+      }
+      case 0x65: {
+        auto value = pop(), index = pop(), a = pop();
+        if ((a.kind == VmValue::Object && a.object) || a.kind == VmValue::Text)
+          send(std::move(a), "atPut", {index, value});
+        else {
+          setField(a, collectionIndex(index), value);
+          push(a);
+        }
+        break;
+      }
+      case 0x2a:
+        push(exception_);
+        break;
+      case 0x68:
+        exception_ = {};
+        break;
+      case 0x69: {
+        const size_t target = origin + word();
+        size_t handlerCount = 0;
+        for (const auto &frame : frames_)
+          handlerCount += frame.handlers.size();
+        if (target >= f.method->code.size() || handlerCount >= 30)
+          throw std::runtime_error("Invalid SCF exception handler at " +
+                                   location());
+        f.handlers.push_back({target, f.stack.size()});
+        break;
+      }
+      case 0x6a:
+        if (f.handlers.empty())
+          throw std::runtime_error("SCF handler stack underflow at " +
+                                   location());
+        f.handlers.pop_back();
+        break;
+      case 0x6b:
+        raise(pop());
+        break;
+      case 0x6c: {
+        unsigned n = byte();
+        f.locals.resize(f.locals.size() + n);
+        break;
+      }
+      case 0x6d:
+        word();
+        break;
+      case 0x1e: {
+        auto a = pop();
+        a.number = -a.number;
+        push(a);
+        break;
+      }
+      case 0x1f: {
+        auto a = pop();
+        a.number = ~int32_t(a.number);
+        push(a);
+        break;
+      }
+      default:
+        if (op >= 0x10 && op <= 0x1d) {
+          auto b = pop(), a = pop();
+          if (op == 0x10 &&
+              (a.kind == VmValue::Text || b.kind == VmValue::Text ||
+               a.kind == VmValue::Symbol || b.kind == VmValue::Symbol ||
+               a.kind == VmValue::Class || b.kind == VmValue::Class)) {
+            // Smalltalk-style text concatenation: <text|symbol|class> + any.
+            push(VmValue::str(scfToString(a) + scfToString(b)));
+            break;
+          }
+          if ((op == 0x18 || op == 0x1d) &&
+              (a.kind != VmValue::Number || b.kind != VmValue::Number)) {
+            if (a.kind == VmValue::Object && a.object)
+              send(std::move(a), op == 0x18 ? "=" : "<>", {b});
+            else
+              push(boolean(op == 0x18 ? equal(a, b) : !equal(a, b)));
+            break;
+          }
+          const bool booleanBits = (op >= 0x15 && op <= 0x17) &&
+                                   a.kind == VmValue::Boolean &&
+                                   b.kind == VmValue::Boolean;
+          if (!booleanBits &&
+              (a.kind != VmValue::Number || b.kind != VmValue::Number))
+            throw ScriptFault("Numeric operands required", "IllegalArgument");
+          double x = a.number, y = b.number;
+          const bool floating = a.floating || b.floating;
+          VmValue v;
+          switch (op) {
+          case 0x10:
+            v = VmValue::num(x + y, floating);
+            break;
+          case 0x11:
+            v = VmValue::num(x - y, floating);
+            break;
+          case 0x12:
+            v = VmValue::num(x * y, floating);
+            break;
+          case 0x13:
+            if (!y)
+              throw ScriptFault("Division by zero", "DivisionByZeroException");
+            v = VmValue::num(floating ? x / y : std::trunc(x / y), floating);
+            break;
+          case 0x14:
+            if (!y)
+              throw ScriptFault("Modulo by zero", "DivisionByZeroException");
+            v = VmValue::num(std::fmod(x, y), floating);
+            break;
+          case 0x15:
+            v = a.kind == VmValue::Boolean && b.kind == VmValue::Boolean
+                    ? boolean(a.truth() && b.truth())
+                    : VmValue::num(int32_t(x) & int32_t(y));
+            break;
+          case 0x16:
+            v = a.kind == VmValue::Boolean && b.kind == VmValue::Boolean
+                    ? boolean(a.truth() || b.truth())
+                    : VmValue::num(int32_t(x) | int32_t(y));
+            break;
+          case 0x17:
+            v = a.kind == VmValue::Boolean && b.kind == VmValue::Boolean
+                    ? boolean(a.truth() != b.truth())
+                    : VmValue::num(int32_t(x) ^ int32_t(y));
+            break;
+          case 0x18:
+            v = boolean(x == y);
+            break;
+          case 0x19:
+            v = boolean(x > y);
+            break;
+          case 0x1a:
+            v = boolean(x < y);
+            break;
+          case 0x1b:
+            v = boolean(x >= y);
+            break;
+          case 0x1c:
+            v = boolean(x <= y);
+            break;
+          case 0x1d:
+            v = boolean(x != y);
+            break;
+          }
+          push(std::move(v));
+          break;
+        }
+        throw std::runtime_error("Unsupported opcode " + std::to_string(op) +
+                                 " at " + location());
+      }
+    } catch (const ScriptFault &fault) {
+      auto exception = instance(fault.type);
+      exception.text = fault.what();
+      exception.object->fields[0] = VmValue::str(fault.what());
+      raise(std::move(exception));
     }
   }
   if (!frames_.empty() && !paused_ && budget == size_t(-1))

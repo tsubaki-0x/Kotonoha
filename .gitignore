@@ -707,3 +707,10 @@ games-assets/*
 /Android/app/.cxx/
 /Android/local.properties
 Xcode/Python.xcframework
+!lib/src/debug/
+!lib/src/debug/**
+!lib/include/Kotonoha/debug
+!lib/include/Kotonoha/debug/**
+/CMakeSettings.json
+.opencode
+forced_subtitles/

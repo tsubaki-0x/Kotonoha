@@ -107,8 +107,8 @@ public:
   mutable int reads = 0, streams = 0;
 
   std::string name() const override { return "Streaming"; }
-  bool contains(const std::string &id) const override { return id == "image.bmp"; }
-  std::vector<Uint8> read(const std::string &id) const override {
+  bool containsAsset(const std::string &id) const override { return id == "image.bmp"; }
+  std::vector<Uint8> readAsset(const std::string &id) const override {
     ++reads;
     if (id != "image.bmp") throw std::runtime_error("Missing " + id);
     return bytes;
@@ -174,7 +174,8 @@ void fileSystemProvider() {
       ("kotonoha-assets-" + std::to_string(SDL_GetPerformanceCounter()));
   std::filesystem::create_directories(root / "pictures");
   writeTextFileAtomically((root / "pictures/a.txt").string(), "hello");
-  std::filesystem::create_directories(root.parent_path() / "outside");
+  const auto outside = std::filesystem::path(root.string() + "-outside");
+  std::filesystem::create_directories(outside);
   try {
     FileSystemAssetProvider assets(root);
     require(assets.contains("pictures/a.txt"), "Contains rooted asset");
@@ -194,14 +195,45 @@ void fileSystemProvider() {
             "Reject absolute path");
     rejects([&] { assets.read(""); }, "Reject empty identifier");
 
+    IndexedFileSystemAssetProvider indexed(root);
+    require(indexed.contains("PICTURES\\A.TXT"),
+            "Indexed data normalizes case and Windows separators");
+    require(indexed.read("PICTURES/A.TXT") == bytes,
+            "Indexed data reads the actual case-preserved path");
+    require(indexed.list("PICTURES/") ==
+                std::vector<std::string>{"pictures/a.txt"},
+            "Indexed data enumerates normalized identifiers");
+    require(!indexed.contains("../outside"), "Indexed data rejects escapes");
+    rejects([&] { indexed.read("../outside"); }, "Indexed read rejects escape");
+    std::error_code linkError;
+    std::filesystem::create_directory_symlink(outside,
+                                              root / "external-directory", linkError);
+#ifdef _WIN32
+    if (linkError.value() == 1314) { // ERROR_PRIVILEGE_NOT_HELD
+      std::cout << "SKIP: symlink fixture requires Windows Developer Mode\n";
+    } else
+#endif
+    {
+      if (linkError)
+        throw std::system_error(linkError);
+      writeTextFileAtomically((outside / "leak.txt").string(), "outside");
+      std::filesystem::create_symlink(outside / "leak.txt", root / "external.txt");
+      rejects([&] { IndexedFileSystemAssetProvider escaping(root); },
+              "Indexed data rejects symlink escapes");
+      std::filesystem::remove(root / "external.txt");
+      std::filesystem::remove(root / "external-directory");
+    }
+
     FileSystemAssetProvider plain;
     require(plain.localPath("pictures/a.txt") == "pictures/a.txt",
             "Unrooted identifiers are paths");
   } catch (...) {
     std::filesystem::remove_all(root);
+    std::filesystem::remove_all(outside);
     throw;
   }
   std::filesystem::remove_all(root);
+  std::filesystem::remove_all(outside);
 }
 
 void decoders() {
@@ -383,7 +415,7 @@ int main(int argc, char **argv) {
       char a0[] = "test", a1[] = "--dump-translation", a2[] = "texts.json",
            a3[] = "--launcher";
       char *args[] = {a0, a1, a2, a3};
-      cli.parse(5, args);
+      cli.parse(4, args);
       require(options.dumpTranslationPath == "texts.json" && !options.launcher,
               "Engine export bypasses the launcher regardless of option order");
     }

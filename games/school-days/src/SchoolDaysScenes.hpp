@@ -36,6 +36,10 @@ public:
 };
 
 class Subtitles final : public Kotonoha::SubtitleScene {
+protected:
+  bool replacesPreviousCue() const override { return true; }
+  std::string displayCueText(const std::string &text) const override;
+
 public:
   using SubtitleScene::SubtitleScene;
   void bind(const Kotonoha_orsData &script);

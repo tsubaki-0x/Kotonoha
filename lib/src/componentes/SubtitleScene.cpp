@@ -79,8 +79,12 @@ struct SubtitleScene::State {
     renderer.reset(ass_renderer_init(library.get()));
     if (!renderer)
       throw std::runtime_error("Cannot initialize libass renderer");
-    ass_set_fonts_dir(library.get(),
-                      FileResolver::fontDirectory().string().c_str());
+    // libass scans every file in ass_set_fonts_dir(), including OFL.txt.
+    // Register only the font files accepted by the engine's font catalog.
+    for (const auto &[name, bytes] : FileResolver::getFontMap())
+      ass_add_font(library.get(), name.c_str(),
+                   reinterpret_cast<const char *>(bytes.data()),
+                   static_cast<int>(bytes.size()));
 
     try {
       auto data = FileResolver::loadFontMemory(engine.GetSettings().fontPath);
@@ -103,10 +107,16 @@ struct SubtitleScene::State {
 
 SubtitleScene::SubtitleScene(Engine &engine, int width, int height)
     : Scene(engine), width(width), height(height) {
-  if (width <= 0 || height <= 0 || width > 8192 || height > 8192)
-    throw std::invalid_argument("Invalid subtitle scene dimensions");
+  setLogicalSize(width, height);
   state = std::make_unique<State>(engine);
   state->style = engine.GetSubtitleStyle();
+}
+
+void SubtitleScene::setLogicalSize(int width, int height) {
+  if (width <= 0 || height <= 0 || width > 8192 || height > 8192)
+    throw std::invalid_argument("Invalid subtitle scene dimensions");
+  this->width = width;
+  this->height = height;
 }
 SubtitleScene::~SubtitleScene() = default;
 
@@ -144,7 +154,22 @@ void SubtitleScene::setCues(const std::vector<SubtitleCue> &cues,
            "&H96000000,0,0,0,0,100,100,0,0,1,2.6,1.2,2,48,48,36,1\n";
   ass << "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, "
          "MarginV, Effect, Text\n";
-  for (const auto &cue : cues) {
+  for (const auto &cue : cues)
+    if (!std::isfinite(cue.start) || !std::isfinite(cue.end) || cue.start < 0 ||
+        cue.end <= cue.start)
+      throw std::invalid_argument("Invalid subtitle cue");
+  auto timedCues = cues;
+  if (replacesPreviousCue()) {
+    std::stable_sort(
+        timedCues.begin(), timedCues.end(),
+        [](const auto &a, const auto &b) { return a.start < b.start; });
+    for (size_t i = 1; i < timedCues.size(); ++i)
+      timedCues[i - 1].end = std::min(timedCues[i - 1].end, timedCues[i].start);
+  }
+  for (const auto &cue : timedCues) {
+    // Equal-time replacements leave only the last original line visible.
+    if (replacesPreviousCue() && cue.end == cue.start)
+      continue;
     if (!std::isfinite(cue.start) || !std::isfinite(cue.end) || cue.start < 0 ||
         cue.end <= cue.start || cue.end > 24 * 3600 ||
         cue.text.find('\0') != std::string::npos ||
@@ -247,8 +272,21 @@ void SubtitleScene::render(RendererRef renderer, float) {
   float sx = 1, sy = 1;
   if (!SDL_GetRenderScale(&renderer, &sx, &sy))
     throw std::runtime_error(SDL_GetError());
-  const int w = std::clamp(static_cast<int>(std::lround(width * sx)), 1, 8192);
-  const int h = std::clamp(static_cast<int>(std::lround(height * sy)), 1, 8192);
+  int logicalWidth = 0, logicalHeight = 0;
+  SDL_RendererLogicalPresentation presentation;
+  if (!SDL_GetRenderLogicalPresentation(&renderer, &logicalWidth,
+                                       &logicalHeight, &presentation))
+    throw std::runtime_error(SDL_GetError());
+  if (presentation != SDL_LOGICAL_PRESENTATION_DISABLED) {
+    SDL_FRect area{};
+    if (!SDL_GetRenderLogicalPresentationRect(&renderer, &area))
+      throw std::runtime_error(SDL_GetError());
+    // The presentation rectangle is in output pixels, including Retina.
+    sx *= area.w / logicalWidth;
+    sy *= area.h / logicalHeight;
+  }
+  const int w = std::max(1, static_cast<int>(std::lround(width * sx)));
+  const int h = std::max(1, static_cast<int>(std::lround(height * sy)));
   ass_set_frame_size(state->renderer.get(), w, h);
   int changed = 0;
   auto *image = ass_render_frame(state->renderer.get(), state->track.get(),
@@ -287,6 +325,7 @@ void SubtitleScene::render(RendererRef renderer, float) {
     const SDL_FRect destination{
         image->dst_x * float(width) / w, image->dst_y * float(height) / h,
         image->w * float(width) / w, image->h * float(height) / h};
+    // libass already rasterized at output density; bypass the image upscaler.
     if (!SDL_RenderTexture(&renderer, state->glyph.get(), &source,
                            &destination))
       throw std::runtime_error(SDL_GetError());

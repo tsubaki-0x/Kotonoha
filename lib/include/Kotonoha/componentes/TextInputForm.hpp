@@ -1,4 +1,5 @@
 #pragma once
+#include <Kotonoha/componentes/TouchActivation.hpp>
 #include <Kotonoha/core/Scene.hpp>
 #include <functional>
 #include <string>
@@ -6,6 +7,7 @@
 namespace Kotonoha {
 // Shared touch/keyboard form; submission is atomic across all fields.
 class TextInputForm final : public Scene {
+  TouchActivation touchActivation;
 public:
   struct Field {
     std::string label, value, defaultValue;
@@ -18,6 +20,7 @@ public:
   void close();
   void submit(const std::vector<std::string> &values);
   bool designSpace() const override { return true; }
+  RenderLayer renderLayer() const override { return RenderLayer::Overlay; }
   bool capturesInput() const override { return active; }
   bool pausesStory() const override { return active; }
   bool handleEvent(EventRef event) override {
@@ -26,7 +29,7 @@ public:
     onEvent(event);
     return true;
   }
-  void onEvent(EventRef event) override;
+  bool onEvent(EventRef event) override;
   void update() override;
   void render(RendererRef renderer, float) override;
 

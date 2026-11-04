@@ -12,7 +12,7 @@ provided by vcpkg.
 
 - [lib/](lib/): public headers, engine implementations, tests and submodules.
 - [assets/](assets/): engine splash, fonts, licenses and bundled GLSL shaders.
-- [games/](games/): example, Zero no Tsukaima, Snow Radish Vacation, DDLC and School Days.
+- [games/](games/): example, Zero no Tsukaima, Amagami, AIR, Radish Vacation, DDLC and School Days.
 - [Xcode/Kotonoha.xcodeproj](Xcode/Kotonoha.xcodeproj): native iOS targets.
 - [Android/](Android/): Android Studio/Gradle project with separate game APKs.
 - [cmake/](cmake/): desktop configuration and `.app` packaging.
@@ -33,6 +33,11 @@ The port does not download or supply commercial game data.
 
 ## Desktop build
 
+Assets, game data and saves have separate roots. Saves use
+`<platform user-data root>/Kotonoha/<package id>`; launcher choices are stored
+as portable resource names and resolved at runtime, including automatic or
+named overlays. See the [directory policy](docs/Directories.pt-BR.md).
+
 Requires CMake, pkg-config, FFmpeg, json-c, libass >= 0.17, FreeType, HarfBuzz, PlutoSVG and
 OpenGL; DDLC also requires CPython development files. SDL3, SDL_ttf and ImGui
 are built from submodules, not vcpkg packages.
@@ -50,6 +55,27 @@ ctest --test-dir build --output-on-failure
 Disable individual games with `KOTONOHA_BUILD_AMAGAMI`, `KOTONOHA_BUILD_EXAMPLE`, `KOTONOHA_BUILD_ZERO`,
 `KOTONOHA_BUILD_SNOW`, `KOTONOHA_BUILD_DDLC` or `KOTONOHA_BUILD_SCHOOL_DAYS`. Each game can also be configured
 independently from its own directory.
+
+### Windows / Visual Studio
+
+Install **Desktop development with C++**, including the Windows SDK, CMake
+and Ninja. Open this directory in Visual Studio and select `x64-Debug`;
+`CMakeSettings.json` builds in `out/build/x64-Debug`. Visual Studio's vcpkg
+integration supplies the dependencies.
+
+From **Developer PowerShell for VS** (x64):
+
+```powershell
+cmake -S . -B out/build/x64-Debug -G Ninja -DCMAKE_BUILD_TYPE=Debug `
+  "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+cmake --build out/build/x64-Debug --parallel
+```
+
+The MSVC launcher uses UTF-8 for `/showIncludes` so Ninja tracks headers
+correctly with localized Visual Studio installations, even without the English
+language pack. The first build after this fix automatically recompiles stale objects.
+Linking and DLL deployment are serialized to avoid concurrent access to the
+same DLL; C/C++ compilation remains parallel.
 
 ### macOS `.app` bundles, including the CMake Xcode generator
 
@@ -92,7 +118,7 @@ target using native Resources phases; frameworks use Embed Frameworks with
 Code Sign on Copy. Each game's `game-assets` directory is copied directly as
 a folder reference, preserving its name without build scripts.
 
-Schemes: `Kotonoha`, `ZeroNoTsukaima`, `SnowRadish`, `DokiDoki`, `SchoolDays`, `Air`, `SummerRadish`,
+Schemes: `Kotonoha`, `ZeroNoTsukaima`, `SnowRadish`, `DokiDoki`, `SchoolDays`, `Air`, `SummerRadish`, `Amagami`,
 `KotonohaIOSSmoke` and `DdlcIOSScriptSmoke`. KotonohaEngine is a static framework;
 apps embed the dynamic KotonohaImGui, SDL3 and SDL3_ttf frameworks.
 
@@ -134,13 +160,14 @@ resources, extension frameworks and `.fwork` markers for both SDKs. It runs
 Downloaded/prepared dependencies remain under ignored build directories.
 Choose your signing team for device installation.
 
-The native game bundle IDs match their Android application IDs:
-`me.hirameki.kotonoha.zeronotsukaima`, `.snowradish`, `.ddlc` and `.schooldays`.
-The example uses `org.kotonoha.example`. The platform's selected bundle ID or
+The native game bundle IDs match their Android application IDs under
+`me.hirameki.kotonoha`: `.zeronotsukaima`, `.snowradishvacation`,
+`.dokidokiliteratureclub`, `.schooldays`, `.air`, `.summerradishvacation` and
+`.amagami`. The example uses `me.hirameki.kotonoha` on iOS and
+`me.kotonoha.example` on Android. The platform's selected bundle ID or
 application ID determines the installed app's sandbox, preferences and external
 storage identity; C++ SDL metadata does not override Xcode/Gradle settings.
-Earlier IDs (including `me.hirameki.kotonoha`, `me.hirameki.kotonoha.*` and
-the previous `me.kotonoha.*` iOS IDs) identify separate installations.
+Earlier IDs identify separate installations.
 Existing preferences/saves are not migrated automatically. Export needed saves
 before uninstalling an older app, and update provisioning profiles for new IDs.
 
@@ -285,7 +312,21 @@ still work. Scale `1.0` turns processing off without losing the selected profile
 ## Controls and diagnostics
 
 - Click / Enter / Space: reveal or advance dialogue.
-- Arrows / mouse: menus and choices; mouse wheel scrolls longer lists.
+- Arrows / mouse: menus and choices; mouse wheel and the left stick scroll
+  longer lists and histories.
+- Gamepad: D-pad or left stick navigates; East (Circle/B) confirms;
+  South (Cross/A) cancels in menus; Start/North opens pause. Back/left
+  shoulder opens history (and closes it while open). Native settings also
+  support shoulders to change tabs; while a gamepad is connected, the Input
+  tab exposes a persisted A/B swap. In the Summer Radish message window,
+  Left/Right focus the toolbar, Enter activates it and Up returns to the novel.
+- Touch: tap activates; drag scrolls lists and histories. A canceled touch,
+  drag or second finger cannot confirm a list item. Edge swipe or a two-finger
+  tap goes back; swipe up during dialogue opens history.
+- During dialogue, South holds read-skip and releasing stops it; West toggles
+  read-skip and the right shoulder toggles Auto in the ports that implement
+  them. Menus keep their navigation bindings and South cancels regardless of
+  the dialogue visible underneath.
 - Escape: pause/back; B: backlog; F5/F6: quicksave/load.
 - F10: engine inspector; F11 / Alt+Enter: borderless fullscreen.
 - F8/F9: node clock/FPS HUD.
@@ -309,3 +350,9 @@ media, scripting and MCP APIs and the existing port limitations. ZNT/SRV
 dialogue translations and DDLC's later acts have not been fully validated.
 
 Shared overlay, gesture and live translation behavior: [documentation](docs/ASSET_OVERLAYS.md).
+
+Port fidelity, remaining commands and verification are tracked in the
+[Amagami](games/amagami/PORT_STATUS.md), [AIR](games/air/PORT_STATUS.md) and
+[School Days](games/school-days/PORT_STATUS.md) status documents. Shared file
+ownership and per-game provider extensions are described in
+[asset management](docs/ASSET_OVERLAYS.md#shared-file-ownership).

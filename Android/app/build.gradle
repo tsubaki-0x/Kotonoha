@@ -66,7 +66,7 @@ android {
                 externalNativeBuild {
                     cmake {
                         arguments "-DKOTONOHA_ANDROID_GAME=${game[0]}",
-                                "-DVCPKG_INSTALLED_DIR=${rootProject.projectDir}/build/vcpkg${flavor == 'dokiDoki' ? '-python' : ''}"
+                                "-DKOTONOHA_VCPKG_BASE_DIR=${rootProject.projectDir}/build/vcpkg${flavor == 'dokiDoki' ? '-python' : ''}"
                         targets game[1]
                     }
                 }
@@ -119,13 +119,25 @@ android.applicationVariants.all { variant ->
         doLast {
             new File(staged.get().asFile, 'game-assets').mkdirs()
             if (variant.flavorName == 'dokiDoki') {
-                def prefix = new File(rootProject.projectDir, "build/vcpkg-python/${vcpkgTriplet}")
-                def stdlibs = fileTree(new File(prefix, 'lib')).matching { include 'python3.*/**' }.files
-                if (stdlibs.empty) throw new GradleException('Android CPython standard library is missing.')
-                copy {
-                    from new File(prefix, 'lib')
-                    include 'python3.*/**'
-                    into new File(staged.get().asFile, 'python/lib')
+                def foundStdlib = false
+                abis.each { abi ->
+                    def triplet = abi == 'arm64-v8a' ? 'arm64-android' : (abi == 'x86_64' ? 'x64-android' : null)
+                    if (triplet != null) {
+                        def prefix = new File(rootProject.projectDir, "build/vcpkg-python/${abi}/${triplet}")
+                        def libraryRoot = new File(prefix, variant.buildType.name == 'debug' ? 'debug/lib' : 'lib')
+                        def stdlibs = fileTree(libraryRoot).matching { include 'python3.*/**' }.files
+                        if (!stdlibs.empty) {
+                            foundStdlib = true
+                            copy {
+                                from libraryRoot
+                                include 'python3.*/**'
+                                into new File(staged.get().asFile, 'python/lib')
+                            }
+                        }
+                    }
+                }
+                if (!foundStdlib) {
+                    throw new GradleException('Android CPython standard library is missing for the selected ABIs.')
                 }
             }
             def digest = MessageDigest.getInstance('SHA-256')

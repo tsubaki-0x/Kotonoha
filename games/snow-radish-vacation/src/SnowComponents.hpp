@@ -33,7 +33,7 @@ public:
   SnowTitleMenu(Kotonoha::Engine &engine, SnowSession &session, SnowLinks &links);
 
   bool isVisible() const override;
-  void onEvent(Kotonoha::EventRef event) override;
+  bool onEvent(Kotonoha::EventRef event) override;
   void update() override;
 
 protected:
@@ -56,7 +56,7 @@ private:
   SnowSession &session_;
 };
 
-// WAKUH message window: instant pages, voice replay / auto buttons, auto mode and Ctrl skip.
+// WAKUH message window: instant pages, voice replay / auto mode and Ctrl skip.
 class SnowTextBox : public Kotonoha::VNTextBox {
 public:
   bool designSpace() const override { return false; }
@@ -64,6 +64,9 @@ public:
 
   bool handleEvent(Kotonoha::EventRef event) override;
   void update() override;
+  // Stops held/pinned read-skip, e.g. when a controller menu opens or the
+  // controller is disconnected.
+  void CancelSkip();
 
 protected:
   double charactersPerSecond() const override { return 1e9; }
@@ -82,6 +85,10 @@ private:
   SnowLinks &links_;
   std::string pageKey_;
   Uint64 doneAt_ = 0;
+  // SDL_GetModState() never sees gamepad-mapped LCTRL, so track the synthetic
+  // hold explicitly; skipPinned_ is the West/S toggle.
+  bool ctrlHeld_ = false;
+  bool skipPinned_ = false;
 };
 
 // Shared choice behaviour: options come from the script, picking one advances it.
@@ -90,7 +97,7 @@ public:
   bool designSpace() const override { return false; }
   SnowChoice(Kotonoha::Engine &engine, SnowSession &session, SnowLinks &links, SnowSession::ChoiceKind kind);
   void update() override;
-  void onEvent(Kotonoha::EventRef event) override;
+  bool onEvent(Kotonoha::EventRef event) override;
 
 protected:
   SDL_FRect listArea() const override { return {0, 0, float(kGameWidth), float(kGameHeight)}; }
@@ -113,6 +120,7 @@ protected:
 private:
   SnowSession::ChoiceKind kind_;
   std::vector<std::string> shown_;
+  int focus_ = -1;
 };
 
 // Text choices: SELH strips centred on the scene; a-i focus, Up/Down, Enter.
@@ -157,7 +165,7 @@ class SnowPauseMenu : public Kotonoha::InGameMenu {
 public:
   bool designSpace() const override { return false; }
   SnowPauseMenu(Kotonoha::Engine &engine, SnowSession &session, SnowLinks &links);
-  void onEvent(Kotonoha::EventRef event) override;
+  bool onEvent(Kotonoha::EventRef event) override;
   void update() override;
 
 protected:
@@ -177,7 +185,7 @@ class SnowBacklog : public Kotonoha::VNBacklog {
 public:
   bool designSpace() const override { return false; }
   SnowBacklog(Kotonoha::Engine &engine, SnowSession &session) : VNBacklog(engine), session_(session) {}
-  void onEvent(Kotonoha::EventRef event) override;
+  bool onEvent(Kotonoha::EventRef event) override;
 
 protected:
   void renderFrame(Kotonoha::RendererRef renderer) override;

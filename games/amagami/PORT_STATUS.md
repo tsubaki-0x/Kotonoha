@@ -1,14 +1,16 @@
 # Amagami — PS2 Japan (SLPS_259.18)
 
-**Playable prologue on Kotonoha; the full game is not yet ported.**
+**Playable prologue and an initial event map on Kotonoha; the full game is not yet ported.**
 
 The original `n0dea_ev01A` event can be played from beginning to end. Its three
 answers execute distinct original blocks and converge back into the story.
-The calendar, event unlocks, conversation mode, affection system, later routes
-and endings are not implemented as a complete game flow. At the end of the
-prologue the application returns to its title when the player presses Enter.
-Other events can be inspected or started for development; unsupported calls
-stop with the method and bytecode position instead of silently inventing a route.
+New Game initializes the original EventNode/NodeTable data and continues into
+an event map after the prologue. This is development functionality: the full
+GameMain calendar flow, conversation mode, later routes and endings still need
+integration and comparison against the PS2 game. A complete 1:1 playthrough
+has not been validated. Individual events can also be started for development;
+unsupported calls stop with the method and bytecode position instead of
+silently inventing a route.
 
 ## Run
 
@@ -32,8 +34,9 @@ the selected ISO and engine settings. `AMAGAMI_DISC` is also supported. The disc
 is read in place; no retail data is packaged or copied into the repository.
 
 Controls: Enter/Space/left click completes the text reveal, then advances; arrows + Enter or 1–3 selects answers;
-Escape opens pause; F5/F9 saves/loads the quick slot; PageUp toggles the last four
-history entries. The quick save is in the SDL preference directory
+Escape opens pause; F5/F9 saves/loads the quick slot; B/PageUp opens the full
+scrollable history. Up/Down, the mouse wheel and controller directions move the
+selected historical page and scroll with it. Circle/East replays its voice. The quick save is in the SDL preference directory
 `Kotonoha/amagami/quick-save.txt` and uses deterministic input replay.
 
 Development entry points:
@@ -92,8 +95,9 @@ looked up through the engine translation dictionary before display.
   original interpreter (inequality/equality respectively).
 - Character body names use uppercase pose and lowercase costume. The original
   executable table at VA `0x1b7a70` supplies body/face prefixes and face aliases.
-  Fragments are composed at integer coordinates before scaling the whole actor,
-  avoiding seams in hair and clothing. Separate eye/mouth expressions, blinking,
+  Body fragments are alpha-composited at integer coordinates into a cached
+  cropped texture. Transparent overlap preserves earlier fragments instead of
+  cutting holes through the face, hair or clothing. Separate eye/mouth expressions, blinking,
   audio-driven mouth frames, inline F/E/M/P cues, costume/pose crossfades,
   actor zoom, scripted nods and position/scale oscillation are supported.
 - Cold breath uses the original three `sysgraph/breath1..3` textures and the
@@ -102,8 +106,9 @@ looked up through the engine translation dictionary before display.
   Inline W frame waits also pause the text reveal.
 - Backgrounds (including rotation), interface textures, assembled characters
   and breath particles draw through the shared engine upscaling pipeline.
-  The composed character cache updates only when its pixel content changes,
-  keeping motion/fade-only frames from rerunning the upscaler.
+  Static body textures and individual facial tiles each retain their cached
+  upscale. Blinks, mouth frames, motion and fades reuse those textures instead
+  of upscaling a reconstructed actor every frame.
 - Engine `Kotonoha::decryptCriAudio` / `decodeCriAudio` support CRI type-8
   AHX and ADX before FFmpeg decoding. The disc provider supplies Amagami's
   key parameters; engine code contains no game key. Decoding trims to the
@@ -128,7 +133,8 @@ remain incomplete. The pause/backlog screens remain simplified.
 Replay saves restore dialogue/decision/costume state and restart music; they do
 not preserve presentation-thread phase or the exact in-flight transition.
 Gallery `setAlbum` has no gallery implementation. The classical MIDI soundtrack
-mode, full scrollable backlog and controller rumble remain unimplemented.
+mode and controller rumble remain unimplemented. Campaign-wide replay saves
+still need a complete journal; current saves replay the selected scenario.
 Coverage of the prologue does not establish coverage of calendar/later routes.
 
 ## Verification
@@ -193,3 +199,114 @@ while the current `AssetOverlay` constructor returns without mounting it. Neithe
 that constructor nor that test was changed by this port work. Amagami's seven
 checks and the Infrastructure, ComponentHooks, Presentation and ZNT Formats
 checks pass independently.
+
+## Fidelity fixes and opcode audit (2026-11-03)
+
+- Event pictures resolve through `Source::eventPicture` using the original
+  `epi/e%1x_%02d%c0.tm2` convention (ELF format at VA `0x28e4d8`).
+  The reported `stand/e6_24a.tm2` failure now resolves `epi/e6_24a0.tm2`.
+  `Source::graphic` owns archive lookup for both existence checks and reads.
+- Native Boolean AND/OR (`0x0c` / `0x0d`) are implemented and tested against
+  all Boolean combinations. REA handlers: `0x11f1f0` and `0x11f2d8`.
+- `AmagamiInspect DISC --opcodes` scans all 2,308 scenarios and 222 system
+  classes, preserving instruction boundaries. The supplied disc contains 51
+  opcode values across 1,592,565 instructions. The CSV includes support status,
+  occurrence counts and the first class/method/offset for each opcode.
+- Exception operations `0x2a`, `0x68`, `0x69`, `0x6a`, `0x6b` are now
+  implemented: exception slot, clear, relative handler registration, handler
+  removal and throw. Handlers restore the stack and unwind calls, with a
+  thread-wide maximum of 30. Script array/arithmetic faults can enter catch;
+  unsupported native methods and malformed bytecode still fail explicitly.
+  This expands bytecode support, not the implemented calendar/conversation flow.
+- Regression checks decode the event picture and verify opaque face pixels
+  at overlapping mesh boundaries, in addition to the playable prologue checks.
+
+## Portuguese draft and native engine controls
+
+- [Translation files](../../translations/amagami/README.md) cover all 411
+  unique prologue entries plus partial drafts in other scenes and shared labels. They are generated
+  drafts, not a translation of the full game or a complete linguistic review.
+- `translationSources()` exports all 2,308 native scenarios (84,414 entries)
+  through the shared engine export path; previously `--dump-translation` failed
+  because only the live-editor route methods were implemented.
+- Native speaker labels, pause/title choices and event-end text honor the shared
+  dictionary. Longer translated dialogue uses cached line/font measurements to
+  fit the native window; source line breaks stay fixed during text reveal.
+- Runtime hooks let MCP start, advance and step Amagami without pretending it
+  uses the generic VNManager timeline. MCP reads the registered textbox/choice
+  instances and exposes `runtime_diagnostic`. Agent pause freezes native clocks
+  and audio. Save replay still does not restore exact animation/audio phase.
+- `Amagami.Translation` loads the shipped Portuguese dictionary in the actual
+  engine and exercises dialogue, choices, live edits and the native clock.
+
+## Integrated VM and interface follow-up
+
+- Scalar receivers dispatch through their SCF types (`Integer`, `Float`,
+  `True`/`False`, etc.). `isKindOf` follows the original inheritance tables;
+  `getClass` returns a class value. This fixes `.isKindOf/1` in
+  `K2X_Script_.actTime:36`.
+- `actStart` executes the original bytecode and initializes the animation
+  multiplier to `1.0`; acknowledging it without updating state made camera
+  movement collapse to zero. Real `actTime` and `laugh` bytecode, including
+  the `n0_Action` movement coroutine, have regression coverage.
+- `checkClear` remains a diagnostic-only no-op in the standalone scenario
+  runner: it prints campaign completion statistics whose EventNode totals are
+  not initialized here. Campaign/map initialization is still incomplete.
+- ItemView `openItem`/`closeItem` now render the original small item texture and
+  `baseitem` frame with the script's 12-frame scale/alpha transitions.
+  `showItem`/`hideItem` preserve the item and animate visibility. The original
+  scenario `n3nka_st01A` exercises item 220 in a regression check.
+- Item textures use the engine texture upscaling path and natural dimensions;
+  they are independent of background camera transforms. Broader SD/chibi
+  presentation and the unused timing-minigame prototype are not validated.
+- The pause menu opens Kotonoha settings. Translated title/choice headings,
+  start prompt and backlog use the engine dictionary. Global strings export
+  under `nodo`; the live editor lists those sources even without a dictionary.
+- `ja.json` and `pt-BR.json` have matching corpus keys for all scenarios and
+  original system-class strings. Most values outside the covered draft are
+  still Japanese. The shared UI records global strings it measures/renders;
+  ImGui debug labels are not fully localized.
+- Root-level OpenCode dumps, logs and translation experiments were removed
+  from the project root; recoverable artifacts live in ignored
+  `.research/amagami/opencode-recovery/`. Parallel legacy translation workers
+  were stopped before moving their intermediate files.
+
+Validation of the integrated follow-up: `Amagami.Session`, `Amagami.Engine`,
+`Amagami.Vm` and `Amagami.Translation` passed (4/4). The embedded MCP client
+saved at the prologue choice, restored the save three times, and verified that
+answers 0, 1 and 2 reached distinct original blocks with Portuguese dialogue
+and no runtime diagnostic. Shared Presentation, DebugTranslation and MCP
+regressions also passed before the final Amagami-only dispatch change.
+
+Auxiliary review used the instructions in `.opencode/agents/gemma4-26b.md`
+against the local Gemma endpoint. Suggested changes were checked against the
+SCF class tables: `True`/`False` and class-object reflection were preserved.
+The Jetson review timed out; its analysis is unverified. The OpenCode CLI
+reported a provider routing error for the configured local Gemma model, so
+that review was performed directly through Ollama.
+
+
+## Interface and input follow-up — 4 November 2026
+
+Translated title text is drawn directly over the original title artwork. The
+start prompt uses dark lettering with the original blinking alpha; translated
+headings and unselected labels have no added rectangular backgrounds. The
+original selection cursor remains visible.
+
+The history selection scrolls upward on each Up/wheel/controller step, including
+when the selected page was already visible. Moving back down follows newer
+pages. Voice replay remains independent of selection and never triggers after
+a touch drag. Inactive history/map components leave input available to other
+scenes. Shared Kotonoha name/save dialogs take priority over Amagami input and
+receive their original controller events.
+
+Comparison against the original SCF confirms a remaining history difference:
+`LogList.moveCursorU` first moves the item inside `LogPage`; `ScrollList` scrolls
+at the page boundary and animates for six frames. The current component follows
+dialogue entries directly. Original page grouping and that exact transition are
+not yet reproduced.
+
+These changes improve presentation and input fidelity; they do not establish
+pixel-perfect rendering or complete campaign compatibility. Platform build
+commands and generated artifact locations are in
+[BUILD_VALIDATION.md](../../docs/BUILD_VALIDATION.md).

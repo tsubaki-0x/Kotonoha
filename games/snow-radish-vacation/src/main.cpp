@@ -60,7 +60,7 @@ struct App {
 
 std::string DefaultDirectory() {
   for (const char *script : {"SCRIPT.DAT", "script.dat"})
-    if (auto found = Kotonoha::FileResolver::findGameAsset({}, script))
+    if (auto found = Kotonoha::FileResolver::findGameAsset("snow-radish-vacation", script))
       return found->parent_path().string();
 
 #ifdef _WIN32

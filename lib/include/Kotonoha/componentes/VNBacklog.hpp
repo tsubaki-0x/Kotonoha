@@ -1,4 +1,5 @@
 #pragma once
+#include <Kotonoha/componentes/TouchActivation.hpp>
 
 #include <Kotonoha/core/Clock.hpp>
 #include <Kotonoha/core/Engine.hpp>
@@ -20,6 +21,7 @@ struct DialogueEntry {
 // replace the screen (open/close/isVisible) or only its drawing.
 class VNBacklog : public Scene {
 protected:
+  TouchActivation touchActivation;
   std::vector<DialogueEntry> entries;
   bool isOpen = false;
   bool scrollToBottom = false;
@@ -44,6 +46,7 @@ protected:
 
 public:
   bool designSpace() const override { return true; }
+  RenderLayer renderLayer() const override { return RenderLayer::Overlay; }
   explicit VNBacklog(Engine &engineRef);
 
   virtual void addEntry(const std::string &speaker, const std::string &text);
@@ -63,7 +66,7 @@ public:
   }
   const std::vector<DialogueEntry> &getEntries() const { return entries; }
 
-  virtual void open() {
+  virtual void open() { touchActivation.reset();
     isOpen = true;
     scrollToBottom = true;
     isDragging = false;
@@ -83,7 +86,7 @@ public:
   bool capturesInput() const override { return isVisible(); }
   bool pausesStory() const override { return isVisible(); }
 
-  void onEvent(EventRef event) override;
+  bool onEvent(EventRef event) override;
   void update() override;
   void render(RendererRef renderer, float scale) override;
 };

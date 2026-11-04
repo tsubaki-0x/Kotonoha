@@ -14,6 +14,8 @@ void apply(float scale = 1.0f);
 ImVec4 accent();
 ImVec4 success();
 ImVec4 warning();
+ImVec4 error();
+ImVec4 muted();
 void statusText(const char *text, bool error);
 bool primaryButton(const char *label, ImVec2 size = {});
 
@@ -28,7 +30,7 @@ public:
   ~ShaderFilePicker() = default;
   void browse(SDL_Window *window);
   void poll(UpscaleSettings &settings);
-  void draw(SDL_Window *window, UpscaleSettings &settings);
+  bool draw(SDL_Window *window, UpscaleSettings &settings);
   const std::string &errorMessage() const { return error; }
 };
 

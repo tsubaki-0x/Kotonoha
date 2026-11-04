@@ -110,6 +110,7 @@ void testSettings(const std::filesystem::path &directory) {
           "A drive letter is not a shader separator");
   const auto file = (directory / "settings.json").string();
   EngineSettings settings;
+  require(settings.vsync, "New game settings enable VSync by default");
   settings.width = 1600;
   settings.height = 900;
   settings.display = 2;
@@ -118,10 +119,11 @@ void testSettings(const std::filesystem::path &directory) {
   settings.fullscreenHeight = 1080;
   settings.refreshRate = 59.94f;
   settings.vsync = true;
+  settings.swapControllerAB = true;
+  settings.enableForcedSubtitles = false;
   settings.masterVolume = 0.4f;
   settings.masterMuted = true;
   settings.debugUIScale = 1.75f;
-  settings.renderScale = 0.75f;
   settings.resizable = false;
   settings.renderer = "opengl";
   settings.upscaling = {UpscaleBackend::MPV, UpscalePreset::ArtCNNDenoise, 1.5f,
@@ -139,11 +141,14 @@ void testSettings(const std::filesystem::path &directory) {
               read.mode == WindowMode::Exclusive &&
               read.fullscreenWidth == 1920 && read.fullscreenHeight == 1080 &&
               std::abs(read.refreshRate - 59.94f) < 0.001f && read.vsync &&
-              !read.resizable && read.renderer == "opengl" &&
+              read.swapControllerAB && !read.enableForcedSubtitles &&
+              !read.resizable &&
+              read.renderer == "opengl" &&
               read.upscaling.backend == UpscaleBackend::MPV &&
               read.upscaling.preset == UpscalePreset::ArtCNNDenoise &&
               read.upscaling.factor == 1.5f &&
-              read.upscaling.shaderFiles == "custom.glsl" &&
+              UpscaleShaderFiles(read.upscaling.shaderFiles) ==
+                  std::vector<std::string>{"custom.glsl"} &&
               read.logPriority == SDL_LOG_PRIORITY_DEBUG &&
               read.masterVolume == 0.4f && read.masterMuted &&
               read.debugUIScale == 1.75f &&
@@ -153,30 +158,55 @@ void testSettings(const std::filesystem::path &directory) {
               read.vnTextColor.a == 187 &&
               read.channelVolumes == settings.channelVolumes,
           "Every settings field survives persistence");
-  require(std::abs(read.renderScale - 0.75f) < 0.0001f,
-          "Render scale survives persistence");
+  for (auto preset : UpscalePresets()) {
+    auto profile = settings;
+    profile.upscaling.preset = preset;
+    profile.upscaling.shaderFiles.clear();
+    profile.save(file);
+    require(EngineSettings::load(file).upscaling.preset == preset,
+            "All shader profiles persist across settings reloads");
+  }
+  settings.save(file);
   settings.width = 0;
   rejects([&] { settings.save(file); }, "Validate before overwriting settings");
   require(EngineSettings::load(file).width == 1600,
           "Invalid save leaves file intact");
-  for (const char *invalid :
-       {"[]", "{", "{}garbage", "{\"width\": \"1280\"}",
-        "{\"width\":9223372036854775807}", "{\"mode\":99}", "{\"upscaler\":99}",
-        "{\"preset\":-1}", "{\"version\":2}", "{\"vsync\":1}",
-        "{\"factor\":0.5}", "{\"factor\":1e300}", "{\"refreshRate\":-1}",
-        "{\"logPriority\":0}", "{\"fullscreenWidth\":1920}",
-        "{\"renderer\":\"x\\u0000y\"}", "{\"masterVolume\":-0.1}",
-        "{\"masterVolume\":1.1}", "{\"masterVolume\":1e300}",
-        "{\"masterMuted\":1}", "{\"debugUIScale\":0.9}",
-        "{\"debugUIScale\":3.1}", "{\"renderScale\":0.24}",
-        "{\"renderScale\":1.01}", "{\"renderScale\":1e300}"}) {
+  for (const char *invalid : {"[]",
+                              "{",
+                              "{}garbage",
+                              "{\"width\": \"1280\"}",
+                              "{\"width\":9223372036854775807}",
+                              "{\"mode\":99}",
+                              "{\"upscaler\":99}",
+                              "{\"preset\":-1}",
+                              "{\"version\":2}",
+                              "{\"vsync\":1}",
+                              "{\"factor\":0.5}",
+                              "{\"factor\":1e300}",
+                              "{\"refreshRate\":-1}",
+                              "{\"logPriority\":0}",
+                              "{\"fullscreenWidth\":1920}",
+                              "{\"renderer\":\"x\\u0000y\"}",
+                              "{\"masterVolume\":-0.1}",
+                              "{\"masterVolume\":1.1}",
+                              "{\"masterVolume\":1e300}",
+                              "{\"masterMuted\":1}",
+                              "{\"debugUIScale\":0.9}",
+                              "{\"debugUIScale\":3.1}"}) {
     writeTextFileAtomically(file, invalid);
     rejects([&] { EngineSettings::load(file); },
             "Reject invalid settings JSON/value");
   }
   writeTextFileAtomically(file, "{}");
-  require(EngineSettings::load(file).width == 1280,
-          "Partial settings use defaults");
+  require(EngineSettings::load(file).width == 1280 &&
+              EngineSettings::load(file).vsync,
+          "Partial settings use defaults including enabled VSync");
+  writeTextFileAtomically(file, "{\"vsync\":false}");
+  auto vsyncDisabled = EngineSettings::load(file);
+  require(!vsyncDisabled.vsync, "Explicitly disabled VSync remains disabled");
+  vsyncDisabled.save(file);
+  require(!EngineSettings::load(file).vsync,
+          "Disabled VSync survives saving and reloading");
   rejects([&] { EngineSettings::load((directory / "missing.json").string()); },
           "Explicit missing settings load reports an error");
   for (float invalid : {0.0f, 4.1f, std::numeric_limits<float>::quiet_NaN(),
@@ -233,14 +263,25 @@ SDL_Event key(SDL_Keycode code) {
 class EventRuntime : public Runtime {
 public:
   int novelEvents = 0, screenEvents = 0;
-  bool inspectRenderScale = false;
-  bool novelTargetActive = false;
-  bool screenTargetNative = false;
-  bool screenSawNovelComposite = false;
-  int novelTargetWidth = 0, novelTargetHeight = 0;
+  bool touch = false, held = false;
+  int backCalls = 0;
+  std::function<bool(EventRef)> screenHandler;
+  bool handleBackAction() override {
+    ++backCalls;
+    return true;
+  }
+  int touchDowns = 0, touchUps = 0;
+  int controllerButtons = 0;
+  Uint8 lastControllerButton = 0;
+  bool continuousTouch() const override { return touch; }
   EventRuntime() : Runtime("Infrastructure tests", "1", "org.kotonoha.infra") {}
-  void onEvent(EventRef event) override {
+  bool onEvent(EventRef event) override {
     ++novelEvents;
+    if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN ||
+        event.type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
+      ++controllerButtons;
+      lastControllerButton = event.gbutton.button;
+    }
     if ((event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
          event.type == SDL_EVENT_MOUSE_BUTTON_UP) &&
         event.button.which == SDL_TOUCH_MOUSEID) {
@@ -249,82 +290,230 @@ public:
         ++touchDowns;
       else
         ++touchUps;
+      return true;
     }
+    return false;
   }
   bool onScreenEvent(EventRef event) override {
     ++screenEvents;
     return screenHandler ? screenHandler(event) : false;
   }
-  void renderBackground(RendererRef renderer, float scale) override {
-    if (!inspectRenderScale) {
-      Runtime::renderBackground(renderer, scale);
-      return;
-    }
-    auto *target = SDL_GetRenderTarget(&renderer);
-    novelTargetActive = target != nullptr;
-    novelTargetWidth = novelTargetHeight = 0;
-    if (target) {
-      float width = 0, height = 0;
-      require(SDL_GetTextureSize(target, &width, &height),
-              "Read reduced Novel target size");
-      novelTargetWidth = static_cast<int>(std::lround(width));
-      novelTargetHeight = static_cast<int>(std::lround(height));
-    }
-    require(SDL_SetRenderDrawColor(&renderer, 211, 37, 19, 255) &&
-                SDL_RenderClear(&renderer),
-            "Paint reduced Novel target");
-  }
-  void renderScreen(RendererRef renderer, float scale) override {
-    if (!inspectRenderScale) {
-      Runtime::renderScreen(renderer, scale);
-      return;
-    }
-    screenTargetNative = SDL_GetRenderTarget(&renderer) == nullptr;
-    int width = 0, height = 0;
-    require(SDL_GetCurrentRenderOutputSize(&renderer, &width, &height) && width > 0 &&
-                height > 0,
-            "Read native Screen output size");
-    SDL_Rect pixel{width / 2, height / 2, 1, 1};
-    SurfacePtr image{SDL_RenderReadPixels(&renderer, &pixel)};
-    require(bool(image), "Read composed Novel pixel");
-    Uint8 r = 0, g = 0, b = 0, a = 0;
-    require(SDL_ReadSurfacePixel(image.get(), 0, 0, &r, &g, &b, &a),
-            "Decode composed Novel pixel");
-    screenSawNovelComposite = r > 180 && g < 80 && b < 60;
-  }
 };
 
-void testRenderScale(Engine &engine, EventRuntime &runtime) {
-  engine.GetTimeline().stop();
-  auto settings = engine.GetSettings();
-  settings.renderScale = 0.5f;
-  engine.applySettings(settings, false);
+void testControllerNavigation(Engine &engine, EventRuntime &runtime) {
+  SDL_Event axis{};
+  axis.type = SDL_EVENT_GAMEPAD_AXIS_MOTION;
+  axis.gaxis.which = 999;
+  axis.gaxis.axis = SDL_GAMEPAD_AXIS_LEFTY;
+  axis.gaxis.value = 24000;
+  const int before = runtime.controllerButtons;
+  engine.Event(&axis);
+  require(
+      runtime.controllerButtons == before + 1 &&
+          runtime.lastControllerButton == SDL_GAMEPAD_BUTTON_DPAD_DOWN,
+      "Engine routes left-stick movement through the normal controller path");
+  axis.gaxis.value = 14000;
+  engine.Event(&axis);
+  require(runtime.controllerButtons == before + 1,
+          "Analog jitter does not repeat menu navigation");
+  axis.gaxis.value = 0;
+  engine.Event(&axis);
+  require(runtime.controllerButtons == before + 2,
+          "Engine delivers stick release on returning to the dead zone");
+  engine.openSettings();
+  SDL_Event cancel{};
+  cancel.type = SDL_EVENT_GAMEPAD_BUTTON_DOWN;
+  cancel.gbutton.button = SDL_GAMEPAD_BUTTON_SOUTH;
+  cancel.gbutton.down = true;
+  const int novel = runtime.novelEvents;
+  engine.Event(&cancel);
+  require(!engine.GetSettingsMenu().isOpen() && runtime.novelEvents == novel,
+          "Controller cancels engine settings without reaching the story");
+  const auto original = engine.GetSettings();
+  auto swapped = original;
+  swapped.swapControllerAB = true;
+  engine.applySettings(swapped, false);
+  SDL_Event physicalSouth{};
+  physicalSouth.type = SDL_EVENT_GAMEPAD_BUTTON_DOWN;
+  physicalSouth.gbutton.button = SDL_GAMEPAD_BUTTON_SOUTH;
+  physicalSouth.gbutton.down = true;
+  engine.Event(&physicalSouth);
+  require(runtime.lastControllerButton == SDL_GAMEPAD_BUTTON_EAST,
+          "Engine applies the A/B swap before dispatching to a runtime");
+  physicalSouth.type = SDL_EVENT_GAMEPAD_BUTTON_UP;
+  physicalSouth.gbutton.down = false;
+  engine.Event(&physicalSouth);
+  engine.applySettings(original, false);
+}
 
-  SDL_FRect presentation{};
-  require(SDL_GetRenderLogicalPresentationRect(&engine.GetRenderer(), &presentation),
-          "Read native Novel presentation");
-  const int expectedWidth =
-      std::max(1, static_cast<int>(std::lround(presentation.w * 0.5f)));
-  const int expectedHeight =
-      std::max(1, static_cast<int>(std::lround(presentation.h * 0.5f)));
+void testModalInputRouting(Engine &engine) {
+  struct RoutingRuntime : Runtime {
+    RoutingRuntime() : Runtime("Routing", "1", "org.kotonoha.routing") {
+      SetState(GameState::Gameplay);
+    }
+    void add(Scene &scene) { gameplayScenes.push_back(&scene); }
+  } runtime;
+  struct CountingScene : Scene {
+    int calls = 0;
+    bool modal = false, consume = false;
+    CountingScene(Engine &engine) : Scene(engine) {}
+    bool capturesInput() const override { return modal; }
+    bool onEvent(EventRef) override {
+      ++calls;
+      return consume;
+    }
+  } story(engine), modal(engine);
+  modal.modal = true;
+  runtime.add(story);
+  runtime.add(modal);
+  require(
+      runtime.onEvent(key(SDLK_F7)) && modal.calls == 1 && story.calls == 0,
+      "An unbound modal event is delivered once and never reaches the story");
+  modal.consume = true;
+  require(runtime.onEvent(key(SDLK_RETURN)) && modal.calls == 2 &&
+              story.calls == 0,
+          "A consumed modal confirmation cannot advance the underlying story");
+  modal.modal = false;
+  modal.consume = false;
+  story.consume = true;
+  require(runtime.onEvent(key(SDLK_RETURN)) && modal.calls == 3 &&
+              story.calls == 1,
+          "Non-modal scenes pass unbound input to the next scene exactly once");
+}
 
-  runtime.inspectRenderScale = true;
-  require(engine.Iterate() == SDL_APP_CONTINUE, "Render scaled Novel frame");
-  require(runtime.novelTargetActive && runtime.screenTargetNative &&
-              runtime.screenSawNovelComposite &&
-              runtime.novelTargetWidth == expectedWidth &&
-              runtime.novelTargetHeight == expectedHeight,
-          "Render scale reduces only Novel and composes before native Screen UI");
+void testContinuousTouch(Engine &engine, EventRuntime &runtime) {
+  runtime.touch = true;
+  SDL_Event finger{};
+  finger.type = SDL_EVENT_FINGER_DOWN;
+  finger.tfinger.touchID = 7;
+  finger.tfinger.fingerID = 9;
+  finger.tfinger.x = .5f;
+  finger.tfinger.y = .5f;
+  engine.Event(&finger);
+  require(runtime.held && runtime.touchDowns == 1 && runtime.touchUps == 0,
+          "Native touch exposes held pointer state before the release");
+  engine.Iterate();
+  require(runtime.held, "A native script can poll touch-down on its own frame");
+  finger.type = SDL_EVENT_FINGER_UP;
+  engine.Event(&finger);
+  require(!runtime.held && runtime.touchDowns == 1 && runtime.touchUps == 1,
+          "Native touch releases once without an additional synthesized tap");
+  finger.type = SDL_EVENT_FINGER_DOWN;
+  engine.Event(&finger);
+  SDL_Event lost{};
+  lost.type = SDL_EVENT_WINDOW_FOCUS_LOST;
+  engine.Event(&lost);
+  require(!runtime.held,
+          "Focus loss releases a held native touch outside clickable controls");
+  finger.type = SDL_EVENT_FINGER_DOWN;
+  engine.Event(&finger);
+  SDL_Event swipe = finger;
+  swipe.type = SDL_EVENT_FINGER_MOTION;
+  swipe.tfinger.y = .3f;
+  engine.Event(&swipe);
+  require(!runtime.held,
+          "A navigation swipe cancels the underlying pointer press");
+  swipe.type = SDL_EVENT_FINGER_UP;
+  engine.Event(&swipe);
+  engine.Event(&finger);
+  finger.tfinger.fingerID = 10;
+  engine.Event(&finger);
+  require(!runtime.held,
+          "A second finger cancels the pending pointer activation");
+  finger.type = SDL_EVENT_FINGER_UP;
+  engine.Event(&finger);
+  finger.tfinger.fingerID = 9;
+  engine.Event(&finger);
+  require(!runtime.held, "Multitouch release cannot generate a fresh click");
+  runtime.touch = false;
+  runtime.SetState(GameState::Gameplay);
+  const int before = runtime.backCalls;
+  runtime.screenHandler = [&](EventRef event) {
+    return BackAction(engine, event);
+  };
+  auto back = key(SDLK_ESCAPE);
+  engine.Event(&back);
+  require(
+      runtime.backCalls == before,
+      "Back consumed by screen UI must not be dispatched again to navigation");
+  runtime.screenHandler = {};
+}
 
-  runtime.novelTargetActive = false;
-  runtime.screenTargetNative = false;
-  runtime.screenSawNovelComposite = false;
-  settings.renderScale = 1.0f;
-  engine.applySettings(settings, false);
-  require(engine.Iterate() == SDL_APP_CONTINUE && !runtime.novelTargetActive &&
-              runtime.screenTargetNative && runtime.screenSawNovelComposite,
-          "Native render scale bypasses the Novel intermediate target");
-  runtime.inspectRenderScale = false;
+void testUnchangedWindowGeometry(Engine &engine) {
+  const auto original = engine.GetSettings();
+  int previousWidth = 0, previousHeight = 0;
+  SDL_GetWindowSize(&engine.GetWindow(), &previousWidth, &previousHeight);
+  require(SDL_SetWindowSize(&engine.GetWindow(), 1000, 620),
+          "Set an external window size");
+  require(SDL_SetWindowPosition(&engine.GetWindow(), 35, 45),
+          "Set an external window position");
+  SDL_SyncWindow(&engine.GetWindow());
+  int x = 0, y = 0;
+  SDL_GetWindowPosition(&engine.GetWindow(), &x, &y);
+  auto edited = original;
+  edited.masterVolume = .42f;
+  edited.vnTextColorOverride = true;
+  edited.vnTextColor = {90, 180, 220, 255};
+  engine.applySettings(edited, false);
+  int width = 0, height = 0, afterX = 0, afterY = 0;
+  SDL_GetWindowSize(&engine.GetWindow(), &width, &height);
+  SDL_GetWindowPosition(&engine.GetWindow(), &afterX, &afterY);
+  require(
+      width == 1000 && height == 620 && x == afterX && y == afterY,
+      "Audio and appearance changes must not resize or reposition the window");
+  engine.applySettings(original, false);
+  SDL_SetWindowSize(&engine.GetWindow(), previousWidth, previousHeight);
+}
+
+void testTouchSettings(Engine &engine, EventRuntime &runtime) {
+  const auto original = engine.GetSettings();
+  engine.openSettings();
+  SDL_FingerID fingerId = 98;
+  auto touch = [&](Uint32 type, float x, float y) {
+    SDL_Event event{};
+    event.type = type;
+    event.tfinger.touchID = 97;
+    event.tfinger.fingerID = fingerId;
+    event.tfinger.x = x / 1280;
+    event.tfinger.y = y / 720;
+    if (type == SDL_EVENT_FINGER_UP)
+      ++fingerId;
+    event.tfinger.windowID = SDL_GetWindowID(&engine.GetWindow());
+    engine.Event(&event);
+  };
+  auto tap = [&](float x, float y) {
+    touch(SDL_EVENT_FINGER_DOWN, x, y);
+    touch(SDL_EVENT_FINGER_UP, x, y);
+  };
+  touch(SDL_EVENT_FINGER_DOWN, 10, 400);
+  touch(SDL_EVENT_FINGER_MOTION, 250, 400);
+  touch(SDL_EVENT_FINGER_UP, 250, 400);
+  require(!engine.GetSettingsMenu().isOpen(),
+          "Edge swipe closes settings without leaving a held pointer");
+  engine.openSettings();
+  tap(600, 105); // Audio tab.
+  touch(SDL_EVENT_FINGER_DOWN, 700, 172);
+  touch(SDL_EVENT_FINGER_MOTION, 945, 172);
+  touch(SDL_EVENT_FINGER_UP, 945, 172);
+  tap(755, 268); // BGM gain (first sorted channel).
+  tap(800, 105); // VN text tab (valid with and without the Input tab).
+  tap(500, 218); // Override colors.
+  tap(500, 266); // Dialogue color selector.
+  tap(500, 216); // Black, second option.
+  const int before = runtime.novelEvents;
+  tap(400, 646); // Apply.
+  require(!engine.GetSettingsMenu().isOpen(),
+          "Touch applies settings and closes the modal");
+  require(std::abs(engine.GetSettings().masterVolume - .75f) < .01f &&
+              std::abs(engine.GetAudio().channel("BGM")->getUserVolume() -
+                       .25f) < .01f,
+          "Finger drag changes master gain and finger tap sets channel gain");
+  require(engine.GetSettings().vnTextColorOverride &&
+              engine.GetSettings().vnTextColor.r == 0,
+          "Touch selects VN text colors through the shared selection box");
+  require(runtime.novelEvents == before,
+          "Closing settings with touch must not click through to the game");
+  engine.applySettings(original, false);
 }
 
 void testWindowAndMenu(Engine &engine, EventRuntime &runtime,
@@ -701,7 +890,11 @@ int main(int argc, char **argv) {
       testWindowAndMenu(engine, runtime, options.settingsPath);
       testKtrfRuntime(engine, temporary.path);
       testRenderState(engine);
-      testRenderScale(engine, runtime);
+      testControllerNavigation(engine, runtime);
+      testModalInputRouting(engine);
+      testContinuousTouch(engine, runtime);
+      testTouchSettings(engine, runtime);
+      testUnchangedWindowGeometry(engine);
     } else
       testNativeWindow(engine);
     const auto backend = argc == 1 ? UpscaleBackend::Linear

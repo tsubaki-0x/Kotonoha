@@ -1,4 +1,5 @@
 #include <Kotonoha/componentes/InGameMenu.hpp>
+#include <Kotonoha/componentes/ForcedSubtitleRenderer.hpp>
 #include <Kotonoha/componentes/SettingsMenu.hpp>
 #include <Kotonoha/componentes/VNBacklog.hpp>
 #include <Kotonoha/componentes/VNManager.hpp>
@@ -57,6 +58,7 @@ void Engine::debugJumpToNode(const std::string &id) {
       throw std::invalid_argument("Invalid script node ID");
     GetVNManagerRuntime(*this).debugJumpToNode(number);
   }
+  resetNodeClock();
 }
 
 void Engine::loadKtrf(const std::string &path) {
@@ -99,28 +101,49 @@ std::string EngineOptions::assetOverlayDirectory() const {
     if (!loaded.empty())
       return loaded;
   }
-  return {};
+  return findAssetOverlayDirectory().string();
 }
 SDLSession::SDLSession(const Runtime &runtime) {
   SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
   if (!SDL_SetAppMetadata(runtime.name.c_str(), runtime.version.c_str(),
                           runtime.identify.c_str()) ||
-      !SDL_Init(SDL_INIT_AUDIO | SDL_INIT_VIDEO | SDL_INIT_EVENTS))
+      !SDL_Init(SDL_INIT_AUDIO | SDL_INIT_VIDEO | SDL_INIT_EVENTS |
+                SDL_INIT_GAMEPAD))
     throw std::runtime_error(SDL_GetError());
+  int count = 0;
+  SDLMemoryPtr<SDL_JoystickID> ids{SDL_GetGamepads(&count)};
+  for (int i = 0; ids && i < count; ++i)
+    openGamepad(ids.get()[i]);
 }
-
-SDLSession::~SDLSession() { SDL_Quit(); }
+void SDLSession::openGamepad(SDL_JoystickID id) {
+  if (gamepads.count(id))
+    return;
+  GamepadPtr gamepad{SDL_OpenGamepad(id)};
+  if (gamepad)
+    gamepads.emplace(id, std::move(gamepad));
+  else
+    SDL_LogWarn(SDL_LOG_CATEGORY_INPUT, "Cannot open gamepad: %s",
+                SDL_GetError());
+}
+void SDLSession::deviceEvent(EventRef event) {
+  if (event.type == SDL_EVENT_GAMEPAD_ADDED)
+    openGamepad(event.gdevice.which);
+  else if (event.type == SDL_EVENT_GAMEPAD_REMOVED)
+    gamepads.erase(event.gdevice.which);
+  else if (event.type == SDL_EVENT_JOYSTICK_ADDED)
+    openGamepad(event.jdevice.which);
+  else if (event.type == SDL_EVENT_JOYSTICK_REMOVED)
+    gamepads.erase(event.jdevice.which);
+}
+SDLSession::~SDLSession() {
+  gamepads.clear();
+  SDL_Quit();
+}
 
 Engine::Engine(Runtime &run, EngineOptions options)
     : runtime(run), log(options.logPath), session(runtime),
       assets(options.assets ? std::move(options.assets)
-                            : std::make_shared<FileSystemAssetProvider>(
-#ifdef __ANDROID__
-                                  resourceDirectory()
-#else
-                                  std::filesystem::path{}
-#endif
-                                      )),
+                            : std::make_shared<FileSystemAssetProvider>()),
       settings(options.settings), settingsPath(options.settingsPath) {
   if (!options.subtitleStylePath.empty())
     subtitleStyle = AssStyle::load(options.subtitleStylePath);
@@ -189,10 +212,12 @@ Engine::Engine(Runtime &run, EngineOptions options)
     SDL_SetLogPriority(category, settings.logPriority);
   settingsMenu = std::make_unique<SettingsMenu>(*this);
   ui = std::make_unique<UI>(settings.fontPath);
+  ui->setTranslation(&translation);
   vnUI = std::make_unique<UI>(
       settings.vnFontPath.empty() ? settings.fontPath : settings.vnFontPath);
   audio.setUserVolumes(settings.channelVolumes);
   timeline = std::make_unique<TimelinePlayer>(*this);
+  forcedSubtitles = std::make_unique<ForcedSubtitleRenderer>(*this);
   debug = std::make_unique<DebugOverlay>(*this);
   configureRenderSpace(RenderSpace::Novel);
   runtime.init(*this);
@@ -375,9 +400,9 @@ void Engine::openSettings() {
 }
 
 bool Engine::isStoryPaused() const {
-  return agentPaused || runtime.isStoryPaused() ||
+  return agentPaused || runtime.hasPausingScene() ||
          (settingsMenu && settingsMenu->isOpen()) ||
-         (debug && debug->isVisible());
+         (debug && debug->pausesStory());
 }
 
 void Engine::setAgentPaused(bool value) {
@@ -391,16 +416,73 @@ void Engine::synchronizeTimeline() {
   frameClock.reset();
   timeline->setPaused(isStoryPaused());
   timeline->update(delta);
+  synchronizeNodeClock(delta);
+}
+
+std::string Engine::activeNode() {
+  if (runtime.GetState() != GameState::Gameplay)
+    return {};
+  auto custom = runtime.debugNode();
+  if (!custom.empty())
+    return custom;
+  const auto &manager = GetVNManagerRuntime(*this);
+  const int id = manager.getCurrentNodeId();
+  return id < 0 || manager.isFinished() ? std::string() : std::to_string(id);
+}
+
+bool Engine::usesTimedNodeClock() {
+  return runtime.debugNode().empty()
+             ? GetVNManagerRuntime(*this).getMode() == ScriptMode::Timed
+             : runtime.usesTimedNodeClock();
+}
+
+double Engine::activeNodeSeconds() {
+  const auto node = activeNode();
+  if (node.empty())
+    return 0;
+  if (usesTimedNodeClock() && !runtime.debugNode().empty()) {
+    if (auto seconds = runtime.debugNodeSeconds())
+      return *seconds;
+    throw std::logic_error("Timed native runtime has no node clock");
+  }
+  if (usesTimedNodeClock()) {
+    return timeline->seconds();
+  }
+  return node == clockNode ? nodeSeconds : 0;
+}
+
+void Engine::resetNodeClock() {
+  clockNode = activeNode();
+  nodeSeconds = 0;
+}
+
+void Engine::synchronizeNodeClock(double delta) {
+  const auto node = activeNode();
+  if (node != clockNode)
+    resetNodeClock();
+  else if (!node.empty() && !isStoryPaused())
+    nodeSeconds += delta;
 }
 
 void Engine::advanceTimeline(double seconds) {
   if (!std::isfinite(seconds) || seconds < 0 || seconds > 60)
     throw std::invalid_argument(
         "Timeline step must be between 0 and 60 seconds");
-  if (!agentPaused || runtime.isStoryPaused() || debug->isVisible() ||
-      settingsMenu->isOpen() || !timeline->isPlaying())
+  if (!agentPaused || runtime.hasPausingScene() || debug->pausesStory() ||
+      settingsMenu->isOpen())
     throw std::logic_error("Pause via MCP and close game/debug modals before "
                            "stepping an active timeline");
+  if (runtime.advanceStoryTime(seconds)) {
+    const auto node = activeNode();
+    if (node == clockNode)
+      nodeSeconds += seconds;
+    else
+      resetNodeClock();
+    frameClock.reset();
+    return;
+  }
+  if (!timeline->isPlaying())
+    throw std::logic_error("No active timeline to step");
   timeline->setPaused(false);
   agentPaused = false;
   try {
@@ -480,6 +562,24 @@ void Engine::configureRenderSpace(RenderSpace space) {
 SDL_AppResult Engine::Event(EventPtr event) {
   if (!event)
     return SDL_APP_CONTINUE;
+  // Keep the A/B preference at the outer edge so every component and runtime
+  // sees the same physical layout. Recursive navigation events only carry the
+  // D-pad, which the swap deliberately leaves untouched.
+  const SDL_Event normalized =
+      NormalizeControllerEvent(*event, settings.swapControllerAB);
+  event = &normalized;
+  session.deviceEvent(*event);
+  const auto navigation = controllerNavigation.process(*event);
+  if (event->type == SDL_EVENT_GAMEPAD_AXIS_MOTION &&
+      (event->gaxis.axis == SDL_GAMEPAD_AXIS_LEFTX ||
+       event->gaxis.axis == SDL_GAMEPAD_AXIS_LEFTY)) {
+    for (auto button : navigation) {
+      const auto result = Event(&button);
+      if (result != SDL_APP_CONTINUE)
+        return result;
+    }
+    return SDL_APP_CONTINUE;
+  }
   inputActions.process(*event);
   SDL_Event pointer{};
   const bool nativeTouch = runtime.continuousTouch() || settingsMenu->isOpen();
@@ -597,10 +697,10 @@ SDL_AppResult Engine::dispatchEvent(EventPtr event) {
     tap.button.down = true;
     tap.button.x = event->tfinger.x * w;
     tap.button.y = event->tfinger.y * h;
-    Event(&tap);
+    dispatchEvent(&tap);
     tap.type = SDL_EVENT_MOUSE_BUTTON_UP;
     tap.button.down = false;
-    Event(&tap);
+    dispatchEvent(&tap);
   }
   return SDL_APP_CONTINUE;
 }
@@ -614,6 +714,8 @@ SDL_AppResult Engine::Iterate() {
     return SDL_APP_SUCCESS;
   if (!runtime.devPauseRequested() || runtime.devConsumeStep()) runtime.update();
   else runtime.devIdle();
+  synchronizeNodeClock(0);
+  forcedSubtitles->updateForActiveNode();
   debug->update();
 
   // Clear the native output first so the letterbox outside the fitted Novel
@@ -668,7 +770,8 @@ SDL_AppResult Engine::Iterate() {
     timeline->renderSubtitles(*renderer);
   }
   runtime.render(*renderer, ui->pixelDensity());
-
+  runtime.renderScene(*forcedSubtitles, *renderer, ui->pixelDensity());
+  runtime.renderOverlay(*renderer, ui->pixelDensity());
   if (ownedNovel) {
     if (runtime.useOwnedNarrativeTarget() &&
         !visualTransition.compose(*renderer, *novelTarget,
@@ -686,7 +789,6 @@ SDL_AppResult Engine::Iterate() {
     if (!SDL_RenderTexture(renderer.get(), novelTarget.get(), nullptr, nullptr))
       throw std::runtime_error(SDL_GetError());
   }
-
   configureRenderSpace(RenderSpace::Screen);
   runtime.renderScreen(*renderer, ui->pixelDensity());
   if (settingsMenu->isOpen()) {

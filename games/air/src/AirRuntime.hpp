@@ -11,11 +11,11 @@ public:
   ~AirRuntime() override;
   void shutdown();
   bool continuousTouch() const override { return true; }
-  std::string diagnostic() const;
+  std::string diagnostic() const override;
   void initMenu(Kotonoha::Engine &) override;
   void initGameplay(Kotonoha::Engine &) override;
   void update() override;
-  void onEvent(Kotonoha::EventRef) override;
+  bool onEvent(Kotonoha::EventRef) override;
   void saveGame(const std::string &) override;
   void loadGame(const std::string &) override;
   Kotonoha::Translation::SourceTexts translationSources() const override;

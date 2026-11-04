@@ -1,4 +1,7 @@
 add_executable(KotonohaInfrastructureTests InfrastructureTests.cpp)
+add_executable(KotonohaDirectoryTests DirectoryTests.cpp)
+target_link_libraries(KotonohaDirectoryTests PRIVATE Kotonoha::Engine)
+add_test(NAME Kotonoha.Directories COMMAND KotonohaDirectoryTests)
 add_executable(KotonohaKtrfScriptTests KtrfScriptTests.cpp)
 target_link_libraries(KotonohaKtrfScriptTests PRIVATE Kotonoha::Engine)
 add_test(NAME Kotonoha.KtrfScript COMMAND KotonohaKtrfScriptTests)
@@ -79,6 +82,9 @@ endif()
 
 add_executable(KotonohaLauncherTests LauncherTests.cpp)
 target_link_libraries(KotonohaLauncherTests PRIVATE Kotonoha::Engine)
+kotonoha_copy_assets(KotonohaLauncherTests)
+target_compile_definitions(KotonohaLauncherTests PRIVATE
+    KOTONOHA_TEST_FONT="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/SvgTestFont.ttf")
 add_test(NAME Kotonoha.Launcher COMMAND KotonohaLauncherTests)
 set_tests_properties(Kotonoha.Launcher PROPERTIES
     ENVIRONMENT "SDL_VIDEO_DRIVER=dummy;SDL_AUDIO_DRIVER=dummy")
@@ -117,3 +123,27 @@ target_link_libraries(KotonohaDebugTranslationTests PRIVATE Kotonoha::Engine)
 kotonoha_copy_assets(KotonohaDebugTranslationTests)
 add_test(NAME Kotonoha.DebugTranslation COMMAND KotonohaDebugTranslationTests)
 set_tests_properties(Kotonoha.DebugTranslation PROPERTIES ENVIRONMENT "SDL_VIDEO_DRIVER=dummy;SDL_AUDIO_DRIVER=dummy")
+
+add_executable(KotonohaPs2SoundBankTests Ps2SoundBankTests.cpp)
+target_link_libraries(KotonohaPs2SoundBankTests PRIVATE Kotonoha::Engine)
+add_test(NAME Kotonoha.Ps2SoundBank COMMAND KotonohaPs2SoundBankTests)
+
+add_executable(KotonohaNativeInputTests NativeInputTests.cpp)
+target_link_libraries(KotonohaNativeInputTests PRIVATE Kotonoha::Engine)
+kotonoha_copy_assets(KotonohaNativeInputTests)
+add_test(NAME Kotonoha.NativeInput COMMAND KotonohaNativeInputTests)
+set_tests_properties(Kotonoha.NativeInput PROPERTIES
+    ENVIRONMENT "SDL_VIDEO_DRIVER=dummy;SDL_AUDIO_DRIVER=dummy")
+
+# The Windows loader does not search the engine DLL output directory when CTest
+# launches test executables from lib/tests/Release. Apply the same runtime path
+# to every executable test; the CMake script fixtures do not load the engine.
+if(WIN32)
+    get_property(_kotonoha_tests DIRECTORY PROPERTY TESTS)
+    foreach(_test IN LISTS _kotonoha_tests)
+        if(NOT _test MATCHES "^Kotonoha\\.(PackageAssets|BundleContents|AudioBufferFixture)$")
+            set_property(TEST "${_test}" APPEND PROPERTY ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:KotonohaEngine>")
+        endif()
+    endforeach()
+endif()

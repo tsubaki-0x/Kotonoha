@@ -5,6 +5,12 @@
 #include <algorithm>
 #include <cmath>
 namespace Kotonoha {
+static constexpr float GESTURE_MIN_MOVE = 0.025f;
+static constexpr float GESTURE_BACK_X_THRESHOLD = 0.04f;
+static constexpr float GESTURE_BACK_DX_THRESHOLD = 0.12f;
+static constexpr float GESTURE_BACK_ASPECT_RATIO = 1.5f;
+static constexpr float GESTURE_BACKLOG_DY_THRESHOLD = -0.12f;
+
 bool TouchPointer::cancel(WindowRef window, SDL_Event &pointer) {
   if (!active)
     return false;
@@ -77,7 +83,8 @@ bool HandleNavigation(Engine &engine, EventRef event) {
     if (scene && scene->capturesInput())
       return false;
   auto &actions = engine.GetInputActions();
-  if (actions.back(event)) {
+  if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
+      event.key.key == SDLK_ESCAPE) {
     if (runtime.handleBackAction())
       return true;
     for (auto *scene : runtime.GetActiveScenes())
@@ -85,6 +92,9 @@ bool HandleNavigation(Engine &engine, EventRef event) {
         menu->open();
         return true;
       }
+  } else if (actions.back(event)) {
+    if (runtime.handleBackAction())
+      return true;
   }
   if (actions.backlog(event)) {
     if (runtime.handleBacklogAction())
@@ -128,12 +138,14 @@ void InputActions::process(EventRef e) {
     f.lastX = e.tfinger.x;
     f.lastY = e.tfinger.y;
     float dx = f.lastX - f.x, dy = f.lastY - f.y;
-    f.moved |= std::hypot(dx, dy) > .025f;
+    f.moved |= std::hypot(dx, dy) > GESTURE_MIN_MOVE;
     if (!multi && fingers.size() == 1) {
-      if (f.x < .04f && dx > .12f && dx > std::abs(dy) * 1.5f) {
+      if (f.x < GESTURE_BACK_X_THRESHOLD && dx > GESTURE_BACK_DX_THRESHOLD &&
+          dx > std::abs(dy) * GESTURE_BACK_ASPECT_RATIO) {
         backGesture = true;
         multi = true;
-      } else if (dy < -.12f && -dy > std::abs(dx) * 1.5f) {
+      } else if (dy < GESTURE_BACKLOG_DY_THRESHOLD &&
+                 -dy > std::abs(dx) * GESTURE_BACK_ASPECT_RATIO) {
         backlogGesture = true;
         multi = true;
       }
@@ -143,7 +155,7 @@ void InputActions::process(EventRef e) {
     if (i == fingers.end())
       return;
     i->second.moved |= std::hypot(e.tfinger.x - i->second.x,
-                                  e.tfinger.y - i->second.y) > .025f;
+                                  e.tfinger.y - i->second.y) > GESTURE_MIN_MOVE;
     if (multi && fingers.size() == 2) {
       bool still = true;
       for (auto &[id, f] : fingers)
@@ -206,17 +218,25 @@ bool ScrollGesture::handle(EventRef e, float height, float &target,
       return false;
     }
   } else if (e.type == SDL_EVENT_FINGER_DOWN) {
+    if (dragging && touch &&
+        (device != e.tfinger.touchID || finger != e.tfinger.fingerID)) {
+      reset();
+      return true;
+    }
     dragging = touch = true;
+    device = e.tfinger.touchID;
     finger = e.tfinger.fingerID;
     lastY = e.tfinger.y * height;
     velocity = 0;
     return true;
   } else if (e.type == SDL_EVENT_FINGER_MOTION && dragging && touch &&
-             finger == e.tfinger.fingerID) {
+             device == e.tfinger.touchID && finger == e.tfinger.fingerID) {
     auto y = e.tfinger.y * height;
     delta = lastY - y;
     lastY = y;
-  } else if (e.type == SDL_EVENT_FINGER_UP && touch &&
+  } else if ((e.type == SDL_EVENT_FINGER_UP ||
+              e.type == SDL_EVENT_FINGER_CANCELED) &&
+             touch && device == e.tfinger.touchID &&
              finger == e.tfinger.fingerID) {
     dragging = false;
     return true;

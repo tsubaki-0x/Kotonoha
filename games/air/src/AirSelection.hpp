@@ -131,20 +131,21 @@ public:
     controls.reset();
     keyboardFocus = false;
   }
-  void onEvent(Kotonoha::EventRef event) override {
+  bool onEvent(Kotonoha::EventRef event) override {
     if (!isActive())
-      return;
+      return false;
     layout();
     if (event.type == SDL_EVENT_MOUSE_MOTION ||
         event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
         event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
       keyboardFocus = false;
-      controls.handle(event);
-      return;
+      if (controls.handle(event))
+        return true;
     }
-    if (event.type == SDL_EVENT_KEY_DOWN)
+    if (event.type == SDL_EVENT_KEY_DOWN ||
+        event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN)
       keyboardFocus = true;
-    ChoiceQuestionScene::onEvent(event);
+    return ChoiceQuestionScene::onEvent(event);
   }
 };
 } // namespace Air

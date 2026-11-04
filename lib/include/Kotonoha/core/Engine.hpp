@@ -9,6 +9,7 @@
 #include <Kotonoha/core/Scene.hpp>
 #include <Kotonoha/core/Settings.hpp>
 #include <Kotonoha/core/VisualTransition.hpp>
+#include <Kotonoha/events/ControllerEvent.hpp>
 #include <Kotonoha/events/InputActions.hpp>
 #include <Kotonoha/localization/Translation.hpp>
 #include <Kotonoha/media/AudioMixer.hpp>
@@ -29,6 +30,7 @@ class TimelinePlayer;
 class DebugOverlay;
 class MCPServer;
 class SettingsMenu;
+class ForcedSubtitleRenderer;
 
 struct EngineOptions {
   std::string translationPath;
@@ -73,12 +75,17 @@ private:
   std::unique_ptr<UI> vnUI;
   AudioMixer audio;
   std::unique_ptr<TimelinePlayer> timeline;
+  std::unique_ptr<ForcedSubtitleRenderer> forcedSubtitles;
+  std::string clockNode;
+  double nodeSeconds = 0;
+  void synchronizeNodeClock(double delta);
   std::unique_ptr<DebugOverlay> debug;
   std::unique_ptr<MCPServer> mcp;
   bool agentPaused = false;
   bool translationDumpComplete = false;
   InputActions inputActions;
   TouchPointer touchPointer;
+  ControllerNavigation controllerNavigation;
   SDL_AppResult dispatchEvent(EventPtr event);
   // A screen-space control owns both edges of a mouse press, even if the
   // pressed edge opens a modal before the release event arrives.
@@ -97,6 +104,7 @@ public:
 
   WindowRef GetWindow() const { return *window; }
   Runtime &GetRuntime() { return runtime; }
+  std::size_t GamepadCount() const { return session.gamepadCount(); }
   template <class T, class... Args> T &sharedScene(Args &&...args) {
     const std::type_index key(typeid(T));
     auto found = sharedScenes.find(key);
@@ -116,9 +124,11 @@ public:
     if (auto found = sharedScenes.find(key); found != sharedScenes.end()) {
       if (auto *native = dynamic_cast<Native *>(found->second.get()))
         return *native;
-      throw std::logic_error("Shared component already has another implementation");
+      throw std::logic_error(
+          "Shared component already has another implementation");
     }
-    auto component = std::make_unique<Native>(*this, std::forward<Args>(args)...);
+    auto component =
+        std::make_unique<Native>(*this, std::forward<Args>(args)...);
     auto *native = component.get();
     if (!sharedScenes.emplace(key, std::move(component)).second)
       throw std::logic_error("Recursive shared component construction");
@@ -127,6 +137,11 @@ public:
   UI &GetUI() { return *ui; }
   UI &GetVNUI() { return *vnUI; }
   TimelinePlayer &GetTimeline() { return *timeline; }
+  ForcedSubtitleRenderer &GetForcedSubtitles() { return *forcedSubtitles; }
+  std::string activeNode();
+  bool usesTimedNodeClock();
+  double activeNodeSeconds();
+  void resetNodeClock();
   InputActions &GetInputActions() { return inputActions; }
   RendererRef GetRenderer() { return *renderer; }
   SDL_Texture *GetNovelTarget() const { return novelTarget.get(); }
@@ -157,6 +172,7 @@ public:
   SettingsMenu &GetSettingsMenu() { return *settingsMenu; }
   bool isStoryPaused() const;
   void setAgentPaused(bool value);
+  bool isAgentPaused() const { return agentPaused; }
   void synchronizeTimeline();
   void advanceTimeline(double seconds);
 

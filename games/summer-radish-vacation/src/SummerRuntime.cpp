@@ -13,6 +13,7 @@
 #include <Kotonoha/core/UI.hpp>
 #include <Kotonoha/events/BackAction.hpp>
 #include <Kotonoha/events/BacklogEvents.hpp>
+#include <Kotonoha/events/ControllerEvent.hpp>
 #include <Kotonoha/media/MediaPlayer.hpp>
 #include <Kotonoha/media/PcmPlayer.hpp>
 #include <Kotonoha/media/upscaling/Upscaler.hpp>
@@ -258,7 +259,8 @@ public:
                              focus * 100, 90, 100, 28);
     }
   }
-  void onEvent(EventRef e) override {
+  bool onEvent(EventRef input) override {
+    const auto e = MapControllerEvent(input);
     if (nativeMode < 0) {
       if (e.type == SDL_EVENT_MOUSE_MOTION && active) {
         layout();
@@ -273,8 +275,7 @@ public:
       }
       if (e.type == SDL_EVENT_KEY_DOWN)
         keyboardFocus = true;
-      ChoiceQuestionScene::onEvent(e);
-      return;
+      return ChoiceQuestionScene::onEvent(e);
     }
     if (BackAction(engine, e)) {
       if (nativeMode == 3 && uniformPhase) {
@@ -282,10 +283,10 @@ public:
         focus = uniformIndex;
       } else
         openMenu();
-      return;
+      return true;
     }
     if (!active)
-      return;
+      return false;
     bool confirm = e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
                    (e.key.key == SDLK_RETURN || e.key.key == SDLK_SPACE);
     bool mouse = e.type == SDL_EVENT_MOUSE_BUTTON_UP &&
@@ -295,10 +296,10 @@ public:
         if (nativeMode == 3 && uniformPhase) {
           uniformPhase = 0;
           focus = uniformIndex;
-          return;
+          return true;
         }
         openMenu();
-        return;
+        return true;
       }
       int direction = e.key.key == SDLK_UP      ? 0
                       : e.key.key == SDLK_DOWN  ? 1
@@ -343,38 +344,40 @@ public:
                                         options.size()) == focus;
     }
     if (!confirm)
-      return;
+      return false;
     if (nativeMode < 3) {
       if (focus >= 0)
         select(size_t(focus));
-      return;
+      return true;
     }
     if (uniformPhase == 0 && focus >= 0) {
       uniformIndex = focus;
       uniformPhase = 1;
       if (nativeSound)
         nativeSound("systemmsg_000" + std::to_string(4 * (uniformIndex + 1)));
-      return;
+      return true;
     }
     if (uniformPhase == 1) {
       uniformPhase = 2;
       focus = -1;
       if (nativeSound)
         nativeSound("systemmsg_0016");
-      return;
+      return true;
     }
     if (uniformPhase == 2 && focus == 0) {
       if (nativeSound)
         nativeSound("systemmsg_0020");
       select(size_t(uniformIndex));
-      return;
+      return true;
     }
     if (uniformPhase == 2 && focus == 1) {
       uniformPhase = 0;
       focus = uniformIndex;
       if (nativeSound)
         nativeSound("systemmsg_0024");
+      return true;
     }
+    return false;
   }
   void render(RendererRef r, float scale) override {
     if (nativeMode < 0)
@@ -495,7 +498,9 @@ struct SummerRuntime::Impl {
           pending.clear();
           vm.resume();
         });
-    runtime.AddScene(nameForm);
+    // Keep the form above the current main scene in every state: the script
+    // can request the name before GAMESTART switches from Menu to Gameplay.
+    runtime.AddGlobalScene(nameForm);
     vm.waiting = true;
     pending = "NAMEENTRY";
   }
@@ -556,7 +561,7 @@ struct SummerRuntime::Impl {
   std::filesystem::path saveDirectory() const {
     if (const char *path = SDL_getenv("SUMMER_SAVE_DIR"))
       return path;
-    return preferredDocumentsDirectory();
+    return Kotonoha::saveDirectory();
   }
   void loadSystem() {
     std::ifstream input(saveDirectory() / "system.dat", std::ios::binary);
@@ -614,6 +619,7 @@ struct SummerRuntime::Impl {
       vm.markRead(vm.resource.children[1]);
     voice.Stop();
     pending.clear();
+    autoMode = skipMode = false;
     vm.resume();
   }
   void openSaves(bool load) {
@@ -725,12 +731,18 @@ struct SummerRuntime::Impl {
       text = std::make_unique<SummerText>(e, *assets);
       text->autoActive = [this] { return autoMode; };
       text->skipActive = [this] { return skipMode || skipHeld; };
-      text->controls.buttons[0].action = [this] { skipMode = !skipMode; };
+      text->controls.buttons[0].action = [this] {
+        skipMode = !skipMode;
+        if (skipMode)
+          autoMode = false;
+      };
       text->controls.buttons[1].action = [this] {
         GetVNBacklogRuntime(*engine).open();
       };
       text->controls.buttons[2].action = [this] {
         autoMode = !autoMode;
+        if (autoMode)
+          skipMode = false;
         deadline = 0;
       };
       text->controls.buttons[3].action = [this] {
@@ -998,9 +1010,15 @@ struct SummerRuntime::Impl {
       return;
     }
     if (name == "GAMESTART") {
-      if (runtime.GetScenes(GameState::Gameplay).empty())
-        for (auto *scene : runtime.GetScenes(GameState::Menu))
+      // Global overlays (such as an open name form) may already be registered
+      // for Gameplay; never register the same scene twice or it would receive
+      // every event twice.
+      for (auto *scene : runtime.GetScenes(GameState::Menu)) {
+        const auto &gameplay = runtime.GetScenes(GameState::Gameplay);
+        if (std::find(gameplay.begin(), gameplay.end(), scene) ==
+            gameplay.end())
           runtime.AddScene(scene, GameState::Gameplay);
+      }
       runtime.SetState(GameState::Gameplay);
       return;
     }
@@ -1183,8 +1201,16 @@ struct SummerRuntime::Impl {
       GetVNBacklogRuntime(*engine).open();
       return true;
     }
+    // Controller Back/left shoulder maps to PAGEUP; accept it as history too.
+    if (pending == "MESSAGE" && e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
+        e.key.key == SDLK_PAGEUP) {
+      GetVNBacklogRuntime(*engine).open();
+      return true;
+    }
     if (e.type == SDL_EVENT_KEY_UP &&
         (e.key.key == SDLK_LCTRL || e.key.key == SDLK_RCTRL))
+      skipHeld = false;
+    if (e.type == SDL_EVENT_GAMEPAD_REMOVED)
       skipHeld = false;
     if (engine->isStoryPaused() || choice->isActive())
       return false;
@@ -1226,6 +1252,14 @@ struct SummerRuntime::Impl {
       }
       if (e.key.key == SDLK_A) {
         autoMode = !autoMode;
+        if (autoMode)
+          skipMode = false;
+        return true;
+      }
+      if (e.key.key == SDLK_S) {
+        skipMode = !skipMode;
+        if (skipMode)
+          autoMode = false;
         return true;
       }
       if (e.key.key == SDLK_F5) {
@@ -1381,7 +1415,27 @@ void SummerRuntime::update() {
   if (i.vm.ended)
     i.begin();
 }
-void SummerRuntime::onEvent(EventRef e) { Runtime::onEvent(e); }
+bool SummerRuntime::onEvent(EventRef e) {
+  auto &i = *impl;
+  // Shared modals (pause, save browser, history, name entry) and choices map
+  // controller buttons in their own context. Pre-mapping would turn South into
+  // held skip while a menu is open.
+  for (auto *scene : GetActiveScenes())
+    if (scene && scene->capturesInput()) {
+      i.skipHeld = false;
+      return Runtime::onEvent(e);
+    }
+  const bool dialogue = i.text && i.text->isVisible() && !i.text->concealed;
+  // The message-box toolbar must see raw directions: while dialogue is open
+  // the shared mapping turns Left/Right into text-speed keys, but here they
+  // focus the on-screen buttons and Up releases focus back to the novel.
+  if (dialogue &&
+      (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN ||
+       e.type == SDL_EVENT_GAMEPAD_BUTTON_UP) &&
+      i.text->handleEvent(e))
+    return true;
+  return Runtime::onEvent(MapControllerEvent(e, dialogue));
+}
 void SummerRuntime::saveGame(const std::string &path) {
   auto &i = *impl;
   if (!i.vm.waiting || i.pending == "WAIT" || i.pending == "WIPE" ||
@@ -1541,8 +1595,10 @@ void SummerRuntime::debugJumpToNode(const std::string &node) {
     throw std::runtime_error("Runtime has not started");
   impl->begin(node);
   SetState(GameState::Gameplay);
-  if (GetScenes(GameState::Gameplay).empty())
-    for (auto *scene : GetScenes(GameState::Menu))
+  for (auto *scene : GetScenes(GameState::Menu)) {
+    const auto &gameplay = GetScenes(GameState::Gameplay);
+    if (std::find(gameplay.begin(), gameplay.end(), scene) == gameplay.end())
       AddScene(scene, GameState::Gameplay);
+  }
 }
 } // namespace SummerRadish

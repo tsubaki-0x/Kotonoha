@@ -1,4 +1,5 @@
 #include <Kotonoha/core/Engine.hpp>
+#include <Kotonoha/core/FileSystem.hpp>
 #include <Kotonoha/core/GameLauncher.hpp>
 #include <Kotonoha/core/Launcher.hpp>
 
@@ -76,6 +77,12 @@ void pathDiscovery(const std::filesystem::path &directory) {
 }
 
 void gameLauncher(const std::filesystem::path &directory) {
+  const auto previous = std::filesystem::current_path();
+  struct RestoreDirectory {
+    std::filesystem::path path;
+    ~RestoreDirectory() { std::filesystem::current_path(path); }
+  } restore{previous};
+  std::filesystem::current_path(directory);
   const auto root = directory / "game-launcher";
   std::filesystem::create_directory(root);
   const auto settings = (root / "settings.json").string();
@@ -91,6 +98,8 @@ void gameLauncher(const std::filesystem::path &directory) {
     launcher.close();
   }
   TestGameLauncher reopened(settings, "");
+  require(GameLauncher::rememberedPath(settings, "game-path.txt") == root.string(),
+          "The launcher persists the selected path for custom game roots");
   require(reopened.path() == root.string() && reopened.pathValid(),
           "The original single-path launcher remembers its path");
 }
@@ -158,7 +167,7 @@ void launcher(const std::filesystem::path &directory) {
   const auto saved = EngineSettings::load(path);
   require(saved.upscaling.factor == 2.5f &&
               saved.upscaling.backend == UpscaleBackend::MetalFX &&
-              saved.width == 1600 && saved.translationPath == transPath &&
+              saved.width == 1600 && saved.translationPath == "translation.json" &&
               saved.fontPath == "font.ttf",
           "The engine settings file holds the launcher choices");
 
@@ -180,6 +189,9 @@ void launcher(const std::filesystem::path &directory) {
   EngineOptions options;
   options.settingsPath = path;
   options.rendererOverride = "software";
+  std::filesystem::create_directories(directory / "assets/fonts");
+  std::filesystem::copy_file(KOTONOHA_TEST_FONT,
+                             directory / "assets/fonts/font.ttf");
   {
     Engine engine(runtime, options);
     require(engine.GetSettings().upscaling.factor == 2.5f &&
@@ -199,19 +211,23 @@ void launcher(const std::filesystem::path &directory) {
 } // namespace
 
 int main() {
+  const auto previous = std::filesystem::current_path();
   const auto directory =
       std::filesystem::temp_directory_path() /
       ("kotonoha-launcher-" + std::to_string(SDL_GetPerformanceCounter()));
   try {
     std::filesystem::create_directories(directory);
+    std::filesystem::current_path(directory);
     launcher(directory);
     pathDiscovery(directory);
     gameLauncher(directory);
   } catch (const std::exception &error) {
     std::cerr << "FAIL: " << error.what() << '\n';
+    std::filesystem::current_path(previous);
     std::filesystem::remove_all(directory);
     return 1;
   }
+  std::filesystem::current_path(previous);
   std::filesystem::remove_all(directory);
   std::cout << "Launcher tests passed\n";
   return 0;

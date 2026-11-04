@@ -18,6 +18,10 @@ Runtime::Runtime(std::string name, std::string version, std::string identify)
 
 Runtime::~Runtime() = default;
 
+bool Runtime::isStoryPaused() const {
+  return splashEngine ? splashEngine->isStoryPaused() : hasPausingScene();
+}
+
 int Runtime::translationRoute() const {
   auto node = debugNode();
   size_t start = 0;
@@ -171,27 +175,29 @@ void Runtime::update() {
   }
 }
 
-void Runtime::onEvent(EventRef event) {
+bool Runtime::onEvent(EventRef event) {
   if (splashEngine && HandleNavigation(*splashEngine, event))
-    return;
+    return true;
   const auto activeScenes = GetActiveScenes();
   for (auto it = activeScenes.rbegin(); it != activeScenes.rend(); ++it) {
     if (*it && (*it)->renderSpace() == RenderSpace::Novel &&
         (*it)->capturesInput()) {
       dispatchEvent(**it, event);
-      return;
+      // A modal owns the input even when it has no binding for this event.
+      return true;
     }
   }
   const auto state = currentState;
   for (auto it = activeScenes.rbegin(); it != activeScenes.rend(); ++it) {
     if (*it && (*it)->renderSpace() == RenderSpace::Novel &&
         dispatchEvent(**it, event))
-      return;
+      return true;
     if (state != currentState)
-      return;
+      return true;
     if (isStoryPaused())
-      return;
+      return true;
   }
+  return false;
 }
 
 bool Runtime::onScreenEvent(EventRef event) {
@@ -224,6 +230,13 @@ void Runtime::renderBackground(RendererRef renderer, float scale) {
   for (auto *scene : GetActiveScenes())
     if (scene && scene->renderSpace() == RenderSpace::Novel &&
         scene->renderLayer() == RenderLayer::Background)
+      renderScene(*scene, renderer, scale);
+}
+
+void Runtime::renderOverlay(RendererRef renderer, float scale) {
+  for (auto *scene : GetActiveScenes())
+    if (scene && scene->renderSpace() == RenderSpace::Novel &&
+        scene->renderLayer() == RenderLayer::Overlay)
       renderScene(*scene, renderer, scale);
 }
 

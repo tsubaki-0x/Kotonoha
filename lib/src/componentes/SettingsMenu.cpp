@@ -5,6 +5,7 @@
 #include <Kotonoha/core/Log.hpp>
 #include <Kotonoha/core/UI.hpp>
 #include <Kotonoha/events/BackAction.hpp>
+#include <Kotonoha/events/ControllerEvent.hpp>
 
 #include <algorithm>
 #include <array>
@@ -16,6 +17,8 @@ SettingsMenu::SettingsMenu(Engine &engine)
     : engine(engine),
       shaderPicker(std::make_unique<ImGuiTheme::ShaderFilePicker>()) {}
 SettingsMenu::~SettingsMenu() = default;
+
+int SettingsMenu::pageCount() const { return engine.GamepadCount() ? 4 : 3; }
 
 std::vector<int> SettingsMenu::rows() const {
   std::vector<int> result;
@@ -31,16 +34,20 @@ std::vector<int> SettingsMenu::rows() const {
     result.insert(result.end(), {11, 12});
     for (int i = 0; i < int(channels.size()); ++i)
       result.push_back(100 + i);
-  } else
+  } else if (page == 2)
     result.insert(result.end(), {13, 14, 15, 16});
+  else
+    result.push_back(17);
   result.insert(result.end(), {8, 9});
   return result;
 }
 
 void SettingsMenu::open() {
+  touchActivation.reset();
   draft = engine.GetSettings();
   selected = first = page = 0;
   slider = -1;
+  scrolling.reset();
   channels.clear();
   for (const char *name : {"audio", "video", "BGM", "Voice", "SE", "PCM"})
     engine.GetAudio().channel(name);
@@ -142,26 +149,46 @@ void SettingsMenu::activate(int index, int direction) {
                          VNColorOptions[i].second;
                      draft.vnTextColorOverride = true;
                    });
-  } else if (index >= 100) {
+  } else if (index == 17)
+    draft.swapControllerAB = !draft.swapControllerAB;
+  else if (index >= 100) {
     auto &volume = draft.channelVolumes[channels.at(index - 100)];
     volume = std::clamp(volume + direction * .05f, 0.f, 1.f);
   } else
     close();
 }
 
-void SettingsMenu::onEvent(EventRef event) {
+bool SettingsMenu::onEvent(EventRef rawEvent) {
   if (!visible)
-    return;
+    return false;
+  page = std::min(page, pageCount() - 1);
+  const auto event = MapControllerEvent(rawEvent);
+  if (!touchActivation.accept(event)) {
+    slider = -1;
+    return true;
+  }
   if (selectBox.isOpen()) {
-    if (BackAction(engine, event))
+    if (BackAction(engine, event)) {
       selectBox.close();
-    else
+      return true;
+    } else {
       selectBox.onEvent(event);
-    return;
+      return true;
+    }
   }
   if (BackAction(engine, event)) {
     close();
-    return;
+    return true;
+  }
+  if (rawEvent.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && !selectBox.isOpen() &&
+      (rawEvent.gbutton.button == SDL_GAMEPAD_BUTTON_LEFT_SHOULDER ||
+       rawEvent.gbutton.button == SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) {
+    page = (page + (rawEvent.gbutton.button == SDL_GAMEPAD_BUTTON_LEFT_SHOULDER
+                        ? pageCount() - 1
+                        : 1)) %
+           pageCount();
+    selected = first = 0;
+    return true;
   }
   auto items = rows();
   auto setSlider = [&](int id, float x) {
@@ -174,60 +201,75 @@ void SettingsMenu::onEvent(EventRef event) {
   if (slider >= 0) {
     if (event.type == SDL_EVENT_MOUSE_MOTION) {
       setSlider(slider, event.motion.x);
-      return;
+      return true;
     }
     if (event.type == SDL_EVENT_MOUSE_BUTTON_UP ||
         event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
       slider = -1;
-      return;
+      return false;
     }
   }
-  for (int p = 0; p < 3; ++p)
-    if (UI::clicked(event, {200.f + p * 290, 85, 280, 48})) {
+  const int tabs = pageCount();
+  const float tabWidth = tabs == 4 ? 205.f : 280.f;
+  const float tabStep = tabs == 4 ? 220.f : 290.f;
+  for (int p = 0; p < tabs; ++p)
+    if (UI::clicked(event, {200.f + p * tabStep, 85, tabWidth, 48})) {
       page = p;
       selected = first = 0;
-      return;
+      return true;
     }
   if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) {
     if (event.key.key == SDLK_TAB) {
-      page = (page + 1) % 3;
+      page = (page + 1) % tabs;
       selected = first = 0;
-      return;
+      return true;
     }
+    const bool navigation =
+        event.key.key == SDLK_END || event.key.key == SDLK_HOME ||
+        event.key.key == SDLK_DOWN || event.key.key == SDLK_UP;
     if (event.key.key == SDLK_END)
       selected = int(items.size()) - 2;
-    if (event.key.key == SDLK_DOWN)
+    else if (event.key.key == SDLK_HOME)
+      selected = 0;
+    else if (event.key.key == SDLK_DOWN)
       selected = (selected + 1) % int(items.size());
-    if (event.key.key == SDLK_UP)
+    else if (event.key.key == SDLK_UP)
       selected = (selected + int(items.size()) - 1) % int(items.size());
-    if (selected < int(items.size()) - 2)
-      first = std::clamp(first, std::max(0, selected - 8), selected);
+    if (navigation) {
+      if (selected < int(items.size()) - 2)
+        first = std::clamp(first, std::max(0, selected - 8), selected);
+      return true;
+    }
   }
   if (slider < 0 && event.type >= SDL_EVENT_FINGER_DOWN &&
       event.type <= SDL_EVENT_FINGER_CANCELED) {
     scrollOffset = first * 48.f;
     if (scrolling.handle(event, 720, scrollOffset, scrollVelocity, scrollFollow,
-                         std::max(0, int(items.size()) - 11) * 48.f))
+                         std::max(0, int(items.size()) - 11) * 48.f)) {
       first = int(scrollOffset / 48);
+      return true;
+    }
   }
-  if (event.type == SDL_EVENT_MOUSE_WHEEL)
+  if (event.type == SDL_EVENT_MOUSE_WHEEL) {
     first = std::clamp(first - int(event.wheel.y), 0,
                        std::max(0, int(items.size()) - 11));
+    return true;
+  }
   try {
     if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
         (event.key.key == SDLK_RETURN || event.key.key == SDLK_SPACE ||
          event.key.key == SDLK_LEFT || event.key.key == SDLK_RIGHT)) {
       selected = std::clamp(selected, 0, int(items.size()) - 1);
       activate(items[selected], event.key.key == SDLK_LEFT ? -1 : 1);
-      return;
+      return true;
     }
     if (UI::clicked(event, {200, 624, 420, 44})) {
       activate(8);
-      return;
+      return true;
     }
     if (UI::clicked(event, {640, 624, 420, 44})) {
       close();
-      return;
+      return true;
     }
     for (int i = first; i < std::min(first + 9, int(items.size()) - 2); ++i) {
       const float y = 150 + (i - first) * 48;
@@ -241,19 +283,20 @@ void SettingsMenu::onEvent(EventRef event) {
           selected = i;
           slider = id;
           setSlider(id, point.x);
-          return;
+          return true;
         }
       }
       if (UI::clicked(event, {200, y, 860, 44})) {
         selected = i;
         activate(id);
-        return;
+        return true;
       }
     }
   } catch (const std::exception &failure) {
     error = failure.what();
     SDL_LogError(LogConfig, "Settings: %s", error.c_str());
   }
+  return false;
 }
 
 void SettingsMenu::render(RendererRef renderer) {
@@ -287,13 +330,21 @@ void SettingsMenu::render(RendererRef renderer) {
       std::string("Override text colors: ") +
           (draft.vnTextColorOverride ? "Yes" : "No"),
       "Dialogue color...",
-      "Speaker color..."};
+      "Speaker color...",
+      std::string("Controller A/B: ") + (draft.swapControllerAB
+                                             ? "Swapped (South confirms)"
+                                             : "Standard (East confirms)")};
   ui.backdrop(renderer, {0, 0, 0, 220});
   ui.panel(renderer, {170, 25, 920, 670});
   ui.text(renderer, "Settings", 200, 36, 860, {255, 215, 100, 255});
-  const char *pages[]{"Display", "Audio", "VN text"};
-  for (int p = 0; p < 3; ++p)
-    ui.button(renderer, {200.f + p * 290, 85, 280, 48}, pages[p], page == p);
+  const int tabs = pageCount();
+  const float tabWidth = tabs == 4 ? 205.f : 280.f;
+  const float tabStep = tabs == 4 ? 220.f : 290.f;
+  page = std::min(page, tabs - 1);
+  const char *pages[]{"Display", "Audio", "VN text", "Input"};
+  for (int p = 0; p < tabs; ++p)
+    ui.button(renderer, {200.f + p * tabStep, 85, tabWidth, 48}, pages[p],
+              page == p);
   auto items = rows();
   selected = std::clamp(selected, 0, int(items.size()) - 1);
   first = std::clamp(first, 0, std::max(0, int(items.size()) - 11));

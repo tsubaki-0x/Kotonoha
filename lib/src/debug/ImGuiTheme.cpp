@@ -63,6 +63,8 @@ void apply(float value) {
 ImVec4 accent() { return Accent; }
 ImVec4 success() { return Success; }
 ImVec4 warning() { return Warning; }
+ImVec4 error() { return Error; }
+ImVec4 muted() { return {0.58f, 0.58f, 0.64f, 1.0f}; }
 
 void statusText(const char *text, bool error) {
   ImGui::TextColored(error ? Error : Success, "%s", text ? text : "");
@@ -136,7 +138,8 @@ void ShaderFilePicker::poll(UpscaleSettings &settings) {
   }
 }
 
-void ShaderFilePicker::draw(SDL_Window *window, UpscaleSettings &settings) {
+bool ShaderFilePicker::draw(SDL_Window *window, UpscaleSettings &settings) {
+  const std::string before = settings.shaderFiles;
   poll(settings);
   const auto files = UpscaleShaderFiles(settings.shaderFiles);
   ImGui::Text("Custom shaders: %zu", files.size());
@@ -151,6 +154,7 @@ void ShaderFilePicker::draw(SDL_Window *window, UpscaleSettings &settings) {
   }
   if (!error.empty())
     ImGui::TextColored(Error, "%s", error.c_str());
+  return settings.shaderFiles != before;
 }
 
 } // namespace Kotonoha::ImGuiTheme

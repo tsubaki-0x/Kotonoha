@@ -4,6 +4,13 @@
 #include <cstdint>
 #include <stdexcept>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 // -----------------------------------------------------------------------------
 // SEÇÃO DE SELEÇÃO DA PLATAFORMA DE CONVERSÃO
 // -----------------------------------------------------------------------------
@@ -276,6 +283,10 @@ std::string ConvertEncoding(std::string_view text, const char *from,
 #if defined(__ANDROID__)
   return ConvertViaJNI(text, from, to);
 #else
+  // SDL's built-in iconv accepts the IANA spelling but not iconv's LATIN1
+  // alias, which is used by game metadata and public callers.
+  if (std::string_view(from) == "LATIN1") from = "ISO-8859-1";
+  if (std::string_view(to) == "LATIN1") to = "ISO-8859-1";
   Converter converter(from, to);
   if (!converter.valid())
     throw std::runtime_error(std::string("Unsupported text encoding ") + from +
@@ -285,12 +296,35 @@ std::string ConvertEncoding(std::string_view text, const char *from,
 }
 
 std::string ShiftJisToUtf8(std::string_view text) {
-#ifdef _WIN32
-  // SDL's built-in iconv does not provide CP932 on Windows. Use the native
-  // Windows-31J code page so Japanese game scripts do not depend on a separate
-  // iconv runtime. Invalid Shift-JIS sequences become '?', matching the
-  // cross-platform converter contract.
-  return WindowsCp932ToUtf8(text);
+#if defined(_WIN32)
+  // Use Microsoft's CP932 mapping (not GNU iconv's Shift-JIS wave dash).
+  std::string result;
+  result.reserve(text.size());
+  for (size_t offset = 0; offset < text.size();) {
+    const auto first = static_cast<unsigned char>(text[offset]);
+    const int length = IsDBCSLeadByteEx(932, first) && offset + 1 < text.size()
+                           ? 2
+                           : 1;
+    wchar_t wide[2];
+    const int count = MultiByteToWideChar(932, MB_ERR_INVALID_CHARS,
+                                         text.data() + offset, length, wide, 2);
+    offset += length;
+    if (!count) {
+      result += '?';
+      continue;
+    }
+    char utf8[8];
+    const int bytes = WideCharToMultiByte(CP_UTF8, 0, wide, count, utf8,
+                                         sizeof(utf8), nullptr, nullptr);
+    if (!bytes)
+      throw std::runtime_error("CP932 to UTF-8 conversion failed");
+    result.append(utf8, bytes);
+  }
+  return result;
+#elif defined(__ANDROID__)
+  // No Android, chama a conversão via JNI diretamente com o alias
+  // CP932/Shift_JIS
+  return ConvertViaJNI(text, "Shift_JIS");
 #else
   // CP932 first: plain SHIFT_JIS lacks the NEC row 13 extension symbols.
   for (const char *name : {"CP932", "WINDOWS-31J", "SHIFT_JIS", "SJIS"}) {

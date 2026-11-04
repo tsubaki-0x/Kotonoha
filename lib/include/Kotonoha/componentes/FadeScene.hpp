@@ -41,7 +41,7 @@ public:
   bool fullyCoveredByFade() const;
   // True while a fade is in progress (not counting a held color).
   bool active() const;
-  bool finished() const { return !active(); }
+  bool finished() const override { return !active(); }
 
   bool designSpace() const override { return design; }
   void render(RendererRef renderer, float scale) override;

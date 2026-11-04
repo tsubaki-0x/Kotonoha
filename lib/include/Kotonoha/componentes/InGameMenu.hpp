@@ -1,4 +1,5 @@
 #pragma once
+#include <Kotonoha/componentes/TouchActivation.hpp>
 
 #include <Kotonoha/core/Scene.hpp>
 #include <functional>
@@ -10,6 +11,7 @@ namespace Kotonoha {
 // the whole screen (open/close/IsOpen) with a game specific one.
 class InGameMenu : public Scene {
 protected:
+  TouchActivation touchActivation;
   bool isOpen = false;
   int selected = 0;
   virtual int itemCount() const { return 6; }
@@ -27,9 +29,10 @@ protected:
 
 public:
   bool designSpace() const override { return true; }
+  RenderLayer renderLayer() const override { return RenderLayer::Overlay; }
   explicit InGameMenu(Engine &engineRef);
 
-  virtual void open() { isOpen = true; }
+  virtual void open() { touchActivation.reset(); isOpen = true; }
   virtual void close() { isOpen = false; }
   void toggle() { IsOpen() ? close() : open(); }
   virtual bool IsOpen() const { return isOpen; }
@@ -44,7 +47,7 @@ public:
   void SetOnSave(std::function<void()> cb) { onSaveCb = std::move(cb); }
   void SetOnLoad(std::function<void()> cb) { onLoadCb = std::move(cb); }
 
-  void onEvent(EventRef event) override;
+  bool onEvent(EventRef event) override;
   void update() override;
   void render(RendererRef renderer, const float scale) override;
 };

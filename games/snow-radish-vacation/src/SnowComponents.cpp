@@ -37,16 +37,18 @@ constexpr SDL_Color kWhite{255, 255, 255, 255}, kGold{255, 230, 140, 255};
 } // namespace
 
 // ---------------------------------------------------------------- title
-
 SnowTitleMenu::SnowTitleMenu(Kotonoha::Engine &engine, SnowSession &session,
                              SnowLinks &links)
     : GameMenu(engine), session_(session), links_(links) {}
 
 bool SnowTitleMenu::isVisible() const { return !session_.Playing(); }
 
-void SnowTitleMenu::onEvent(Kotonoha::EventRef event) {
-  if (isVisible())
+bool SnowTitleMenu::onEvent(Kotonoha::EventRef event) {
+  if (isVisible()) {
     session_.FrontendEvent(event);
+    return true;
+  }
+  return false;
 }
 
 void SnowTitleMenu::update() {
@@ -86,13 +88,11 @@ void SnowTitleMenu::renderTitle(Kotonoha::RendererRef renderer) {
 }
 
 // ---------------------------------------------------------------- stage
-
 void SnowStage::render(Kotonoha::RendererRef renderer, float) {
   session_.DrawStage(&renderer);
 }
 
 // ---------------------------------------------------------------- text box
-
 SnowTextBox::SnowTextBox(Kotonoha::Engine &engine, SnowSession &session,
                          SnowLinks &links)
     : VNTextBox(engine, "", ""), session_(session), links_(links) {
@@ -134,7 +134,8 @@ void SnowTextBox::update() {
     doneAt_ = now;
     return;
   }
-  if ((SDL_GetModState() & SDL_KMOD_CTRL) != 0 && session_.CanSkip()) {
+  if ((ctrlHeld_ || skipPinned_ || (SDL_GetModState() & SDL_KMOD_CTRL) != 0) &&
+      session_.CanSkip()) {
     if (session_.WaitingForClick())
       session_.Advance(-1);
     else
@@ -150,9 +151,41 @@ void SnowTextBox::update() {
   }
 }
 
+void SnowTextBox::CancelSkip() {
+  ctrlHeld_ = false;
+  skipPinned_ = false;
+}
+
+// The first click completes a page that is still being revealed.
 bool SnowTextBox::handleEvent(Kotonoha::EventRef event) {
-  if (!session_.Playing() || session_.Choosing())
+  // Controller South maps to LCTRL during dialogue but SDL_GetModState() does
+  // not reflect synthetic key events, so keep our own held state. Release is
+  // handled before the Playing/Choosing gate so it cannot get stuck.
+  if ((event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP) &&
+      (event.key.key == SDLK_LCTRL || event.key.key == SDLK_RCTRL)) {
+    ctrlHeld_ = event.type == SDL_EVENT_KEY_DOWN;
+    return true;
+  }
+  if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST ||
+      event.type == SDL_EVENT_GAMEPAD_REMOVED) {
+    CancelSkip();
     return false;
+  }
+  if (!session_.Playing() || session_.Choosing()) {
+    CancelSkip();
+    return false;
+  }
+  // The pause menu and history use their own controller mapping; do not let
+  // West/right shoulder toggle skip or Auto behind them.
+  if (engine.isStoryPaused())
+    return false;
+  if (IsKey(event, SDLK_S) && !event.key.repeat) {
+    skipPinned_ = !skipPinned_;
+    if (skipPinned_)
+      session_.SetAuto(false);
+    doneAt_ = SDL_GetTicks();
+    return true;
+  }
   if (IsKey(event, SDLK_PAGEUP) || WheelUp(event)) {
     openBacklog();
     return true;
@@ -186,6 +219,7 @@ bool SnowTextBox::handleEvent(Kotonoha::EventRef event) {
                         event.button.button == SDL_BUTTON_LEFT);
   if (!advance)
     return false;
+  // Any click stops auto mode (KAG cancelAuto).
   if (session_.Auto())
     session_.SetAuto(false);
   else
@@ -206,7 +240,6 @@ void SnowTextBox::renderIndicator(Kotonoha::RendererRef renderer) {
 }
 
 // ---------------------------------------------------------------- choices
-
 SnowChoice::SnowChoice(Kotonoha::Engine &engine, SnowSession &session,
                        SnowLinks &links, SnowSession::ChoiceKind kind)
     : ChoiceQuestionScene(engine, "", {}, nullptr), session_(session),
@@ -231,7 +264,8 @@ void SnowChoice::update() {
   setQuestion("", choices,
               [this](int id, const std::string &) { session_.Advance(id); });
   session_.SetFocus(session_.InitialFocus());
-  selected = std::size_t(std::max(Focused(), 0));
+  focus_ = session_.Focus();
+  selected = std::size_t(std::max(focus_, 0));
   for (const auto &label : labels)
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[choice] %s", label.c_str());
 }
@@ -245,8 +279,9 @@ int SnowChoice::Hit(float x, float y) {
 }
 
 void SnowChoice::Focus(int index) {
-  if (index >= int(options.size()))
+  if (index < -1 || index >= int(options.size()))
     return;
+  focus_ = index;
   session_.SetFocus(index);
   if (index >= 0)
     selected = std::size_t(index);
@@ -259,56 +294,68 @@ void SnowChoice::select(std::size_t index) {
 }
 
 // Up/Left and Down/Right cycle, Enter / Space pick the focused option.
-bool SnowChoice::Key(SDL_Keycode key) {
-  const int n = int(options.size()), focus = Focused();
-  switch (key) {
-  case SDLK_UP:
-  case SDLK_LEFT:
-    Focus(focus <= 0 ? n - 1 : focus - 1);
-    return true;
-  case SDLK_DOWN:
-  case SDLK_RIGHT:
-    Focus(focus < 0 || focus >= n - 1 ? 0 : focus + 1);
-    return true;
-  case SDLK_RETURN:
-  case SDLK_KP_ENTER:
-  case SDLK_SPACE:
-    if (focus >= 0)
-      select(std::size_t(focus));
-    return true;
-  default:
-    return false;
-  }
-}
-
-void SnowChoice::onEvent(Kotonoha::EventRef event) {
+bool SnowChoice::onEvent(Kotonoha::EventRef event) {
   if (!active || options.empty())
-    return;
+    return false;
+  if (Blocked())
+    return true;
   layout();
+  const int n = int(options.size());
+  auto move = [&](int delta) {
+    const int current = focus_;
+    const int next =
+        current < 0 ? (delta > 0 ? 0 : n - 1) : (current + delta + n) % n;
+    Focus(next);
+  };
   if (event.type == SDL_EVENT_KEY_DOWN) {
-    if (event.key.key == SDLK_ESCAPE)
-      return openMenu();
-    if (event.key.key == SDLK_B || event.key.key == SDLK_PAGEUP)
-      return openBacklog();
-    if (!Blocked())
-      Key(event.key.key);
+    if (Key(event.key.key))
+      return true;
+    switch (event.key.key) {
+    case SDLK_ESCAPE:
+    case SDLK_AC_BACK:
+      openMenu();
+      return true;
+    case SDLK_B:
+    case SDLK_PAGEUP:
+      openBacklog();
+      return true;
+    case SDLK_UP:
+    case SDLK_LEFT:
+      move(-1);
+      return true;
+    case SDLK_DOWN:
+    case SDLK_RIGHT:
+      move(1);
+      return true;
+    case SDLK_RETURN:
+    case SDLK_KP_ENTER:
+    case SDLK_SPACE:
+    case SDLK_Z:
+      if (focus_ >= 0) {
+        select(std::size_t(focus_));
+        return true;
+      }
+      break;
+    default:
+      break;
+    }
   } else if (WheelUp(event)) {
     openBacklog();
+    return true;
+  } else if (event.type == SDL_EVENT_MOUSE_MOTION) {
+    Focus(Hit(event.motion.x, event.motion.y));
+    return true;
   } else if (RightClick(event)) {
     openMenu();
-  } else if (Blocked()) {
-    return;
-  } else if (event.type == SDL_EVENT_MOUSE_MOTION) {
-    const int hit = Hit(event.motion.x, event.motion.y);
-    if (hit >= 0 || kind_ != SnowSession::ChoiceKind::Text)
-      Focus(hit);
+    return true;
   } else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
              event.button.button == SDL_BUTTON_LEFT) {
-    const int hit = Hit(event.button.x, event.button.y);
-    Focus(hit);
-    if (hit >= 0)
-      select(std::size_t(hit));
+    if (const int i = Hit(event.button.x, event.button.y); i >= 0) {
+      select(std::size_t(i));
+      return true;
+    }
   }
+  return false;
 }
 
 void SnowTextChoice::layout() {
@@ -346,16 +393,17 @@ void SnowMapChoice::select(std::size_t index) {
 }
 
 // ---------------------------------------------------------------- pause menu
-
 SnowPauseMenu::SnowPauseMenu(Kotonoha::Engine &engine, SnowSession &session,
                              SnowLinks &links)
     : InGameMenu(engine), session_(session), links_(links) {}
 
-void SnowPauseMenu::onEvent(Kotonoha::EventRef event) {
+bool SnowPauseMenu::onEvent(Kotonoha::EventRef event) {
   if (!session_.Playing())
-    return;
-  if (IsOpen() && RightClick(event))
-    return close();
+    return false;
+  if (IsOpen() && RightClick(event)) {
+    close();
+    return true;
+  }
   if (IsOpen() && event.type == SDL_EVENT_MOUSE_MOTION) {
     const SDL_FPoint pt{event.motion.x, event.motion.y};
     for (int i = 0; i < itemCount(); ++i) {
@@ -363,8 +411,9 @@ void SnowPauseMenu::onEvent(Kotonoha::EventRef event) {
       if (SDL_PointInRectFloat(&pt, &rect))
         selected = i;
     }
+    return true;
   }
-  InGameMenu::onEvent(event);
+  return InGameMenu::onEvent(event);
 }
 
 // The end of the story returns to the title through the menu item.
@@ -384,7 +433,7 @@ SDL_FRect SnowPauseMenu::itemRect(int index) const {
 }
 
 void SnowPauseMenu::renderPanel(Kotonoha::RendererRef renderer) {
-  Fill(&renderer, {0, 0, kGameWidth, kGameHeight}, {0, 0, 40, 150});
+  Fill(&renderer, {0, 0, kGameWidth, kGameHeight}, {0, 0, 30, 220});
   Fill(&renderer, {230, 80, 340, 420}, {10, 20, 60, 220});
   session_.DrawText(&renderer, "Paused", 250, 96, 28, kGold);
 }
@@ -396,20 +445,21 @@ void SnowPauseMenu::renderItem(Kotonoha::RendererRef renderer, int index,
        focused ? SDL_Color{0, 149, 149, 230} : SDL_Color{0, 0, 0, 160});
   const std::string label = itemLabel(index);
   const SDL_FPoint size =
-      session_.DrawText(&renderer, label, 0, 0, 22, {}, true);
+      session_.DrawText(&renderer, label, 0, 0, 24, {}, true);
   session_.DrawText(&renderer, label, rect.x + (rect.w - size.x) / 2,
-                    rect.y + (rect.h - size.y) / 2, 22, kWhite);
+                    rect.y + (rect.h - size.y) / 2, 24, kWhite);
 }
 
 // ---------------------------------------------------------------- backlog
-
-void SnowBacklog::onEvent(Kotonoha::EventRef event) {
+bool SnowBacklog::onEvent(Kotonoha::EventRef event) {
   if (!session_.Playing())
-    return;
+    return false;
   if (!isVisible() && (IsKey(event, SDLK_PAGEUP) || WheelUp(event) ||
-                       Kotonoha::ShouldOpenBacklog(engine, event)))
-    return open();
-  VNBacklog::onEvent(event);
+                       Kotonoha::ShouldOpenBacklog(engine, event))) {
+    open();
+    return true;
+  }
+  return VNBacklog::onEvent(event);
 }
 
 void SnowBacklog::renderFrame(Kotonoha::RendererRef renderer) {
@@ -452,5 +502,7 @@ void SnowBacklog::renderEntries(Kotonoha::RendererRef renderer) {
   }
   SDL_SetRenderClipRect(&renderer, nullptr);
 }
+
+bool SnowChoice::Key(SDL_Keycode key) { return false; }
 
 } // namespace SnowRadish

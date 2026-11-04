@@ -1,14 +1,23 @@
 #include <Kotonoha/componentes/FadeScene.hpp>
+#include <Kotonoha/componentes/ForcedSubtitleRenderer.hpp>
+#include <Kotonoha/componentes/InGameMenu.hpp>
 #include <Kotonoha/componentes/SettingsMenu.hpp>
 #include <Kotonoha/componentes/SubtitleScene.hpp>
+#include <Kotonoha/componentes/VNManager.hpp>
+#include <Kotonoha/componentes/VNTextBox.hpp>
+#include <Kotonoha/componentes/VNBacklog.hpp>
 #include <Kotonoha/core/CommandLine.hpp>
 #include <Kotonoha/core/Engine.hpp>
 #include <Kotonoha/core/FileSystem.hpp>
 #include <Kotonoha/core/UI.hpp>
 #include <Kotonoha/debug/DebugOverlay.hpp>
+#include <Kotonoha/script/TimelinePlayer.hpp>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <functional>
 #include <imgui.h>
 #include <iostream>
 #include <limits>
@@ -98,10 +107,46 @@ std::string styleFile() {
 }
 
 struct TestRuntime : Runtime {
+  std::string node = "custom-scene";
+  std::optional<double> seconds = 12.375;
+  bool timedClock = true;
+  bool opaqueGameplay = false;
+  int unpausedUpdates = 0;
+  std::function<void(RendererRef)> inspectScreen;
+  std::function<void(RendererRef)> inspectBeforeOverlay;
   TestRuntime()
-      : Runtime("Presentation tests", "1", "org.kotonoha.presentation.tests") {}
-  std::string debugNode() const override { return "custom-scene"; }
-  std::optional<double> debugNodeSeconds() const override { return 12.375; }
+      : Runtime("Presentation tests", "1", "org.kotonoha.presentation.tests." +
+                    std::to_string(SDL_GetPerformanceCounter())) {}
+  std::string debugNode() const override { return node; }
+  bool usesTimedNodeClock() const override { return timedClock; }
+  std::optional<double> debugNodeSeconds() const override { return seconds; }
+  void update() override {
+    Runtime::update();
+    if (!isStoryPaused())
+      ++unpausedUpdates;
+  }
+  SDL_FPoint sceneSize(const Scene &scene) const override {
+    if (dynamic_cast<const ForcedSubtitleRenderer *>(&scene))
+      return {640, 360};
+    return Runtime::sceneSize(scene);
+  }
+  void renderGameplay(RendererRef renderer, float scale) override {
+    Runtime::renderGameplay(renderer, scale);
+    if (opaqueGameplay) {
+      SDL_SetRenderDrawColor(&renderer, 0, 0, 0, 255);
+      SDL_RenderFillRect(&renderer, nullptr);
+    }
+  }
+  void renderScreen(RendererRef renderer, float scale) override {
+    if (inspectScreen)
+      inspectScreen(renderer);
+    Runtime::renderScreen(renderer, scale);
+  }
+  void renderOverlay(RendererRef renderer, float scale) override {
+    if (inspectBeforeOverlay)
+      inspectBeforeOverlay(renderer);
+    Runtime::renderOverlay(renderer, scale);
+  }
 };
 
 int colored(RendererRef renderer, int color) {
@@ -165,11 +210,467 @@ void subtitles(Engine &engine) {
   draw(1.5);
   require(colored(renderer, 1) > 20, "Subtitle resizes with renderer scale");
   SDL_SetRenderScale(&renderer, 1, 1);
+  class DialogueSubtitles : public SubtitleScene {
+  protected:
+    bool replacesPreviousCue() const override { return true; }
+
+  public:
+    using SubtitleScene::SubtitleScene;
+  } dialogue(engine);
+  dialogue.setStyle(style);
+  auto drawDialogue = [&](double seconds) {
+    SDL_SetRenderDrawColor(&renderer, 0, 0, 0, 255);
+    SDL_RenderClear(&renderer);
+    dialogue.setPosition(seconds);
+    dialogue.render(renderer, 1);
+    return colored(renderer, 1);
+  };
+  dialogue.setCues({{1, 5, "X", "Person"}});
+  const auto singleLine = drawDialogue(1.5);
+  dialogue.setCues(
+      {{0, 5, "PREVIOUS LONG DIALOGUE", "Person"}, {1, 5, "X", "Person"}});
+  require(drawDialogue(1.5) == singleLine,
+          "Replacing dialogue must not stack overlapping libass events");
+  require(drawDialogue(0.5) > singleLine,
+          "Seeking backward restores the previous exclusive line");
+  dialogue.setCues(
+      {{1, 5, "REPLACED AT SAME TIME", "Person"}, {1, 5, "X", "Person"}});
+  require(drawDialogue(1.5) == singleLine,
+          "Equal-time dialogue keeps only the last line");
   rejects([&] { scene.setPosition(-1); }, "Reject negative subtitle clock");
   rejects([&] { scene.setCues({{2, 1, "bad", ""}}); }, "Reject reversed cue");
   scene.clear();
   draw(1.5);
   require(colored(renderer, 1) == 0, "Clearing removes the track");
+}
+
+void pauseSources(Engine &engine, TestRuntime &runtime) {
+  auto &debug = engine.GetDebug();
+  auto &menu = GetInGameMenuRuntime(engine);
+  auto &timeline = engine.GetTimeline();
+  const auto previousNode = runtime.node;
+  runtime.node = "pause-test";
+  runtime.timedClock = false;
+  runtime.SetState(GameState::Gameplay);
+  runtime.AddScene(&menu);
+  engine.resetNodeClock();
+  TimelineScript script;
+  script.duration = 10;
+  timeline.play(script);
+  const auto checkPaused = [&] {
+    require(engine.isStoryPaused() && runtime.isStoryPaused(),
+            "Engine and native runtime share the same pause state");
+    const auto timelineBefore = timeline.seconds();
+    const auto clockBefore = engine.activeNodeSeconds();
+    const auto updatesBefore = runtime.unpausedUpdates;
+    SDL_Delay(20);
+    engine.synchronizeTimeline();
+    runtime.update();
+    require(timeline.isPaused() && timeline.seconds() == timelineBefore &&
+                engine.activeNodeSeconds() == clockBefore &&
+                runtime.unpausedUpdates == updatesBefore,
+            "All pause sources freeze the timeline, node clock and native updates");
+  };
+  const auto checkRunning = [&] {
+    require(!engine.isStoryPaused() && !runtime.isStoryPaused(),
+            "Engine and native runtime resume together");
+    const auto timelineBefore = timeline.seconds();
+    const auto clockBefore = engine.activeNodeSeconds();
+    const auto updatesBefore = runtime.unpausedUpdates;
+    SDL_Delay(20);
+    engine.synchronizeTimeline();
+    runtime.update();
+    require(!timeline.isPaused() && timeline.seconds() > timelineBefore &&
+                engine.activeNodeSeconds() > clockBefore &&
+                runtime.unpausedUpdates > updatesBefore,
+            "Unpaused timeline, node clock and native updates advance together");
+  };
+  engine.setAgentPaused(false);
+  checkRunning();
+  debug.setVisible(true);
+  require(!runtime.hasPausingScene(),
+          "Debug pause reaches native runtimes without a modal scene");
+  checkPaused();
+  menu.open();
+  debug.setVisible(false);
+  checkPaused();
+  debug.setVisible(true);
+  menu.close();
+  checkPaused();
+  debug.getSettings().ignorePause = true;
+  checkRunning();
+  menu.open();
+  checkPaused();
+  debug.setVisible(false);
+  checkPaused();
+  menu.close();
+  checkRunning();
+  engine.openSettings();
+  checkPaused();
+  engine.GetSettingsMenu().close();
+  engine.setAgentPaused(true);
+  checkPaused();
+  debug.getSettings().ignorePause = false;
+  debug.setVisible(true);
+  rejects([&] { engine.advanceTimeline(0.1); },
+          "MCP stepping cannot bypass debug pause");
+  debug.setVisible(false);
+  menu.open();
+  rejects([&] { engine.advanceTimeline(0.1); },
+          "MCP stepping cannot bypass an in-game menu");
+  menu.close();
+  engine.advanceTimeline(0.1);
+  checkPaused();
+  engine.setAgentPaused(false);
+  checkRunning();
+  debug.getSettings().ignorePause = false;
+  runtime.RemoveScene(&menu);
+  timeline.stop();
+  runtime.node = previousNode;
+  runtime.timedClock = true;
+  engine.resetNodeClock();
+}
+
+void forcedSubtitles(Engine &engine, TestRuntime &runtime) {
+  struct SubtitleDirectory {
+    std::filesystem::path previous = std::filesystem::current_path();
+    std::filesystem::path path = std::filesystem::temp_directory_path() /
+        ("kotonoha-forced-" + std::to_string(SDL_GetPerformanceCounter()));
+    SubtitleDirectory() {
+      std::filesystem::create_directories(path);
+      std::filesystem::current_path(path);
+    }
+    ~SubtitleDirectory() {
+      std::error_code error;
+      std::filesystem::current_path(previous, error);
+      std::filesystem::remove_all(path, error);
+    }
+  } directory;
+  auto &forced = engine.GetForcedSubtitles();
+  const auto originalDirectory = forced.sourceDirectory();
+  require(originalDirectory.is_absolute(),
+          "Forced subtitle source is already resolved before loading any node");
+  require(!std::filesystem::equivalent(originalDirectory.parent_path(),
+                                       directory.path),
+          "Changing the working directory does not change the startup source");
+  auto &timeline = engine.GetTimeline();
+  auto &manager = GetVNManagerRuntime(engine);
+  runtime.SetState(GameState::Gameplay);
+  runtime.node = "80005";
+  runtime.opaqueGameplay = true;
+  engine.setAgentPaused(true);
+  engine.resetNodeClock();
+
+  const auto header = styleFile().substr(0, styleFile().find("[Events]"));
+  const auto script = header +
+      "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, "
+      "MarginV, Effect, Text\n"
+      "Dialogue: 0,0:00:01.00,0:00:02.00,Person,,0,0,0,,FORCED EARLY\n"
+      "Dialogue: 0,0:00:12.00,0:00:13.00,Person,,0,0,0,,FORCED NATIVE\n";
+  std::filesystem::create_directories(originalDirectory / "nested");
+  const auto originalPath = originalDirectory / "nested/80005.ass";
+  const auto otherOriginal = originalDirectory / "80006.ass";
+  writeTextFileAtomically(originalPath.string(), script);
+  writeTextFileAtomically(otherOriginal.string(), script);
+  forced.reload();
+  forced.updateForActiveNode();
+  require(forced.activePath() == originalPath,
+          "Before dumping, automatic recursive detection loads the original ASS");
+
+  const auto drawForced = [&] {
+    auto &renderer = engine.GetRenderer();
+    SDL_SetRenderDrawColor(&renderer, 0, 0, 0, 255);
+    SDL_RenderClear(&renderer);
+    forced.updateForActiveNode();
+    forced.render(renderer, 1);
+    return colored(renderer, 1);
+  };
+  require(drawForced() > 100, "Automatically detected original renders");
+  writeTextFileAtomically(originalPath.string(), header);
+  forced.reload();
+  require(drawForced() == 0 && forced.activePath() == originalPath,
+          "Reload without a dump reads edits from the original");
+  writeTextFileAtomically(originalPath.string(), script);
+  forced.reload();
+  require(drawForced() > 100, "Original reload restores edited dialogue");
+
+  const auto unrelatedDump = directory.path / "forced_subtitles/80006.ass";
+  ForcedSubtitleRenderer missingSource(engine);
+  require(missingSource.sourceDirectory().empty(),
+          "Startup without a subtitle directory records no automatic source");
+  std::filesystem::create_directories(unrelatedDump.parent_path());
+  writeTextFileAtomically(unrelatedDump.string(), header);
+  missingSource.reload();
+  missingSource.loadForNode("80006");
+  require(missingSource.sourceDirectory().empty() &&
+              missingSource.activePath().empty(),
+          "Reload does not redetect a directory created after startup");
+  runtime.node = "80006";
+  forced.reload();
+  require(drawForced() > 100 && forced.activePath() == otherOriginal,
+          "An existing working-directory ASS does not replace an undumped original");
+  runtime.node = "80005";
+  forced.updateForActiveNode();
+  const auto path = forced.dumpForActiveNode();
+  require(path.filename() == "80005.ass",
+          "Timed native dump uses only the node ID");
+  require(std::filesystem::equivalent(
+              path.parent_path(), directory.path / "forced_subtitles"),
+          "Forced subtitle dumps go to the current working directory");
+  {
+    std::ifstream input(path);
+    const std::string content((std::istreambuf_iterator<char>(input)), {});
+    require(content.find("PlayResX: 640\nPlayResY: 360\n") != std::string::npos,
+            "ASS dump uses the native logical scene dimensions");
+  }
+  rejects([&] { forced.dumpForActiveNode(); },
+          "Dump never overwrites existing subtitles");
+  require(drawForced() == 0 && forced.activePath() == path,
+          "After dumping, reload selects the dump instead of the original");
+  writeTextFileAtomically(path.string(), script);
+  forced.reload();
+  require(drawForced() > 100 && forced.activePath() == path,
+          "Reload follows edits to the dump");
+  const auto newWorkingDirectory = directory.path / "changed-working-directory";
+  std::filesystem::create_directory(newWorkingDirectory);
+  std::filesystem::current_path(newWorkingDirectory);
+  forced.reload();
+  require(drawForced() > 100 && forced.activePath() == path,
+          "Dump reload keeps its absolute path after working directory changes");
+  std::filesystem::current_path(directory.path);
+  std::filesystem::remove(path);
+  forced.reload();
+  require(drawForced() == 0 && forced.activePath().empty(),
+          "A missing selected dump clears the active ASS instead of silently "
+          "falling back to the original");
+  writeTextFileAtomically(path.string(), script);
+  forced.reload();
+  require(drawForced() > 100 && forced.activePath() == path,
+          "Restoring the dump allows reload to recover its active ASS path");
+  runtime.node = "80006";
+  forced.reload();
+  require(drawForced() > 100 && forced.activePath() == otherOriginal,
+          "Dump selection is per node and leaves other originals unchanged");
+  runtime.node = "80005";
+  forced.reload();
+  int green = 0;
+  runtime.inspectScreen = [&](RendererRef renderer) {
+    green = colored(renderer, 1);
+  };
+  const auto frame = [&] {
+    engine.Iterate();
+    return green;
+  };
+  require(frame() > 100 && forced.getPosition() == 12.375,
+          "Forced subtitles render above opaque native scenes without a timeline");
+
+  runtime.seconds = 2;
+  require(frame() == 0, "Native clock respects exclusive subtitle end");
+  runtime.seconds = 1.5;
+  require(frame() > 100 && forced.getPosition() == 1.5,
+          "Native backward seek restores forced subtitles");
+  runtime.node = "missing:67";
+  require(frame() == 0 && forced.activePath().empty(),
+          "Node changes clear stale forced subtitles and the active ASS path");
+  runtime.node = "80005";
+  require(frame() > 100, "Returning to a node reloads its subtitles");
+  auto &menu = GetInGameMenuRuntime(engine);
+  runtime.AddScene(&menu, GameState::Gameplay);
+  int behindUI = 0;
+  runtime.inspectBeforeOverlay = [&](RendererRef renderer) {
+    behindUI = colored(renderer, 1);
+  };
+  menu.open();
+  frame();
+  require(behindUI > 100 && green < behindUI &&
+              forced.getPosition() == 1.5,
+          "Paused forced subtitles remain visible behind the in-game menu");
+  menu.close();
+  runtime.RemoveScene(&menu);
+  require(frame() > 100, "Closing a native menu restores forced subtitles");
+  auto &backlog = GetVNBacklogRuntime(engine);
+  runtime.AddScene(&backlog, GameState::Gameplay);
+  backlog.open();
+  frame();
+  require(behindUI > 100 && green < behindUI,
+          "Backlog renders after, not underneath, forced subtitles");
+  backlog.close();
+  runtime.RemoveScene(&backlog);
+  engine.openSettings();
+  frame();
+  require(behindUI > 100 && forced.getPosition() == 1.5,
+          "Settings preserve paused subtitles in the underlying scene");
+  engine.GetSettingsMenu().close();
+  runtime.inspectBeforeOverlay = {};
+  auto settings = engine.GetSettings();
+  settings.enableForcedSubtitles = false;
+  engine.applySettings(settings, false);
+  require(frame() == 0 && forced.activePath().empty(),
+          "Disabling forced subtitles removes them and clears the active ASS path");
+  settings.enableForcedSubtitles = true;
+  engine.applySettings(settings, false);
+  require(frame() > 100, "Enabling forced subtitles reloads the current node");
+  runtime.SetState(GameState::Menu);
+  require(frame() == 0, "Forced subtitles are cleared outside gameplay");
+  runtime.SetState(GameState::Gameplay);
+
+  // A Standard runtime's global diagnostic clock is not its scene-entry clock.
+  runtime.node = "80005:66";
+  runtime.timedClock = false;
+  runtime.seconds = 123;
+  engine.resetNodeClock();
+  const auto nativePath = forced.dumpForActiveNode();
+  require(nativePath.filename() == "80005-66.ass",
+          "Standard native dump includes both event and position");
+  writeTextFileAtomically(nativePath.string(), script);
+  engine.setAgentPaused(false);
+  engine.synchronizeTimeline();
+  SDL_Delay(1100);
+  engine.synchronizeTimeline();
+  const auto elapsed = engine.activeNodeSeconds();
+  require(elapsed >= 1 && elapsed < 2,
+          "Standard native clock counts scene-entry time, not a global clock");
+  engine.setAgentPaused(true);
+  require(frame() > 100 && forced.getPosition() == elapsed,
+          "Standard native subtitles use event-position file and scene-entry clock");
+  SDL_Delay(25);
+  engine.synchronizeTimeline();
+  require(engine.activeNodeSeconds() == elapsed,
+          "Native fallback clock freezes while paused");
+  runtime.node = "80005:68";
+  engine.synchronizeTimeline();
+  require(engine.activeNodeSeconds() == 0,
+          "Native fallback clock resets on an event ID change");
+
+  runtime.node.clear();
+  ScriptNode dialogue;
+  dialogue.id = 7;
+  dialogue.type = NodeType::Dialogue;
+  dialogue.text = "Standard dialogue";
+  TimelineScript timed;
+  timed.duration = 20;
+  timed.cues.push_back({10, 3, CueType::Dialogue, "Future dialogue"});
+  manager.loadScript({dialogue, ScriptNode(8, timed)});
+  manager.startScript(7);
+  const auto standardPath = forced.dumpForActiveNode();
+  require(standardPath.filename() == "7.ass",
+          "Standard VN nodes can dump ASS without timeline cues");
+  writeTextFileAtomically(standardPath.string(), script);
+  forced.reload();
+  engine.setAgentPaused(false);
+  engine.synchronizeTimeline();
+  SDL_Delay(1100);
+  engine.synchronizeTimeline();
+  require(engine.activeNodeSeconds() >= 0.02 &&
+              engine.GetDebug().nodeClockText().find("Clock: ") !=
+                  std::string::npos,
+          "Standard VN nodes expose an advancing HUD clock");
+  engine.setAgentPaused(true);
+  require(frame() > 100 &&
+              forced.getPosition() == engine.activeNodeSeconds(),
+          "Standard VN forced subtitles render using the shared node clock");
+  manager.jumpToNode(7);
+  require(engine.activeNodeSeconds() == 0,
+          "Re-entering the same standard node resets its clock");
+
+  manager.jumpToNode(8);
+  const auto timedPath = forced.dumpForActiveNode();
+  writeTextFileAtomically(timedPath.string(), script);
+  forced.reload();
+  timeline.seek(12);
+  require(GetVNTextBoxRuntime(engine, "", "", 30).isVisible(),
+          "Seeking forward activates the matching dialogue");
+  timeline.seek(1.5);
+  require(!GetVNTextBoxRuntime(engine, "", "", 30).isVisible(),
+          "Seeking backwards clears dialogue from a future cue");
+  rejects([&] { timeline.seek(-1); }, "Invalid timeline seeks are explicit");
+  require(frame() > 100 && forced.getPosition() == 1.5,
+          "Timeline without normal subtitle cues still renders forced subtitles");
+  auto save = manager.captureSave();
+  timeline.seek(2);
+  require(frame() == 0, "Timeline seek expires forced subtitles");
+  manager.restoreSave(save);
+  require(frame() > 100 && forced.getPosition() == 1.5,
+          "Restoring a timed save restores the forced subtitle clock");
+  timeline.seek(0);
+  require(frame() == 0, "Backward timeline seek hides not-yet-started text");
+  manager.jumpToNode(-1);
+  require(frame() == 0, "Finished scripts clear forced subtitles");
+  runtime.inspectScreen = {};
+  runtime.opaqueGameplay = false;
+  engine.setAgentPaused(false);
+}
+
+void subtitleRasterization(Engine &engine) {
+  auto &renderer = engine.GetRenderer();
+  TexturePtr target(SDL_CreateTexture(&renderer, SDL_PIXELFORMAT_RGBA32,
+                                      SDL_TEXTUREACCESS_TARGET, 2560, 1600));
+  require(bool(target), "Create Retina-sized subtitle test target");
+  require(SDL_SetRenderTarget(&renderer, target.get()),
+          "Select subtitle test target");
+  SubtitleScene scene(engine, 640, 360);
+  scene.setStyle(AssStyle::parse(styleFile()));
+  scene.setCues({{0, 5, "RETINA GLYPHS", "Person"}});
+  const auto capture = [&] {
+    SDL_SetRenderDrawColor(&renderer, 0, 0, 0, 255);
+    SDL_RenderClear(&renderer);
+    scene.render(renderer, 1);
+    SurfacePtr pixels(SDL_RenderReadPixels(&renderer, nullptr));
+    require(bool(pixels), "Read Retina subtitle pixels");
+    return pixels;
+  };
+  const auto equalPixels = [](const SDL_Surface &a, const SDL_Surface &b) {
+    if (a.w != b.w || a.h != b.h || a.format != b.format)
+      return false;
+    for (int y = 0; y < a.h; ++y)
+      if (std::memcmp(static_cast<const Uint8 *>(a.pixels) + y * a.pitch,
+                      static_cast<const Uint8 *>(b.pixels) + y * b.pitch,
+                      a.w * SDL_BYTESPERPIXEL(a.format)) != 0)
+        return false;
+    return true;
+  };
+  require(SDL_SetRenderLogicalPresentation(
+              &renderer, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED) &&
+              SDL_SetRenderScale(&renderer, 4, 4),
+          "Configure a native physical-pixel reference");
+  const SDL_Rect viewport{0, 20, 640, 360};
+  require(SDL_SetRenderViewport(&renderer, &viewport),
+          "Configure letterboxed reference viewport");
+  const auto reference = capture();
+  require(colored(renderer, 1) > 1000, "Reference has visible high-density text");
+  require(SDL_SetRenderViewport(&renderer, nullptr) &&
+              SDL_SetRenderScale(&renderer, 2, 2) &&
+              SDL_SetRenderLogicalPresentation(
+                  &renderer, 1280, 720, SDL_LOGICAL_PRESENTATION_LETTERBOX),
+          "Simulate Retina output with a smaller logical scene");
+  const auto retina = capture();
+  require(equalPixels(*reference, *retina),
+          "Logical presentation rasterizes exactly like native physical pixels");
+  auto &upscaler = engine.GetUpscaler();
+  const auto previousUpscaling = upscaler.getSettings();
+  for (const float factor : {2.0f, 4.0f}) {
+    upscaler.configure({UpscaleBackend::Linear, UpscalePreset::Anime4K,
+                        factor, {}});
+    const auto unscaledGlyphs = capture();
+    require(equalPixels(*retina, *unscaledGlyphs),
+            "Enabling image upscaling must not change subtitle pixels");
+  }
+  upscaler.configure(previousUpscaling);
+
+  require(SDL_SetRenderLogicalPresentation(
+              &renderer, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED) &&
+              SDL_SetRenderScale(&renderer, 4, 1600.0f / 360),
+          "Configure stretched physical-pixel reference");
+  const auto stretchedReference = capture();
+  require(SDL_SetRenderScale(&renderer, 2, 2) &&
+              SDL_SetRenderLogicalPresentation(
+                  &renderer, 1280, 720, SDL_LOGICAL_PRESENTATION_STRETCH),
+          "Configure nonuniform logical presentation");
+  const auto stretched = capture();
+  require(equalPixels(*stretchedReference, *stretched),
+          "Subtitle rasterization accounts for both physical presentation axes");
+  require(SDL_SetRenderTarget(&renderer, nullptr),
+          "Restore window after subtitle rasterization tests");
 }
 
 void controls(Engine &engine, TestRuntime &runtime) {
@@ -308,6 +809,22 @@ int main() {
   try {
     arguments();
     resolver();
+    struct StartupDirectory {
+      std::filesystem::path previous = std::filesystem::current_path();
+      std::filesystem::path path = std::filesystem::temp_directory_path() /
+          ("kotonoha-subtitle-startup-" +
+           std::to_string(SDL_GetPerformanceCounter()));
+      StartupDirectory() {
+        std::filesystem::create_directories(path / "game-assets/forced_subtitles");
+        std::filesystem::create_directories(path / "forced_subtitles");
+        std::filesystem::current_path(path);
+      }
+      ~StartupDirectory() {
+        std::error_code error;
+        std::filesystem::current_path(previous, error);
+        std::filesystem::remove_all(path, error);
+      }
+    } startup;
     TestRuntime runtime;
     struct StyleFile {
       std::filesystem::path path =
@@ -324,10 +841,37 @@ int main() {
     options.rendererOverride = "software";
     options.subtitleStylePath = style.path.string();
     Engine engine(runtime, options);
+    require(std::filesystem::equivalent(
+                engine.GetForcedSubtitles().sourceDirectory(),
+                startup.path / "game-assets/forced_subtitles"),
+            "Startup resolves forced subtitles using overlay reference-root priority");
     require(engine.GetSubtitleStyle().has_value(),
             "Startup loads the selected style file");
+    // Global interface strings share the same live dictionary as game text.
+    const auto originalWidth =
+        engine.GetUI().measureSized("GLOBAL UI", 1000, 24).x;
+    engine.setTranslation("nodo", "GLOBAL UI", "X");
+    require(engine.GetUI().measureSized("GLOBAL UI", 1000, 24).x <
+                originalWidth,
+            "Global UI measurement uses translated labels");
+    auto dump = std::filesystem::temp_directory_path() /
+                ("kotonoha-global-" +
+                 std::to_string(SDL_GetPerformanceCounter()) + ".json");
+    engine.GetTranslation().dump(dump.string(),
+                                 {{7, {"Scene text"}}, {-1, {"Unseen UI"}}});
+    Translation loaded;
+    loaded.load(dump.string());
+    std::filesystem::remove(dump);
+    require(loaded.getSections().count("nodo") &&
+                !loaded.getSections().count("-1") &&
+                loaded.text(7, "GLOBAL UI") == "X" &&
+                loaded.getSections().at("nodo").count("Unseen UI"),
+            "Export separates global interface strings from scene routes");
     subtitles(engine);
+    subtitleRasterization(engine);
     controls(engine, runtime);
+    pauseSources(engine, runtime);
+    forcedSubtitles(engine, runtime);
     fades(engine);
     std::cout << "Extensible arguments/help, ASS style import/rendering and "
                  "debug scaling passed\n";

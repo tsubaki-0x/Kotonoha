@@ -58,9 +58,9 @@ struct TempDir {
 class FakeAssets final : public Kotonoha::AssetProvider {
 public:
     std::string name() const override { return "school-days-comment-test"; }
-    bool contains(const std::string&) const override { return true; }
-    std::vector<Uint8> read(const std::string&) const override { return {}; }
-    Kotonoha::SurfacePtr loadSurface(const std::string&) const override {
+    bool containsAsset(const std::string&) const override { return true; }
+    std::vector<Uint8> readAsset(const std::string&) const override { return {}; }
+    Kotonoha::SurfacePtr loadSurfaceAsset(const std::string&) const override {
         Kotonoha::SurfacePtr surface(
             SDL_CreateSurface(800, 450, SDL_PIXELFORMAT_RGBA32));
         Require(bool(surface), SDL_GetError());

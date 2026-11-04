@@ -3,6 +3,7 @@
 #include <Kotonoha/core/Engine.hpp>
 #include <Kotonoha/core/UI.hpp>
 #include <Kotonoha/events/BackAction.hpp>
+#include <Kotonoha/events/ControllerEvent.hpp>
 #include <Kotonoha/script/TimelinePlayer.hpp>
 
 namespace Kotonoha {
@@ -16,7 +17,7 @@ std::string InGameMenu::itemLabel(int index) const {
 }
 
 SDL_FRect InGameMenu::itemRect(int index) const {
-  return {460, 200.0f + index * 60, 360, 48};
+  return {460, 200.0f + static_cast<float>(index) * 54.0f, 360, 44};
 }
 
 void InGameMenu::openBacklog() { GetVNBacklogRuntime(engine).open(); }
@@ -53,37 +54,45 @@ void InGameMenu::activate(int index) {
   }
 }
 
-void InGameMenu::onEvent(EventRef event) {
+bool InGameMenu::onEvent(EventRef rawEvent) {
+  const auto event = MapControllerEvent(rawEvent);
+  if (!touchActivation.accept(event))
+    return true;
   const int count = itemCount();
 
   if (BackAction(engine, event)) {
     toggle();
-    return;
+    return true;
   }
 
   if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) {
     if (!IsOpen() || count <= 0)
-      return;
+      return false;
     if (event.key.key == SDLK_B) {
       activate(1);
-      return;
+      return true;
     }
-    if (event.key.key == SDLK_DOWN)
+    if (event.key.key == SDLK_DOWN) {
       selected = (selected + 1) % count;
-    if (event.key.key == SDLK_UP)
+      return true;
+    }
+    if (event.key.key == SDLK_UP) {
       selected = (selected + count - 1) % count;
-    if (event.key.key == SDLK_RETURN) {
+      return true;
+    }
+    if (event.key.key == SDLK_RETURN || event.key.key == SDLK_SPACE) {
       activate(selected);
-      return;
+      return true;
     }
   }
   if (!IsOpen())
-    return;
+    return false;
   for (int i = 0; i < count; ++i)
     if (UI::clicked(event, itemRect(i))) {
       activate(i);
-      return;
+      return true;
     }
+  return false;
 }
 
 void InGameMenu::update() {}
@@ -99,8 +108,8 @@ void InGameMenu::render(RendererRef renderer, float) {
 void InGameMenu::renderPanel(RendererRef renderer) {
   auto &ui = engine.GetUI();
   ui.backdrop(renderer, {0, 0, 0, 160});
-  ui.panel(renderer, {440, 130, 400, 440});
-  ui.text(renderer, "Paused", 460, 150, 360, {255, 215, 100, 255});
+  ui.panel(renderer, {440, 120, 400, 440});
+  ui.text(renderer, "Paused", 460, 140, 360, {255, 215, 100, 255});
 }
 
 void InGameMenu::renderItem(RendererRef renderer, int index, bool focused) {

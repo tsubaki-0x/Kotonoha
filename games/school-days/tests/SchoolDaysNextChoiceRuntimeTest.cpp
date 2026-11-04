@@ -96,6 +96,7 @@ void TestCurrentScriptChoiceSeek(const char *route, const fs::path &root) {
           "A03 did not begin at tick 0");
 
   app.runtime.openPanel(4);
+  app.runtime.update();
   Require(app.runtime.debugNode() == "00/00-00-A03",
           "current-script next-choice changed scenes");
   Require(*app.runtime.debugNodeSeconds() == 1.0,
@@ -113,6 +114,7 @@ void TestCrossScriptSkipOn(const char *route, const fs::path &root) {
           "skip-on fixture did not start at A00");
 
   app.runtime.openPanel(4);
+  app.runtime.update();
   Require(app.runtime.debugNode() == "00/00-00-A03",
           "Skip=1 did not traverse A00-A02 to the first choice scene");
   Require(*app.runtime.debugNodeSeconds() == 1.0,
@@ -143,6 +145,7 @@ class RuntimeChoiceTestAccess {
 public:
   static void Seek(Runtime &runtime, Kotonoha_SceneTick tick) {
     runtime.seek(tick);
+    Require(runtime.completePendingSeek(), "synthetic choice seek did not settle");
   }
   static void SetTick(Runtime &runtime, Kotonoha_SceneTick tick) {
     runtime.tick = tick;

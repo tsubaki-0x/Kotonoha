@@ -37,6 +37,13 @@ LogoSplash::LogoSplash(Kotonoha::Engine &engine, Assets &source)
     : Scene(engine), assets(source) {
   for (const char *stem : {"System/SYSTEM/LOGO", "System/System/Logo"})
     try {
+      // A loose game overlay may supply the logo even when the retail
+      // installation and synthetic fixtures have no matching archive entry.
+      const std::string overlayLogo = std::string(stem) + ".png";
+      if (!assets.overlayPath(overlayLogo).empty()) {
+        logo = overlayLogo;
+        break;
+      }
       logo = assets.resolve(stem, true);
       break;
     } catch (const std::exception &) {
@@ -106,6 +113,10 @@ void LogoSplash::render(Kotonoha::RendererRef renderer, float) {
   SDL_SetTextureAlphaModFloat(texture, float(alpha));
   SDL_RenderTexture(&renderer, texture, nullptr, &target);
   SDL_SetTextureAlphaModFloat(texture, 1.0f);
+}
+
+std::string Subtitles::displayCueText(const std::string &text) const {
+  return text;
 }
 
 void Subtitles::bind(const Kotonoha_orsData &script) {

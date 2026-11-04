@@ -1,5 +1,6 @@
 #include "AirRuntime.hpp"
 #include "AirSelection.hpp"
+#include "TitleInput.hpp"
 #include <Air/Images.hpp>
 #include <Air/Session.hpp>
 #include <Air/System.hpp>
@@ -16,6 +17,7 @@
 #include <Kotonoha/core/UI.hpp>
 #include <Kotonoha/events/BackAction.hpp>
 #include <Kotonoha/events/BacklogEvents.hpp>
+#include <Kotonoha/events/ControllerEvent.hpp>
 #include <Kotonoha/localization/Encoding.hpp>
 #include <Kotonoha/media/MediaPlayer.hpp>
 #include <Kotonoha/media/PcmPlayer.hpp>
@@ -31,13 +33,55 @@
 namespace Air {
 using namespace Kotonoha;
 namespace {
-struct Stage : Scene {
+// Keep the composed stage active while the separate presentation scenes are
+// introduced; bind() still supplies its drawing and input callbacks.
+struct Stage final : Scene {
   std::function<void(RendererRef)> draw;
   std::function<bool(EventRef)> input;
-  Stage(Engine &e) : Scene(e) {}
-  void render(RendererRef r, float) override { draw(r); }
-  bool handleEvent(EventRef e) override { return input(e); }
+  explicit Stage(Engine &engine) : Scene(engine) {}
+  void render(RendererRef renderer, float) override {
+    if (draw)
+      draw(renderer);
+  }
+  bool onEvent(EventRef event) override { return input && input(event); }
 };
+namespace Air {
+struct Impl;
+} // namespace Air
+
+namespace {
+struct AirBackgroundScene final : Scene {
+  Air::Impl &impl;
+  AirBackgroundScene(Engine &e, Air::Impl &impl) : Scene(e), impl(impl) {}
+  void render(RendererRef r, float scale) override;
+  bool handleEvent(EventRef e) override;
+  bool designSpace() const override { return false; }
+};
+
+struct AirMovieScene final : Scene {
+  Air::Impl &impl;
+  AirMovieScene(Engine &e, Air::Impl &impl) : Scene(e), impl(impl) {}
+  void render(RendererRef r, float scale) override;
+  bool handleEvent(EventRef e) override { return false; }
+  bool designSpace() const override { return false; }
+};
+
+struct AirEditFieldScene final : Scene {
+  Air::Impl &impl;
+  AirEditFieldScene(Engine &e, Air::Impl &impl) : Scene(e), impl(impl) {}
+  void render(RendererRef r, float scale) override;
+  bool handleEvent(EventRef e) override;
+  bool designSpace() const override { return false; }
+};
+
+struct AirErrorScene final : Scene {
+  Air::Impl &impl;
+  AirErrorScene(Engine &e, Air::Impl &impl) : Scene(e), impl(impl) {}
+  void render(RendererRef r, float scale) override;
+  bool handleEvent(EventRef e) override { return false; }
+  bool designSpace() const override { return false; }
+};
+} // namespace
 struct Text : VNTextBox {
   AirAssets &assets;
   SurfacePtr frame, back, cursor, buttonSurface;
@@ -80,40 +124,22 @@ struct Text : VNTextBox {
   }
   GlossCursor textCursor(const std::string &value) const {
     GlossCursor p;
-    std::string line;
     auto width = [&](const std::string &v) {
       int w = 0, h = 0;
       if (font)
         TTF_GetStringSize(font.get(), v.data(), v.size(), &w, &h);
       else
         w = int(v.size()) * 13;
-      return w;
+      return static_cast<float>(w);
     };
-    for (std::size_t i = 0; i < value.size();) {
-      if (value[i] == '\n') {
-        p.y += 28;
-        line.clear();
-        ++i;
-        continue;
-      }
-      auto end = i;
-      while (end < value.size() && value[end] != ' ' && value[end] != '\n')
-        ++end;
-      if (end == i)
-        ++end;
-      auto word = value.substr(i, end - i);
-      if (!line.empty() && width(line + word) > 528) {
-        p.y += 28;
-        line.clear();
-        if (word == " ") {
-          i = end;
-          continue;
-        }
-      }
-      line += word;
-      i = end;
+    const auto lines = Kotonoha::VNTextBoxUtility::WrapText(value, width, 528.0f);
+    if (!lines.empty()) {
+      p.y = static_cast<float>((lines.size() - 1) * 28);
+      p.x = 53.0f + width(lines.back());
+    } else {
+      p.x = 53.0f;
+      p.y = 0.0f;
     }
-    p.x = 53 + width(line);
     return p;
   }
   bool designSpace() const override { return false; }
@@ -187,7 +213,14 @@ struct Text : VNTextBox {
       VNTextBox::render(r, scale);
   }
   bool handleEvent(EventRef event) override {
-    return isVisible() && !concealed && controls.handle(event);
+    if (!isVisible() || concealed)
+      return false;
+    // The sprite toolbar is pointer-only. D-pad and arrow keys belong to the
+    // dialogue/game menus; otherwise a stray D-pad press leaves hidden keyboard
+    // focus on a toolbar button and East activates it instead of advancing.
+    if (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP)
+      return false;
+    return controls.handle(event);
   }
   void renderFrame(RendererRef r) override {
     image(r, *back, 0, 345);
@@ -284,7 +317,8 @@ struct AirRuntime::Impl {
   std::map<int, EditField> editFields;
   int focusedEdit = -1;
   bool autoMode = false, skipMode = false, skipHeld = false;
-  Uint64 autoDeadline = 0;
+  ControllerTriggerSkip triggerSkip;
+  Uint64 autoDeadline = 0, skipDeadline = 0;
   bool ctrlSkipEnabled = true, currentRead = false;
   std::pair<int, std::size_t> currentPage;
   std::set<std::pair<int, std::size_t>> readPages;
@@ -313,6 +347,7 @@ struct AirRuntime::Impl {
   Uint64 deadline = 0;
   float mouseX = -1, mouseY = -1;
   int button1 = 0, button2 = 0;
+  TitleInput titleInput;
   std::map<std::pair<int, int>, int> settings;
   std::map<int, Uint64> timers;
   std::vector<std::array<int, 3>> shake;
@@ -615,9 +650,16 @@ struct AirRuntime::Impl {
           {{616, 427, 12, 16},
            [this] {
              autoMode = !autoMode;
+             if (autoMode)
+               skipMode = false;
              autoDeadline = 0;
            }},
-          {{616, 444, 12, 16}, [this] { skipMode = !skipMode; }}};
+          {{616, 444, 12, 16},
+           [this] {
+             skipMode = !skipMode;
+             if (skipMode)
+               autoMode = false;
+           }}};
       choice = std::make_unique<AirSelection>(e, *assets);
       stage->draw = [this](auto &r) { draw(r); };
       stage->input = [this](auto &e) { return event(e); };
@@ -656,6 +698,7 @@ struct AirRuntime::Impl {
       bgmGain = 1;
       sounds.clear();
       runtime.SetState(GameState::Menu);
+      titleInput.reset();
       pause = false;
       error.clear();
       dialogue.clear();
@@ -666,7 +709,7 @@ struct AirRuntime::Impl {
   void openSaves(bool load) {
     if (!saves)
       saves = std::make_unique<VNSaveMenu>(*engine);
-    std::string dir = (preferredDocumentsDirectory() / "saves").string();
+    std::string dir = (Kotonoha::saveDirectory() / "saves").string();
     saves->open(dir, load, load ? "" : saveName);
     runtime.RemoveScene(saves.get());
     runtime.AddScene(saves.get());
@@ -680,6 +723,8 @@ struct AirRuntime::Impl {
       readPages.insert(currentPage);
       pause = false;
       autoDeadline = 0;
+      autoMode = false;
+      skipMode = false;
       if (pauseKind != 205) {
         dialogue.clear();
         speakerName.clear();
@@ -688,8 +733,29 @@ struct AirRuntime::Impl {
       }
     }
   }
+  // The title front-end idles after the native refresh command, so only then
+  // is the script about to poll the mouse again.
+  bool titleMenu() const {
+    return vm.scenario() == 9032 && vm.index() == 860 &&
+           runtime.GetState() == GameState::Menu && !pause &&
+           !choice->isActive() && error.empty();
+  }
+  // Other loops in SEEN 9032 poll intA and must stay pointer-only; the title
+  // menu is the poll that writes the button register intF[1003].
+  bool titlePoll(const libreallive::CommandElement &c) {
+    if (vm.scenario() != 9032)
+      return false;
+    return Parameter(c, 2).GetIntegerReferenceIterator(vm.machine()) ==
+           IntReferenceIterator(&vm.machine().memory(), 5, 1003);
+  }
   bool event(EventRef e) {
-    if (pause && BackAction(*engine, e)) {
+    if (titleMenu() && titleInput.handle(e)) {
+      mouseX = titleInput.mouseX();
+      mouseY = titleInput.mouseY();
+      return true;
+    }
+    if (pause && e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
+        e.key.key == SDLK_ESCAPE) {
       GetInGameMenuRuntime(*engine).open();
       return true;
     }
@@ -697,7 +763,17 @@ struct AirRuntime::Impl {
       GetVNBacklogRuntime(*engine).open();
       return true;
     }
-    if (e.type == SDL_EVENT_WINDOW_FOCUS_LOST)
+    // Controller Back/left shoulder maps to PAGEUP (see MapControllerEvent);
+    // the AIR text box overrides the shared VNTextBox handler, so accept it
+    // here as well.
+    if (pause && textbox->isVisible() && e.type == SDL_EVENT_KEY_DOWN &&
+        !e.key.repeat && e.key.key == SDLK_PAGEUP) {
+      GetVNBacklogRuntime(*engine).open();
+      return true;
+    }
+
+    if (e.type == SDL_EVENT_WINDOW_FOCUS_LOST ||
+        e.type == SDL_EVENT_GAMEPAD_REMOVED)
       skipHeld = false;
     if ((e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP) &&
         (e.key.key == SDLK_LCTRL || e.key.key == SDLK_RCTRL)) {
@@ -715,10 +791,19 @@ struct AirRuntime::Impl {
         }
       } else if (textbox->handleEvent(e))
         return true;
-      if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
-          e.key.key == SDLK_A) {
+      if (!engine->isStoryPaused() && e.type == SDL_EVENT_KEY_DOWN &&
+          !e.key.repeat && e.key.key == SDLK_A) {
         autoMode = !autoMode;
+        if (autoMode)
+          skipMode = false;
         autoDeadline = 0;
+        return true;
+      }
+      if (!engine->isStoryPaused() && e.type == SDL_EVENT_KEY_DOWN &&
+          !e.key.repeat && e.key.key == SDLK_S) {
+        skipMode = !skipMode;
+        if (skipMode)
+          autoMode = false;
         return true;
       }
     }
@@ -897,14 +982,18 @@ bool AirRuntime::Impl::command(const libreallive::CommandElement &c) {
     case 130:
       button1 = button2 = 0;
       return true;
-    case 133:
+    case 133: {
+      // Keyboard/gamepad title input is injected at the native poll so it
+      // cannot be lost to the script's own 1:4:130 register clear.
+      const int synthetic = titlePoll(c) ? titleInput.poll() : -1;
       assign(c, 0, int(mouseX));
       assign(c, 1, int(mouseY));
-      assign(c, 2, button1);
+      assign(c, 2, synthetic >= 0 ? synthetic : button1);
       assign(c, 3, button2);
       button1 = button1 == 2 ? 0 : button1;
       button2 = button2 == 2 ? 0 : button2;
       return true;
+    }
     case 204:
       SDL_ShowCursor();
       return true;
@@ -1621,8 +1710,14 @@ void AirRuntime::shutdown() {
   impl->stage.reset();
   impl->movie.reset();
 }
-void AirRuntime::initMenu(Engine &e) { impl->bind(e); }
-void AirRuntime::initGameplay(Engine &e) { impl->bind(e); }
+void AirRuntime::initMenu(Engine &e) {
+  impl->bind(e);
+  impl->titleInput.reset();
+}
+void AirRuntime::initGameplay(Engine &e) {
+  impl->bind(e);
+  impl->titleInput.reset();
+}
 void AirRuntime::update() {
   Runtime::update();
   auto &i = *impl;
@@ -1905,7 +2000,22 @@ void AirRuntime::loadGame(const std::string &path) {
   i.bgm.SetGain(gain);
 }
 
-void AirRuntime::onEvent(EventRef e) { Runtime::onEvent(e); }
+bool AirRuntime::onEvent(EventRef e) {
+  if (!impl)
+    return Runtime::onEvent(e);
+  // Modal scenes translate controller input in their own context. Pre-mapping
+  // would turn South into held skip while the pause/save menus are open and
+  // would hide the history state from the backlog. Holding South while a modal
+  // opens must also stop skipping in the background.
+  for (auto *scene : GetActiveScenes())
+    if (scene && scene->capturesInput()) {
+      impl->skipHeld = false;
+      return Runtime::onEvent(e);
+    }
+  const bool dialogue =
+      impl->textbox && impl->textbox->isVisible() && !impl->textbox->concealed;
+  return Runtime::onEvent(Kotonoha::MapControllerEvent(e, dialogue));
+}
 int AirRuntime::translationRoute() const { return impl->vm.scenario(); }
 std::vector<int> AirRuntime::translationRoutes() const {
   return impl->archive.ScenarioNumbers();

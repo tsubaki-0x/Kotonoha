@@ -1,9 +1,12 @@
 #include <Kotonoha/componentes/ChoiceQuestionScene.hpp>
 #include <Kotonoha/componentes/InGameMenu.hpp>
 #include <Kotonoha/componentes/SettingsMenu.hpp>
+#include <Kotonoha/componentes/TouchActivation.hpp>
 #include <Kotonoha/componentes/VNBacklog.hpp>
 #include <Kotonoha/componentes/VNManager.hpp>
 #include <Kotonoha/componentes/VNTextBox.hpp>
+#include <Kotonoha/core/UI.hpp>
+#include <Kotonoha/events/ControllerEvent.hpp>
 #include <Kotonoha/script/KtrfScript.hpp>
 #include <Kotonoha/script/TimelinePlayer.hpp>
 
@@ -160,6 +163,7 @@ void VNManager::jumpToNode(int nodeId) {
       throw std::out_of_range("Unknown script node: " + std::to_string(nodeId));
     currentNodeId = nodeId;
     isFinishedState = false;
+    engine.resetNodeClock();
     inputBlocked = awaitingChoice = false;
     // Callbacks may mutate the graph or jump to another node.
     const auto node = localizedNode(nodeId);
@@ -223,12 +227,20 @@ void VNManager::advance() {
   jumpToNode(scriptNodes.at(currentNodeId).nextNodeId);
 }
 
-void VNManager::onEvent(EventRef event) {
+bool VNManager::onEvent(EventRef rawEvent) {
+  if (isFinishedState || currentNodeId < 0)
+    return false;
+  const auto event = MapControllerEvent(rawEvent);
+  if (!touchActivation.accept(event))
+    return true;
   if ((event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
        (event.key.key == SDLK_SPACE || event.key.key == SDLK_RETURN)) ||
-      (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
-       event.button.button == SDL_BUTTON_LEFT))
+      UI::clicked(event, {0, 0, float(engine.GetRuntime().viewport().x),
+                          float(engine.GetRuntime().viewport().y)})) {
     advance();
+    return true;
+  }
+  return false;
 }
 
 void VNManager::update() {
@@ -285,6 +297,7 @@ void VNManager::restoreSave(const VNSave &state) {
     engine.GetTimeline().setPaused(engine.isStoryPaused());
     currentNodeId = state.nodeId;
     isFinishedState = false;
+    engine.resetNodeClock();
     inputBlocked = true;
     awaitingChoice = GetChoiceQuestionRuntime(engine).isActive();
   } else {

@@ -107,6 +107,28 @@ ctest --test-dir build --output-on-failure
 ./build/games/example/Kotonoha
 ```
 
+### Windows / Visual Studio
+
+Instale a carga de trabalho **Desenvolvimento para desktop com C++**, incluindo
+o SDK Windows, CMake e Ninja. Abra esta pasta no Visual Studio e selecione
+`x64-Debug`; `CMakeSettings.json` usa `out/build/x64-Debug` como diretorio de
+build. A integracao vcpkg do Visual Studio fornece as dependencias.
+
+Pelo **Developer PowerShell for VS** (x64), o equivalente e:
+
+```powershell
+cmake -S . -B out/build/x64-Debug -G Ninja -DCMAKE_BUILD_TYPE=Debug `
+  "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+cmake --build out/build/x64-Debug --parallel
+```
+
+O launcher MSVC usa UTF-8 em `/showIncludes` para que o Ninja rastreie
+headers corretamente mesmo com o Visual Studio em portugues e sem o pacote
+de idioma ingles. A primeira
+compilacao apos essa correcao recompila os objetos antigos automaticamente.
+O link e a copia de DLLs sao serializados para evitar acessos concorrentes
+ao mesmo arquivo; a compilacao C/C++ continua paralela.
+
 O manifesto [vcpkg.json](vcpkg.json) instala `plutosvg[freetype]` e sua
 dependencia PlutoVG. SDL_ttf usa `SDLTTF_PLUTOSVG=ON` por padrao e falha na
 configuracao se uma dependencia habilitada nao for encontrada. Para um build
@@ -138,9 +160,11 @@ SDL_ttf, ImGui e libass usam somente as fontes de `assets/fonts`
 para fontes do sistema.
 
 Todo caminho empacotado ou do usuario passa pelo
-[FileResolver](lib/include/Kotonoha/core/FileSystem.hpp), que procura, nesta
-ordem: bundle, pasta de dados preferida (OBB no Android), diretorio de
-trabalho, diretorio do executavel e pasta de documentos do jogo.
+[FileResolver](lib/include/Kotonoha/core/FileSystem.hpp), com regras separadas
+para assets da engine, assets do jogo, referencias de overlay e saves.
+Os saves usam sempre `<base da plataforma>/Kotonoha/<id do pacote>`;
+preferencias do launcher guardam nomes, resolvidos a cada execucao.
+Veja a [politica de diretorios e exemplos por plataforma](docs/Directories.pt-BR.md).
 `engineAsset("fonts/...")` procura em `assets/`; `gameAsset(jogo, ...)` procura
 em `game-assets/` e em `games/<jogo>/game-assets/`. `resolve` lanca um erro
 listando todos os locais procurados.
@@ -243,7 +267,7 @@ Abra `Xcode/Kotonoha.xcodeproj`: o projeto e seus targets sao mantidos no
 Xcode e **nao exigem CMake para compilar**. `KotonohaEngine` e um framework
 estatico; SDL3, SDL3_ttf e Dear ImGui sao frameworks dinamicos. O target SDL3 usa o projeto
 Xcode do proprio submodulo; SDL_ttf compila com HarfBuzz e PlutoSVG.
-Os schemes `Kotonoha`, `ZeroNoTsukaima`, `SnowRadish`, `DokiDoki` e `SchoolDays` geram
+Os schemes `Kotonoha`, `ZeroNoTsukaima`, `SnowRadish`, `DokiDoki`, `SchoolDays`, `Air`, `SummerRadish` e `Amagami` geram
 apps separados. `KotonohaIOSSmoke` verifica CP932 e glifos SVG no simulador.
 O executavel demonstrativo chama-se `Kotonoha`; seu namespace C++ e
 `KotonohaExample`, separado do motor. A opcao CMake
@@ -280,8 +304,10 @@ Para instalar em dispositivo, selecione sua equipe de assinatura e altere os
 identificadores de bundle quando necessario.
 
 Os IDs nativos dos jogos correspondem aos applicationIds Android:
-`me.hirameki.kotonoha.zeronotsukaima`, `.snowradish`, `.ddlc` e `.schooldays`.
-O exemplo usa `org.kotonoha.example`. O bundle ID/applicationId selecionado
+`me.hirameki.kotonoha.zeronotsukaima`, `.snowradishvacation`,
+`.dokidokiliteratureclub`, `.schooldays`, `.air`, `.summerradishvacation` e `.amagami`.
+O exemplo usa `me.hirameki.kotonoha` no iOS e `me.kotonoha.example` no Android.
+O bundle ID/applicationId selecionado
 na plataforma determina a identidade da instalacao, sandbox, preferencias
 e armazenamento externo; metadados SDL em C++ nao substituem Xcode/Gradle.
 IDs antigos, como `org.kotonoha.neostart`, `me.hirameki.neostart.*` e os
@@ -407,6 +433,16 @@ como padrao. `--ktrf` sobrescreve explicitamente a rota lembrada.
 
 - Clique esquerdo, Espaco ou Enter: completar a fala / avancar.
 - Escolhas: clique, setas e Enter/Espaco; roda do mouse para listas longas.
+- Controle: direcional ou analogico esquerdo navega; Leste (Circulo/B)
+  confirma; Sul (X/A) cancela nos menus; Start/Norte abre pausa. Back/L1 abre
+  o historico (e o fecha enquanto aberto). Nos ajustes nativos, L1/R1
+  alternam abas.
+- Toque: tocar ativa; arrastar rola listas e historico. Arraste, cancelamento
+  e um segundo dedo impedem a confirmacao de itens. Deslizar da borda ou tocar
+  com dois dedos volta; deslizar para cima durante a fala abre o historico.
+- Durante a fala, segurar Sul pula (soltar interrompe); Oeste alterna pular e
+  R1 alterna Auto nos portes que implementam esses recursos. Nos menus, os
+  botoes continuam navegando e Sul cancela mesmo com a fala visivel por baixo.
 - B: historico. Roda do mouse ou setas: rolar. B/ESC: fechar.
 - ESC: menu de pausa; setas/Enter ou mouse nos menus.
 - Entrada de nome: texto UTF-8, Backspace, Enter e ESC.
@@ -1320,3 +1356,14 @@ evidências da descompilação com REA, testes e pendências estão em
 [PORT_STATUS.md](games/summer-radish-vacation/PORT_STATUS.md).
 
 Shared overlay, gesture and live translation behavior: [documentation](docs/ASSET_OVERLAYS.md).
+
+## Revisão dos portes
+
+Os relatórios de [Amagami](games/amagami/PORT_STATUS.md),
+[AIR](games/air/PORT_STATUS.md) e [School Days](games/school-days/PORT_STATUS.md)
+registram correções verificadas e comandos ainda pendentes. Os inspetores de
+Amagami e AIR aceitam `--opcodes` para gerar inventários reproduzíveis.
+A [gestão compartilhada de arquivos](docs/ASSET_OVERLAYS.md#shared-file-ownership)
+centraliza leitura, overlays e índices no Kotonoha; formatos próprios ficam nos
+provedores de cada jogo. School Days usa `TextInputDialog` do motor para nomes
+de saves e estende `SubtitleScene` para mostrar uma fala de cada vez.

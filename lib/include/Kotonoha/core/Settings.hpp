@@ -14,7 +14,10 @@ struct EngineSettings {
   int fullscreenWidth = 0, fullscreenHeight = 0;
   float refreshRate = 0;
   bool resizable = true;
-  bool vsync = false;
+  bool vsync = true;
+  // Swap the controller face buttons used for confirm/cancel. Shown in the
+  // settings UI only while at least one gamepad is connected.
+  bool swapControllerAB = false;
   float masterVolume = 1;
   bool masterMuted = false;
   std::map<std::string, float> channelVolumes;
@@ -32,6 +35,7 @@ struct EngineSettings {
   std::string translationPath;
   std::string assetOverlayPath;
   std::string fontPath;
+  bool enableForcedSubtitles = true;  // Toggle for forced subtitles system
   void validate() const;
   static EngineSettings load(const std::string &path);
   static EngineSettings load(const std::string &path,

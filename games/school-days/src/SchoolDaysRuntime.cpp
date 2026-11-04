@@ -2,6 +2,11 @@
 #if defined(KOTONOHA_DEV_CONTROL) && defined(_WIN32)
 #include "SchoolDaysDevBridge.hpp"
 #endif
+#include <Kotonoha/componentes/TextInputDialog.hpp>
+#include <Kotonoha/events/BackAction.hpp>
+#include <Kotonoha/events/ControllerEvent.hpp>
+#include <Kotonoha/localization/Encoding.hpp>
+#include <Kotonoha/media/upscaling/Upscaler.hpp>
 
 #include <Kotonoha/SchoolDaysAudioEventState.hpp>
 #include <Kotonoha/SchoolDaysBgmEventState.hpp>
@@ -26,6 +31,7 @@
 #include <Kotonoha/routing/SchoolDaysRouteMapModel.hpp>
 #include <Kotonoha/routing/SchoolDaysRouteMapOracle.hpp>
 #include <Kotonoha/routing/SchoolDaysSaveMetadata.hpp>
+#include <Kotonoha/routing/SchoolDaysPersistenceCodec.hpp>
 #include <Kotonoha/routing/SchoolDaysSaveService.hpp>
 #include <Kotonoha/routing/SchoolDaysSubtitleTypography.hpp>
 #include <SDL3_ttf/SDL_ttf.h>
@@ -798,7 +804,8 @@ void Runtime::shutdown() {
 }
 
 void Runtime::prepareCarryFrame() {
-  if (engine && !engine->GetVisualTransition().active()) {
+  if (engine && engine->GetVisualTransition().hasLastPresented() &&
+      !engine->GetVisualTransition().active()) {
     if (engine->GetVisualTransition().begin("narrative-boundary", scene.sceneKey))
       traceDev("OutgoingCaptured");
   }
@@ -807,7 +814,10 @@ void Runtime::prepareCarryFrame() {
 void Runtime::commitCarryFrame() {
   if (!engine) return;
   auto &transition = engine->GetVisualTransition();
-  if (!transition.active()) transition.begin("narrative-boundary", scene.sceneKey);
+  if (!transition.active()) {
+    if (!transition.hasLastPresented()) return;
+    transition.begin("narrative-boundary", scene.sceneKey);
+  }
   transition.arm(scene.sceneKey);
 }
 
@@ -991,6 +1001,14 @@ void Runtime::init(Kotonoha::Engine &owner) {
     const auto legacy = documents / "GlobalFlag";
     if (!present && std::filesystem::is_regular_file(legacy)) {
       bytes = assets->read(legacy.string());
+      present = true;
+    }
+    if (!present) {
+      // A clean first launch has no Save/GlobalFlag.DAT yet. Keep a live,
+      // empty FlagsHash so the first save can create the retail document.
+      if (!Kotonoha::SchoolDaysPersistenceCodec::SerializeFlgH(
+              Kotonoha::SchoolDaysFlgH{}, &bytes, &failure))
+        throw std::runtime_error(failure);
       present = true;
     }
     if (present) {
@@ -2703,14 +2721,15 @@ void Runtime::back() {
     backAtSceneStart = true;
     return;
   }
-  if (!pendingBackCapture) {
+  const bool hasPresentedFrame = engine &&
+      (engine->GetVisualTransition().hasLastPresented() ||
+       engine->GetVisualTransition().outgoingValid());
+  if (hasPresentedFrame && !pendingBackCapture) {
     pendingBackCapture = true;
     return;
   }
-  if (!engine || (!engine->GetVisualTransition().hasLastPresented() &&
-                  !engine->GetVisualTransition().outgoingValid())) return;
   pendingBackCapture = false;
-  prepareCarryFrame();
+  if (hasPresentedFrame) prepareCarryFrame();
   retireSceneEventPointers();
   Kotonoha_KtrfError error{};
   Kotonoha::SchoolDaysKtrfGameplayBridge::StepResult result;
@@ -3876,24 +3895,31 @@ bool Runtime::onScreenEvent(Kotonoha::EventRef event) {
   return true;
 }
 
-void Runtime::onEvent(Kotonoha::EventRef event) {
+bool Runtime::onEvent(Kotonoha::EventRef eventInput) {
+  const SDL_Event event = Kotonoha::MapControllerEvent(
+      eventInput, currentState == Kotonoha::GameState::Gameplay,
+      backlogFallback && backlogFallback->isVisible());
   if (currentState == Kotonoha::GameState::Splash) {
-    Kotonoha::Runtime::onEvent(event);
-    return;
+    return Kotonoha::Runtime::onEvent(event);
   }
-  if (exitTransition.InputLocked() && FrontendInputEvent(event.type)) return;
-  if (systemPanelTransition.InputLocked() && FrontendInputEvent(event.type)) return;
+  if (exitTransition.InputLocked() && FrontendInputEvent(event.type)) return true;
+  if (systemPanelTransition.InputLocked() && FrontendInputEvent(event.type)) return true;
   if (frontendTransition.Active(SDL_GetTicks()) && FrontendInputEvent(event.type))
-    return;
+    return true;
   const bool escape = event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
                       event.key.key == SDLK_ESCAPE;
   if (saveMenu->isOpen()) {
+    for (auto *scene : GetActiveScenes())
+      if (auto *dialog = dynamic_cast<Kotonoha::TextInputDialog *>(scene)) {
+        dispatchEvent(*dialog, event);
+        return true;
+      }
     dispatchEvent(*saveMenu, event);
-    return;
+    return true;
   }
   if (backlogFallback->isVisible()) {
     dispatchEvent(*backlogFallback, event);
-    return;
+    return true;
   }
   if (backlogModel.IsOpen()) {
     if (escape) {
@@ -3913,7 +3939,7 @@ void Runtime::onEvent(Kotonoha::EventRef event) {
         if (!beginSystemPanelClose()) closePanels();
       }
     }
-    return;
+    return true;
   }
   if (systemUi.IsOpen()) {
     if (systemUi.IsSaveLoadCommentEditorOpen()) {
@@ -3922,14 +3948,14 @@ void Runtime::onEvent(Kotonoha::EventRef event) {
         if (systemUi.HandleEvent(&engine->GetRenderer(), &event, &output))
           handlePanel(output);
       } catch (const std::exception &error) { setStatus(error.what()); }
-      return;
+      return true;
     }
     if (escape) {
       if (bridge.HasPendingHandoff() &&
           (handoffUiState == HandoffUiState::SaveFeel ||
            handoffUiState == HandoffUiState::SaveLoad) &&
           (systemUi.IsSaveFeelOpen() || systemUi.IsSaveLoadOpen())) {
-        return;
+        return true;
       }
       playSound(Ui::UiSfxCue::Cancel);
       if (systemUi.IsRouteMapOpen()) {
@@ -3944,18 +3970,18 @@ void Runtime::onEvent(Kotonoha::EventRef event) {
                (frontendChild == FrontendChild::Replay && systemUi.IsReplayOpen()))
         beginChildToTitle(SDL_GetTicks());
       else if (!beginSystemPanelClose()) closePanels();
-      return;
+      return true;
     }
     Ui::Output output;
     try {
       if (systemUi.HandleEvent(&engine->GetRenderer(), &event, &output)) handlePanel(output);
     } catch (const std::exception &error) { setStatus(error.what()); }
-    return;
+    return true;
   }
-  if (modal()) return;
+  if (modal()) return true;
   try {
     if (currentState == Kotonoha::GameState::Gameplay && gameScene->handleEvent(event))
-      return;
+      return true;
     if (currentState == Kotonoha::GameState::Menu && !titleArtwork) {
       if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) {
         if (event.key.key == SDLK_UP) titleSelection = (titleSelection + 3) % 4;
@@ -3969,7 +3995,7 @@ void Runtime::onEvent(Kotonoha::EventRef event) {
           if (i == 1) beginTitleHandoff(FrontendHandoff::TitleLoad, SDL_GetTicks());
           if (i == 2) beginTitleHandoff(FrontendHandoff::TitleConfig, SDL_GetTicks());
           if (i == 3) openExit();
-          return;
+          return true;
         }
     } else if (currentState == Kotonoha::GameState::Menu && title.IsOpen()) {
       if (event.type == SDL_EVENT_MOUSE_MOTION) {
@@ -3979,7 +4005,7 @@ void Runtime::onEvent(Kotonoha::EventRef event) {
       }
       if (event.type == SDL_EVENT_MOUSE_BUTTON_UP && event.button.button == SDL_BUTTON_LEFT) {
         int x = -1, y = -1;
-        if (!pointerToTitle(event.button.x, event.button.y, &x, &y)) return;
+        if (!pointerToTitle(event.button.x, event.button.y, &x, &y)) return true;
         title.SetSelectionFromPointer(x, y);
         Kotonoha::SchoolDaysTitleModel::Activation action;
         if (title.ActivateSelection(&action)) {
@@ -3997,15 +4023,15 @@ void Runtime::onEvent(Kotonoha::EventRef event) {
         }
       }
     }
-    if (event.type != SDL_EVENT_KEY_DOWN || event.key.repeat) return;
+    if (event.type != SDL_EVENT_KEY_DOWN || event.key.repeat) return true;
     if (event.key.key == SDLK_ESCAPE) {
       if (currentState == Kotonoha::GameState::Menu)
         beginTitleHandoff(FrontendHandoff::TitleConfig, SDL_GetTicks());
       else
         openConfig(Kotonoha::SchoolDaysConfigMenuModel::Page::Def);
-      return;
+      return true;
     }
-    if (currentState != Kotonoha::GameState::Gameplay) return;
+    if (currentState != Kotonoha::GameState::Gameplay) return true;
     if (event.key.key == SDLK_SPACE) paused = !paused;
     if (!temporaryPlaybackActive() && event.key.key == SDLK_F5)
       saveGame((documents / "QuickSave").string());
@@ -4016,7 +4042,9 @@ void Runtime::onEvent(Kotonoha::EventRef event) {
       if (auto target = timeline.ComputeSkipToEndTarget(tick)) seek(*target);
   } catch (const std::exception &error) {
     setStatus(error.what());
+    return true;
   }
+  return false;
 }
 
 void Runtime::activateControl(int control) {
@@ -4373,6 +4401,11 @@ void Runtime::handleConfig(const Kotonoha::SchoolDaysConfigMenuModel::Action &ac
       closePanels();
     return;
   case Kind::SelectPage:
+    if (action.page == Kotonoha::SchoolDaysConfigMenuModel::Page::Display) {
+      closePanels();
+      engine->openSettings();
+      return;
+    }
     openConfig(action.page);
     displayPanelResolutionOpen = false;
     displayPanelPresetOpen = false;
@@ -4794,7 +4827,11 @@ void Runtime::handlePanel(const Ui::Output &output) {
       try {
         saveSlot(result.slot, result.comment);
         setStatus("Saved to slot " + std::to_string(result.slot + 1));
-      } catch (const std::exception &error) { setStatus(error.what()); }
+      } catch (const std::exception &error) {
+        SDL_LogError(Kotonoha::LogUI, "School Days save slot %d: %s",
+                     result.slot, error.what());
+        setStatus(error.what());
+      }
       saveLoadPage = -1;
       break;
     default: break;

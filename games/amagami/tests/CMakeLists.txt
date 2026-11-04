@@ -20,3 +20,28 @@ endif()
 add_executable(AmagamiVmTest VmTest.cpp)
 target_link_libraries(AmagamiVmTest PRIVATE AmagamiFormats)
 add_test(NAME Amagami.Vm COMMAND AmagamiVmTest)
+
+if(TEST Amagami.Engine)
+    set_property(TEST Amagami.Engine APPEND PROPERTY FAIL_REGULAR_EXPRESSION
+        "Estimating duration from bitrate" "Could not update timestamps for discarded samples")
+endif()
+
+if(TARGET AmagamiEngineTest)
+    add_test(NAME Amagami.Translation COMMAND AmagamiEngineTest "${AMAGAMI_DISC_IMAGE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../translations/amagami/pt-BR.json")
+    set_tests_properties(Amagami.Translation PROPERTIES
+        ENVIRONMENT "SDL_VIDEO_DRIVER=dummy;SDL_AUDIO_DRIVER=dummy")
+endif()
+
+add_executable(AmagamiBacklogTest BacklogTest.cpp)
+target_link_libraries(AmagamiBacklogTest PRIVATE amagami)
+kotonoha_copy_assets(AmagamiBacklogTest)
+add_test(NAME Amagami.Backlog COMMAND AmagamiBacklogTest)
+set_tests_properties(Amagami.Backlog PROPERTIES
+    ENVIRONMENT "SDL_VIDEO_DRIVER=dummy;SDL_AUDIO_DRIVER=dummy")
+
+if(AMAGAMI_DISC_IMAGE AND EXISTS "${AMAGAMI_DISC_IMAGE}")
+    add_executable(AmagamiCampaignTest CampaignTest.cpp)
+    target_link_libraries(AmagamiCampaignTest PRIVATE AmagamiFormats)
+    add_test(NAME Amagami.Campaign COMMAND AmagamiCampaignTest "${AMAGAMI_DISC_IMAGE}")
+endif()

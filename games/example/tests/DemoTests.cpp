@@ -14,6 +14,7 @@
 #include <iostream>
 #include <stdexcept>
 
+
 namespace {
 void require(bool condition, const char *message) {
   if (!condition)
@@ -89,18 +90,33 @@ void testMultipleSaves(KotonohaExample::DemoGame &game,
 
   const auto newPath = storage.nextPath();
   press(engine, SDLK_ESCAPE);
-  click(engine, 500, 400); // Pause menu: Save.
+  click(engine, 500, 384); // Pause menu: Save.
   require(browser(game) && browser(game)->isOpen() && engine.isStoryPaused(),
           "Save browser opens as a story-pausing modal");
   press(engine, SDLK_F5);
   require(VNSave::read(slot.path.string()).nodeId == originalQuick.nodeId,
           "Quick save does not bypass the save browser");
-  press(engine, SDLK_RETURN); // New save.
+  require(browser(game) && browser(game)->isOpen(),
+          "Unbound quick-save key leaves the save browser open");
+  press(engine, SDLK_RETURN); // New save asks for its name in an engine dialog.
+  bool naming = false;
+  for (auto *scene : game.GetActiveScenes())
+    naming |= dynamic_cast<TextInputDialog *>(scene) != nullptr;
+  if (!(browser(game) && naming && !std::filesystem::exists(newPath)))
+    throw std::runtime_error("Creating a save asks for its name before writing "
+                             "a new slot: browser=" +
+                             std::to_string(browser(game) != nullptr) +
+                             " naming=" + std::to_string(naming) + " created=" +
+                             std::to_string(std::filesystem::exists(newPath)) +
+                             " slots=" + std::to_string(storage.list().size()) +
+                             " state=" + std::to_string(int(game.GetState())));
+
+  press(engine, SDLK_RETURN); // Accept the default name.
   require(!browser(game) && std::filesystem::exists(newPath) &&
               storage.list().size() == 42 && VNSave::read(newPath).nodeId == 1,
           "New save from UI creates another slot without overwriting");
 
-  click(engine, 500, 400);
+  click(engine, 500, 384);
   press(engine, SDLK_DOWN); // First existing save (save-1.vn).
   press(engine, SDLK_RETURN);
   require(VNSave::read(paths[0]).nodeId == 0 && browser(game),
@@ -116,7 +132,7 @@ void testMultipleSaves(KotonohaExample::DemoGame &game,
               VNSave::read(slot.path.string()).nodeId == originalQuick.nodeId,
           "Other manual slots and quicksave stay unchanged");
 
-  click(engine, 500, 460); // Pause menu: Load.
+  click(engine, 500, 438); // Pause menu: Load.
   require(browser(game), "Load browser opens from pause menu");
   for (int i = 0; i < 6; ++i)
     press(engine, SDLK_PAGEDOWN);
@@ -126,7 +142,7 @@ void testMultipleSaves(KotonohaExample::DemoGame &game,
               engine.GetTimeline().seconds() >= originalQuick.timelinePosition,
           "Paging reaches and restores the last save, including its clock");
   press(engine, SDLK_ESCAPE);
-  click(engine, 500, 460);
+  click(engine, 500, 438);
   press(engine, SDLK_PAGEUP);
   press(engine, SDLK_ESCAPE);
   require(!browser(game), "Long list supports paging and cancellation");
@@ -208,12 +224,22 @@ void testSaveManagement(KotonohaExample::DemoGame &game,
   require(storage.rename("save-1.vn", "save-1.vn") == original,
           "Renaming a save to its own name is safe");
   const auto linked = directory / "linked.vn";
-  std::filesystem::create_symlink(original, linked);
-  rejects([&] { storage.remove("linked.vn"); });
-  rejects([&] { storage.rename("linked.vn", "moved"); });
-  require(std::filesystem::exists(original),
-          "File management never follows symbolic links");
-  std::filesystem::remove(linked);
+  std::error_code linkError;
+  std::filesystem::create_symlink(original, linked, linkError);
+#ifdef _WIN32
+  if (linkError.value() == 1314) { // ERROR_PRIVILEGE_NOT_HELD
+    std::cout << "SKIP: symlink fixture requires Windows Developer Mode\n";
+  } else
+#endif
+  {
+    if (linkError)
+      throw std::system_error(linkError);
+    rejects([&] { storage.remove("linked.vn"); });
+    rejects([&] { storage.rename("linked.vn", "moved"); });
+    require(std::filesystem::exists(original),
+            "File management never follows symbolic links");
+    std::filesystem::remove(linked);
+  }
   require(storage.list().size() == 2 &&
               VNSave::read(original).gameData == saved.gameData,
           "Invalid names and collisions preserve all save files");
@@ -249,7 +275,7 @@ void testSaveManagement(KotonohaExample::DemoGame &game,
   click(engine, 400, 590); // Rename button.
   text("Viagem \xe9\x9b\xaa");
   press(engine, SDLK_RETURN);
-  const auto renamed = directory / "Viagem \xe9\x9b\xaa.vn";
+  const auto renamed = directory / std::filesystem::path("Viagem \xe9\x9b\xaa.vn");
   require(menu.isOpen() && std::filesystem::exists(renamed) &&
               !std::filesystem::exists(original) &&
               !SDL_TextInputActive(&engine.GetWindow()) &&
@@ -287,7 +313,11 @@ void testSaveManagement(KotonohaExample::DemoGame &game,
   press(engine, SDLK_DELETE);
   require(!SDL_TextInputActive(&engine.GetWindow()),
           "New-save placeholder cannot be renamed or deleted");
-  press(engine, SDLK_RETURN);
+  press(engine, SDLK_RETURN); // New save opens the native naming dialog.
+  require(SDL_TextInputActive(&engine.GetWindow()) &&
+              !std::filesystem::exists(original),
+          "Reusing a deleted slot still asks for the new save name");
+  press(engine, SDLK_RETURN); // Accept the default, reusing save-1.vn.
   require(std::filesystem::exists(original),
           "Deleted numbered names are reusable for new saves");
   open(false);
@@ -319,9 +349,9 @@ int main() {
     engine.Iterate();
     require(game.GetState() == Kotonoha::GameState::Splash,
             "The demo opens with the engine splash");
-    press(engine, SDLK_RETURN);
+    press(engine, SDLK_F12);
     require(game.GetState() == Kotonoha::GameState::Splash,
-            "Keys do not skip the splash");
+            "Unbound keys do not skip the splash");
     click(engine, 100, 100);
     engine.Iterate();
     require(game.GetState() == Kotonoha::GameState::Menu,

@@ -8,6 +8,7 @@
 #include <Kotonoha/componentes/ChoiceQuestionScene.hpp>
 #include <Kotonoha/componentes/GameMenu.hpp>
 #include <Kotonoha/componentes/InGameMenu.hpp>
+#include <Kotonoha/componentes/TextInputDialog.hpp>
 #include <Kotonoha/componentes/VNBacklog.hpp>
 #include <Kotonoha/componentes/VNTextBox.hpp>
 #include <Kotonoha/core/Engine.hpp>
@@ -15,6 +16,7 @@
 #include <Kotonoha/localization/Translation.hpp>
 #include <Kotonoha/media/MediaPlayer.hpp>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -133,9 +135,10 @@ void testDump(Kotonoha::Engine &engine, const std::string &shown, int route) {
 void skipSplash(Kotonoha::Engine &engine, Kotonoha::Runtime &game) {
   require(game.GetState() == GameState::Splash, "Starts at the engine splash");
   frames(engine, 3);
-  press(engine, SDLK_RETURN);
+  press(engine, SDLK_F12);
   frames(engine, 2);
-  require(game.GetState() == GameState::Splash, "Keys do not skip the splash");
+  require(game.GetState() == GameState::Splash,
+          "Unbound keys do not skip the splash");
   capture(engine, game, "splash");
   SDL_Event event{};
   event.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
@@ -253,6 +256,11 @@ void testGame(const std::string &discPath) {
         ++choiceScenes;
     require(text && menu && backlog && choiceScenes == 2,
             "Gameplay uses the engine components");
+    auto *roulette = find<ZeroNoTsukaima::ZeroRoulette>(game);
+    SDL_Event unrelated{};
+    require(roulette && !roulette->capturesInput() &&
+                !roulette->onEvent(unrelated),
+            "Inactive roulette leaves input available to dialogue and choices");
 
     pressUntil(
         engine, SDLK_RETURN, [&] { return session.HasMessage(); }, 400,
@@ -260,6 +268,53 @@ void testGame(const std::string &discPath) {
     frames(engine, 2);
     require(text->isVisible() && text->getText() == session.Story()->Text(),
             "VNTextBox follows the script page");
+    {
+      const auto originalPage = session.Story()->Text();
+      bool canceled = false, confirmed = false;
+      Kotonoha::TextInputDialog dialog(
+          engine, "Save name", nullptr,
+          [&] {
+            canceled = true;
+            game.RemoveScene(&dialog);
+          },
+          "Controle");
+      game.AddScene(&dialog);
+      SDL_Event controller{};
+      controller.type = SDL_EVENT_GAMEPAD_BUTTON_DOWN;
+      controller.gbutton.down = true;
+      controller.gbutton.button = SDL_GAMEPAD_BUTTON_SOUTH;
+      engine.Event(&controller);
+      require(canceled && session.Story()->Text() == originalPage,
+              "Native dialog cancel takes priority over the game's held skip");
+      dialog.configure(
+          "Save name",
+          [&](const std::string &name) {
+            confirmed = name == "Controle";
+            game.RemoveScene(&dialog);
+          },
+          nullptr, "Controle");
+      game.AddScene(&dialog);
+      controller.gbutton.button = SDL_GAMEPAD_BUTTON_EAST;
+      engine.Event(&controller);
+      require(confirmed && session.Story()->Text() == originalPage,
+              "Native dialog confirmation never advances the underlying page");
+    }
+    {
+      const int originalSpeed = session.System().charSpeed;
+      SDL_Event direction{};
+      direction.type = SDL_EVENT_GAMEPAD_BUTTON_DOWN;
+      direction.gbutton.button = SDL_GAMEPAD_BUTTON_DPAD_RIGHT;
+      send(engine, direction);
+      const int faster = std::min(10, originalSpeed + 1);
+      require(session.System().charSpeed == faster,
+              "Controller Right increases the native dialogue text speed");
+      direction.gbutton.button = SDL_GAMEPAD_BUTTON_DPAD_LEFT;
+      send(engine, direction);
+      require(session.System().charSpeed == std::max(0, faster - 1),
+              "Controller Left decreases the native dialogue text speed");
+      session.System().charSpeed = originalSpeed;
+      session.SystemChanged();
+    }
     {
       const auto node = engine.GetDebug().nodeClockText();
       std::cout << node << '\n';
@@ -337,6 +392,20 @@ void testGame(const std::string &discPath) {
         engine, SDLK_ESCAPE, [&] { return !menu->IsOpen(); }, 20,
         "close command menu");
     frames(engine, 30);
+
+    SDL_Event controller{};
+    controller.type = SDL_EVENT_GAMEPAD_BUTTON_DOWN;
+    controller.gbutton.button = SDL_GAMEPAD_BUTTON_START;
+    send(engine, controller);
+    frames(engine, 30);
+    require(menu->IsOpen(), "Controller Start opens the native command menu");
+    controller.gbutton.button = SDL_GAMEPAD_BUTTON_SOUTH;
+    send(engine, controller);
+    frames(engine, 30);
+    require(!menu->IsOpen(),
+            "Controller Cancel closes a menu rather than entering held skip");
+    controller.type = SDL_EVENT_GAMEPAD_BUTTON_UP;
+    send(engine, controller);
 
     // B: HistoryState as the VNBacklog.
     press(engine, SDLK_B);

@@ -296,26 +296,35 @@ struct MCPServer::State {
                                                  : "splash"));
     const auto &manager = GetVNManagerRuntime(engine);
     const auto &timeline = engine.GetTimeline();
-    const auto &box = GetVNTextBoxRuntime(engine, "", "", 30);
-    const auto &choice = GetChoiceQuestionRuntime(engine);
     const auto &scenes = engine.GetRuntime().GetActiveScenes();
+    VNTextBox *box = nullptr;
+    ChoiceQuestionScene *choice = nullptr;
+    for (auto *scene : scenes) {
+      if (auto *candidate = dynamic_cast<VNTextBox *>(scene))
+        box = candidate;
+      if (auto *candidate = dynamic_cast<ChoiceQuestionScene *>(scene))
+        choice = candidate;
+    }
+    if (!box)
+      box = &GetVNTextBoxRuntime(engine, "", "", 30);
+    if (!choice)
+      choice = &GetChoiceQuestionRuntime(engine);
     const bool gameplay = state == GameState::Gameplay;
     const bool boxVisible =
-        box.isVisible() &&
-        std::find(scenes.begin(), scenes.end(), &box) != scenes.end();
+        box->isVisible() &&
+        std::find(scenes.begin(), scenes.end(), box) != scenes.end();
     const bool choiceVisible =
-        choice.isActive() &&
-        std::find(scenes.begin(), scenes.end(), &choice) != scenes.end();
+        choice->isActive() &&
+        std::find(scenes.begin(), scenes.end(), choice) != scenes.end();
+    put(result.get(), "runtime_diagnostic", engine.GetRuntime().diagnostic());
     put(result.get(), "node_id", gameplay ? manager.getCurrentNodeId() : -1);
     put(result.get(), "node_name",
         gameplay ? engine.GetRuntime().debugNode() : std::string());
     put(result.get(), "mode",
-        std::string(manager.getMode() == ScriptMode::Timed ? "timed"
-                                                           : "standard"));
+        std::string(engine.usesTimedNodeClock() ? "timed" : "standard"));
     put(result.get(), "paused", engine.isStoryPaused() || timeline.isPaused());
     put(result.get(), "timeline_playing", timeline.isPlaying());
-    put(result.get(), "seconds",
-        engine.GetRuntime().debugNodeSeconds().value_or(timeline.seconds()));
+    put(result.get(), "seconds", engine.activeNodeSeconds());
     put(result.get(), "master_volume",
         double(engine.GetAudio().getMasterVolume()));
     put(result.get(), "master_muted", engine.GetAudio().isMasterMuted());
@@ -328,10 +337,10 @@ struct MCPServer::State {
           textInput || dynamic_cast<TextInputDialog *>(scene) != nullptr;
     put(result.get(), "waiting_for_text", textInput);
     put(result.get(), "textbox_visible", boxVisible);
-    put(result.get(), "dialogue", boxVisible ? box.getText() : "");
-    put(result.get(), "speaker", boxVisible ? box.getSpeaker() : "");
+    put(result.get(), "dialogue", boxVisible ? box->getText() : "");
+    put(result.get(), "speaker", boxVisible ? box->getSpeaker() : "");
     put(result.get(), "subtitle", timeline.activeSubtitleText());
-    put(result.get(), "question", choiceVisible ? choice.getQuestion() : "");
+    put(result.get(), "question", choiceVisible ? choice->getQuestion() : "");
     put(result.get(), "debug_visible", engine.GetDebug().isVisible());
     put(result.get(), "settings_visible", engine.GetSettingsMenu().isOpen());
     put(result.get(), "show_fps", engine.GetDebug().getSettings().showFPS);
@@ -340,7 +349,7 @@ struct MCPServer::State {
     auto *options = json_object_new_array();
     if (choiceVisible) {
       int index = 0;
-      for (const auto &option : choice.getOptions()) {
+      for (const auto &option : choice->getOptions()) {
         auto item = object();
         put(item.get(), "index", index++);
         put(item.get(), "label", option.label);
@@ -411,8 +420,10 @@ struct MCPServer::State {
         debug.getSettings().showNodeClock = boolean(value);
       engine.GetTimeline().setPaused(engine.isStoryPaused());
     } else if (name == "start_game") {
-      runtime.SetState(GameState::Gameplay);
-      runtime.init(engine);
+      if (!runtime.handleNewGameAction()) {
+        runtime.SetState(GameState::Gameplay);
+        runtime.init(engine);
+      }
       engine.GetTimeline().setPaused(engine.isStoryPaused());
     } else if (name == "load_game") {
       runtime.loadGame(filePath(args));
@@ -434,14 +445,25 @@ struct MCPServer::State {
       } else if (name == "advance_time") {
         engine.advanceTimeline(json_object_get_double(field(args, "seconds")));
       } else if (name == "advance") {
-        if (manager.isFinished() || manager.isInputBlocked() ||
-            engine.isStoryPaused())
+        if (engine.isStoryPaused())
+          throw std::logic_error("Manual advance is blocked");
+        if (runtime.handleAdvanceAction())
+          return snapshot();
+        if (manager.isFinished() || manager.isInputBlocked())
           throw std::logic_error("Manual advance is blocked");
         manager.advance();
       } else if (name == "choose") {
-        if (runtime.isStoryPaused() || engine.GetDebug().isVisible())
+        if (runtime.hasPausingScene() || engine.GetSettingsMenu().isOpen() ||
+            engine.GetDebug().pausesStory())
           throw std::logic_error("Close game/debug modals before choosing");
-        GetChoiceQuestionRuntime(engine).chooseOption(
+        ChoiceQuestionScene *active = nullptr;
+        for (auto *scene : runtime.GetActiveScenes())
+          if (auto *candidate = dynamic_cast<ChoiceQuestionScene *>(scene);
+              candidate && candidate->isActive())
+            active = candidate;
+        if (!active)
+          throw std::logic_error("No visible choice");
+        active->chooseOption(
             static_cast<std::size_t>(integer(field(args, "index"))));
         if (const auto target = engine.GetTimeline().pendingBranch())
           manager.jumpToNode(*target);
@@ -451,7 +473,7 @@ struct MCPServer::State {
         for (auto *scene : scenes)
           if (auto *input = dynamic_cast<TextInputDialog *>(scene))
             dialog = input;
-        if (!dialog || engine.GetDebug().isVisible())
+        if (!dialog || engine.GetDebug().pausesStory())
           throw std::logic_error("No game text-input modal is available");
         const auto text = stringValue(field(args, "text"));
         if (text.size() > 255 ||

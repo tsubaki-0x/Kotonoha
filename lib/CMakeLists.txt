@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 
 project(KotonohaEngine VERSION 0.1.0 LANGUAGES CXX)
 enable_language(C)
+include("${CMAKE_CURRENT_SOURCE_DIR}/../cmake/MSVC.cmake")
 
 if(APPLE)
     enable_language(OBJC OBJCXX)
@@ -12,8 +13,8 @@ set(SDL_STATIC OFF CACHE BOOL "Build static SDL3")
 set(SDL_TEST_LIBRARY OFF CACHE BOOL "Disable SDL test library")
 set(SDL_TESTS OFF CACHE BOOL "Disable SDL tests")
 set(SDL_EXAMPLES OFF CACHE BOOL "Disable SDL examples")
-# SDL disables system iconv on Apple/Windows; Kotonoha::ShiftJisToUtf8 needs
-# its CP932 converter, so it is forced on (libc iconv on macOS/Linux).
+# Kotonoha::ShiftJisToUtf8 needs CP932 (libc iconv on macOS/Linux).
+# Windows uses its native CP932 mapping and SDL's converter for other encodings.
 set(SDL_SYSTEM_ICONV ON CACHE BOOL "Use iconv() from system-installed libraries" FORCE)
 set(SDLTTF_SAMPLES OFF CACHE BOOL "Disable SDL_ttf examples")
 set(SDLTTF_VENDORED OFF CACHE BOOL "Use system FreeType/HarfBuzz/PlutoSVG")
@@ -45,7 +46,18 @@ if(ANDROID AND NOT PKG_CONFIG_EXECUTABLE AND VCPKG_INSTALLED_DIR)
 endif()
 
 add_subdirectory("${KOTONOHA_SDL_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/SDL" EXCLUDE_FROM_ALL)
+if(ANDROID)
+    # Use vcpkg's CMake target rather than SDL_ttf's pkg-config fallback,
+    # which can resolve -lc++ to the NDK's Windows host library.
+    find_package(harfbuzz CONFIG REQUIRED)
+endif()
 add_subdirectory(submodules/SDL_ttf EXCLUDE_FROM_ALL)
+if(ANDROID)
+    # SDL_ttf is C, but its static HarfBuzz dependency contains C++ code.
+    # Let the NDK C++ driver select the runtime for the active ABI/STL.
+    get_target_property(_ttf_target SDL3_ttf::SDL3_ttf ALIASED_TARGET)
+    set_property(TARGET ${_ttf_target} PROPERTY LINKER_LANGUAGE CXX)
+endif()
 find_package(PkgConfig REQUIRED)
 if(ANDROID)
     # FindPkgConfig resolves HarfBuzz's `-lc++` to the NDK host archive
@@ -89,6 +101,18 @@ if(ANDROID)
     target_link_libraries(kotonoha_ffmpeg INTERFACE ${FFMPEG_LIBRARIES})
     set(kotonoha_ffmpeg_target kotonoha_ffmpeg)
     set(kotonoha_json_target json-c::json-c)
+    # libass is a static vcpkg library on Android; include its private
+    # FreeType/HarfBuzz/FriBidi dependencies in the final shared engine.
+    # The NDK toolchain supplies the selected C++ runtime. HarfBuzz's .pc
+    # exports -lc++, which FindPkgConfig can resolve to a host archive.
+    get_target_property(_ass_libraries PkgConfig::LIBASS INTERFACE_LINK_LIBRARIES)
+    list(FILTER _ass_libraries EXCLUDE REGEX "(^|[/\\\\])libc\\+\\+\\.(a|so)$|^c\\+\\+$")
+    set_property(TARGET PkgConfig::LIBASS PROPERTY
+        INTERFACE_LINK_LIBRARIES "${_ass_libraries}")
+    list(REMOVE_ITEM LIBASS_STATIC_LIBRARIES c++)
+    target_link_directories(PkgConfig::LIBASS INTERFACE ${LIBASS_STATIC_LIBRARY_DIRS})
+    target_link_libraries(PkgConfig::LIBASS INTERFACE ${LIBASS_STATIC_LIBRARIES})
+    target_link_options(PkgConfig::LIBASS INTERFACE ${LIBASS_STATIC_LDFLAGS_OTHER})
 else()
     pkg_check_modules(LIBASS REQUIRED IMPORTED_TARGET libass>=0.17)
     set(kotonoha_ass_target PkgConfig::LIBASS)
@@ -136,6 +160,7 @@ add_library(KotonohaEngine SHARED
     src/componentes/SettingsMenu.cpp
     src/componentes/SplashScreen.cpp
     src/componentes/SubtitleScene.cpp
+    src/componentes/ForcedSubtitleRenderer.cpp
     src/componentes/TextInputForm.cpp
     src/componentes/TextInputDialog.cpp
     src/componentes/VNBacklog.cpp
@@ -155,6 +180,9 @@ add_library(KotonohaEngine SHARED
     src/media/AudioMixer.cpp
     src/media/PcmPlayer.cpp
     src/media/TextureAlpha.cpp
+    src/media/Ps2Tim2.cpp
+    src/media/CriAudio.cpp
+    src/media/Ps2SoundBank.cpp
     src/media/upscaling/Upscaler.cpp
     src/media/upscaling/MPVCompatibleUpscaler.cpp
     src/media/upscaling/MetalFXUpscaler.mm
@@ -179,7 +207,13 @@ set_target_properties(KotonohaEngine kotonoha_imgui PROPERTIES
     VERSION ${PROJECT_VERSION}
     SOVERSION ${PROJECT_VERSION_MAJOR}
     WINDOWS_EXPORT_ALL_SYMBOLS ON)
-set_target_properties(KotonohaEngine PROPERTIES OUTPUT_NAME kotonoha)
+if(ANDROID)
+    # Kotonoha (the example app) and kotonoha collide on Windows/macOS
+    # case-insensitive filesystems when both are Android shared libraries.
+    set_target_properties(KotonohaEngine PROPERTIES OUTPUT_NAME kotonoha_engine)
+else()
+    set_target_properties(KotonohaEngine PROPERTIES OUTPUT_NAME kotonoha)
+endif()
 if(KOTONOHA_DEV_CONTROL AND WIN32 AND NOT ANDROID)
     target_compile_definitions(KotonohaEngine PRIVATE KOTONOHA_DEV_CONTROL=1)
 endif()
@@ -250,8 +284,10 @@ function(kotonoha_copy_assets target)
             VERBATIM)
     else()
         add_custom_command(TARGET ${target} POST_BUILD
-            COMMAND "${CMAKE_COMMAND}" -E copy_directory
-                "${KOTONOHA_ENGINE_ASSETS}" "${destination}/assets"
+            COMMAND "${CMAKE_COMMAND}"
+                "-DASSET_SOURCE=${KOTONOHA_ENGINE_ASSETS}"
+                "-DASSET_DESTINATION=${destination}/assets"
+                -P "${KOTONOHA_PROJECT_ROOT}/cmake/CopyAssetDirectory.cmake"
             VERBATIM)
     endif()
 endfunction()

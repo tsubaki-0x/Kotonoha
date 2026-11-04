@@ -1,9 +1,11 @@
 #include "SnowRuntime.hpp"
+#include <Kotonoha/componentes/SubtitleScene.hpp>
 
 #include <Kotonoha/componentes/VNSave.hpp>
 #include <Kotonoha/componentes/VNSaveMenu.hpp>
 #include <Kotonoha/core/Engine.hpp>
 #include <Kotonoha/core/UI.hpp>
+#include <Kotonoha/events/ControllerEvent.hpp>
 
 #include <algorithm>
 #include <cstdio>
@@ -69,6 +71,7 @@ void SnowRuntime::initGlobal(Kotonoha::Engine &engine) {
 void SnowRuntime::initMenu(Kotonoha::Engine &) {
   pause_->close();
   backlog_->close();
+  textBox_->CancelSkip();
   AddScene(title_.get());
   session_->EnterFrontend();
 }
@@ -78,6 +81,7 @@ void SnowRuntime::initGameplay(Kotonoha::Engine &) {
   pause_->close();
   backlog_->close();
   backlog_->clear();
+  textBox_->CancelSkip();
   for (Kotonoha::Scene *scene : std::initializer_list<Kotonoha::Scene *>{
            stage_.get(), textBox_.get(), textChoice_.get(), mapChoice_.get(),
            uniformChoice_.get(), pause_.get(), backlog_.get()})
@@ -94,7 +98,8 @@ void SnowRuntime::OpenSaves(bool load) {
 }
 
 SDL_FPoint SnowRuntime::sceneSize(const Kotonoha::Scene &scene) const {
-  if (IsGameScene(&scene))
+  if (IsGameScene(&scene) ||
+      dynamic_cast<const Kotonoha::SubtitleScene *>(&scene))
     return {float(kGameWidth), float(kGameHeight)};
   return Runtime::sceneSize(scene);
 }
@@ -135,18 +140,37 @@ void SnowRuntime::update() {
   Runtime::update();
 }
 
-void SnowRuntime::onEvent(Kotonoha::EventRef event) {
+bool SnowRuntime::onEvent(Kotonoha::EventRef event) {
   if (!session_)
-    return;
-  if (EngineSceneCaptures())
+    return false;
+  // The pause menu, history and save browser map controller input in their
+  // own context. Pre-mapping would turn South into held skip while a menu is
+  // open and Back into a history scroll instead of close.
+  if (EngineSceneCaptures() || (pause_ && pause_->capturesInput()) ||
+      (backlog_ && backlog_->capturesInput())) {
+    // A held South must not keep skipping behind the modal.
+    textBox_->CancelSkip();
     return Runtime::onEvent(event);
-  if (event.type == SDL_EVENT_MOUSE_MOTION) {
+  }
+  const bool dialogue = session_->Playing() && !session_->Choosing();
+  if (!dialogue || event.type == SDL_EVENT_GAMEPAD_REMOVED)
+    textBox_->CancelSkip();
+  auto mapped = Kotonoha::MapControllerEvent(event, dialogue);
+  // HandleNavigation only runs for keyboard/mouse/touch, so a gamepad Start
+  // mapped to ESCAPE would not open the pause menu on its own.
+  if (mapped.type == SDL_EVENT_KEY_DOWN && !mapped.key.repeat &&
+      mapped.key.key == SDLK_ESCAPE && session_->Playing() &&
+      !session_->Choosing() && !pause_->IsOpen() && !backlog_->isVisible()) {
+    pause_->open();
+    return true;
+  }
+  if (mapped.type == SDL_EVENT_MOUSE_MOTION) {
     const auto frame =
         Kotonoha::UI::fit({float(kGameWidth), float(kGameHeight)}, viewport());
-    const SDL_Event game = Kotonoha::UI::toFrame(event, frame);
+    const SDL_Event game = Kotonoha::UI::toFrame(mapped, frame);
     session_->SetMouse(game.motion.x, game.motion.y);
   }
-  Runtime::onEvent(event);
+  return Runtime::onEvent(mapped);
 }
 
 Kotonoha::Translation::SourceTexts SnowRuntime::translationSources() const {

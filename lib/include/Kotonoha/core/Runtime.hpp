@@ -70,8 +70,12 @@ public:
   virtual void renderGameplay(RendererRef renderer, float scale);
 
   virtual void update();
-  virtual void onEvent(EventRef event);
+  virtual bool onEvent(EventRef event);
   virtual bool onScreenEvent(EventRef event);
+  virtual std::string diagnostic() const { return {}; }
+  virtual bool handleNewGameAction() { return false; }
+  virtual bool handleAdvanceAction() { return false; }
+  virtual bool advanceStoryTime(double) { return false; }
   virtual bool handleBackAction() { return false; }
   virtual bool handleBacklogAction() { return false; }
   virtual void renderScreen(RendererRef renderer, float scale);
@@ -90,6 +94,8 @@ public:
   virtual void devIdle() {}
   virtual void devControlPump(RendererRef) {}
   virtual void devInputProcessed(EventRef) {}
+  // Novel-space UI, drawn after story content and forced subtitles.
+  virtual void renderOverlay(RendererRef renderer, float scale);
   virtual void saveGame(const std::string &path);
   virtual void loadGame(const std::string &path);
 
@@ -114,6 +120,9 @@ public:
   // label, route...), shown as the node by the debug overlay and MCP. Empty
   // means the engine VNManager node is used.
   virtual std::string debugNode() const { return {}; }
+  // Timed native scripts expose a node-wide clock. Standard interpreters use
+  // engine time since entry into the full debugNode() (event + position).
+  virtual bool usesTimedNodeClock() const { return false; }
   virtual std::optional<double> debugNodeSeconds() const {
     return std::nullopt;
   }
@@ -194,7 +203,9 @@ public:
     return GetScenes(currentState);
   }
 
-  bool isStoryPaused() const {
+  // Engine-wide pause, including debug, settings, MCP and active scene modals.
+  bool isStoryPaused() const;
+  bool hasPausingScene() const {
     for (const auto *scene : GetActiveScenes())
       if (scene && scene->pausesStory())
         return true;

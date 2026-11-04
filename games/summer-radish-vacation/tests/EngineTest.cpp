@@ -9,6 +9,7 @@
 #include <Kotonoha/core/Engine.hpp>
 #include <Kotonoha/media/PcmPlayer.hpp>
 #include <SummerRadish/Script.hpp>
+#include <algorithm>
 #include <iostream>
 #include <stdexcept>
 using namespace Kotonoha;
@@ -104,6 +105,12 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 12 && !find<ChoiceQuestionScene>(game)->isActive();
          ++i) {
       if (auto *form = find<TextInputForm>(game)) {
+        const auto inState = [&](GameState state) {
+          const auto &scenes = game.GetScenes(state);
+          return std::find(scenes.begin(), scenes.end(), form) != scenes.end();
+        };
+        check(inState(GameState::Menu) && inState(GameState::Gameplay),
+              "Native name entry overlays the main scene in every state");
         const auto position = game.debugNode();
         form->submit({"", "瞬", "はじめ", "しゅん"});
         check(form->capturesInput() && game.debugNode() == position,
@@ -124,7 +131,40 @@ int main(int argc, char **argv) {
     auto *text = find<VNTextBox>(game);
     check(text && text->isVisible(), "Story dialogue opens");
     check(!text->getText().empty(), "Dialogue has original text");
+    const auto &gameplay = game.GetScenes(GameState::Gameplay);
+    for (auto *scene : gameplay)
+      check(std::count(gameplay.begin(), gameplay.end(), scene) == 1,
+            "GAMESTART never registers the same scene twice");
     capture(engine, game, "story");
+    auto padButton = [&](SDL_GamepadButton button, bool down) {
+      SDL_Event event{};
+      event.type =
+          down ? SDL_EVENT_GAMEPAD_BUTTON_DOWN : SDL_EVENT_GAMEPAD_BUTTON_UP;
+      event.gbutton.which = 777;
+      event.gbutton.button = button;
+      event.gbutton.down = down;
+      engine.Event(&event);
+    };
+    auto tapPad = [&](SDL_GamepadButton button) {
+      padButton(button, true);
+      padButton(button, false);
+    };
+    // Raw directions must reach the native toolbar even though dialogue maps
+    // Left/Right to text speed. Four steps land on the system control.
+    for (int i = 0; i < 4; ++i)
+      tapPad(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+    tapPad(SDL_GAMEPAD_BUTTON_EAST);
+    check(GetInGameMenuRuntime(engine).IsOpen(),
+          "Controller focuses and activates the message-box toolbar");
+    GetInGameMenuRuntime(engine).close();
+    // Up releases the toolbar so confirmation advances the novel again.
+    text->completeDialogue();
+    const auto toolbarNode = game.debugNode();
+    const auto toolbarLine = text->getText();
+    tapPad(SDL_GAMEPAD_BUTTON_DPAD_UP);
+    tapPad(SDL_GAMEPAD_BUTTON_EAST);
+    check(game.debugNode() != toolbarNode || text->getText() != toolbarLine,
+          "Up releases the toolbar and confirmation reaches the novel");
     auto nativeButton = [&](float x, float y) {
       SDL_Event event{};
       event.type = SDL_EVENT_MOUSE_BUTTON_DOWN;

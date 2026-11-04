@@ -391,6 +391,7 @@ void testDebugTools(Kotonoha::Engine &engine) {
           "Exported JSON roundtrips punctuation, escapes and boundary spaces");
   std::ifstream contents(dictionary.path);
   std::string dump((std::istreambuf_iterator<char>(contents)), {});
+  contents.close();
   require(dump.find("do-not-export-this-path") == std::string::npos &&
               dump.find("Separate subtitle") != std::string::npos &&
               dump.find("Subtitle source") != std::string::npos,
@@ -401,8 +402,8 @@ void testDebugTools(Kotonoha::Engine &engine) {
       "Export failure is explicit");
 
   require(debug.nodeClockText().find("Node: 200") != std::string::npos &&
-              debug.nodeClockText().find("Clock:") == std::string::npos,
-          "Standard HUD shows node without a timeline clock");
+              debug.nodeClockText().find("Clock:") != std::string::npos,
+          "Standard HUD shows the scene-entry clock as well as the node");
   auto event = key(SDLK_F10);
   event.key.windowID = SDL_GetWindowID(&engine.GetWindow());
   engine.Event(&event);

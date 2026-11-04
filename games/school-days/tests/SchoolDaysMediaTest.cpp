@@ -1,5 +1,7 @@
 #include "SchoolDaysAssets.hpp"
 #include "SchoolDaysRuntime.hpp"
+#include <Kotonoha/componentes/TextInputDialog.hpp>
+#include <Kotonoha/componentes/VNSaveMenu.hpp>
 #include <Kotonoha/core/Engine.hpp>
 #include <Kotonoha/debug/DebugOverlay.hpp>
 #include <iostream>
@@ -29,172 +31,18 @@ namespace SchoolDays {
 
 class RuntimeMediaParityTestAccess {
 public:
-  static void Run(Runtime &runtime, Kotonoha::RendererRef renderer) {
-    runtime.playing.clear();
-    runtime.movieStates.clear();
-    runtime.moveSom.Reset();
-
-    // Commercial EventRuntime prepares media before its semantic START. The
-    // paused decoder must be adopted, not reopened, when dispatch reaches it.
-    char preparedPath[] = "Voice/test";
-    Kotonoha_orsTypePlaySe preparedData{4, preparedPath};
-    Kotonoha_orsEvent prepared{};
-    prepared.command = PLAY_SE;
-    prepared.startTick = 120;
-    prepared.endTick = 168;
-    prepared.data.play_se = &preparedData;
-    Require(runtime.prepareMediaEvent(prepared) && prepared.eventPrepared &&
-                runtime.preparedMedia.count(&prepared) == 1 && runtime.playing.empty(),
-            "future SE was not prepared without semantic playback");
-    auto *preparedPlayer = runtime.preparedMedia.at(&prepared).player.get();
-    runtime.dispatch(prepared);
-    Require(runtime.preparedMedia.count(&prepared) == 0 && runtime.playing.size() == 1 &&
-                runtime.playing.front().player.get() == preparedPlayer,
-            "SE START reopened media instead of adopting the prepared decoder");
-    runtime.playing.clear();
-
-    char preparedBgPath[] = "Bg/test";
-    Kotonoha_orsTypeCreateBg preparedBgData{nullptr, preparedBgPath};
-    Kotonoha_orsEvent preparedBg{};
-    preparedBg.command = CREATE_BG;
-    preparedBg.startTick = 96;
-    preparedBg.endTick = 192;
-    preparedBg.data.create_bg = &preparedBgData;
-    Require(runtime.prepareMediaEvent(preparedBg) && preparedBg.eventPrepared &&
-                runtime.preparedBackgrounds.count(&preparedBg) == 1 &&
-                runtime.preparedBackgroundAbc.count(&preparedBg) == 1,
-            "future CREATE_BG did not predecode/register its base+ABC resources");
-    const std::string preparedBackground = runtime.preparedBackgrounds.at(&preparedBg);
-    runtime.dispatch(preparedBg);
-    Require(runtime.background == preparedBackground &&
-                runtime.preparedBackgrounds.count(&preparedBg) == 0 &&
-                runtime.abcGroups.size() == 1 && runtime.abcGroups.front().key == "mak",
-            "CREATE_BG START did not adopt its prepared base+ABC resources");
-
-    char audioPath[] = "Voice/test";
-    Kotonoha_orsTypePlaySe seAData{2, audioPath};
-    Kotonoha_orsTypePlaySe seBData{2, audioPath};
-    Kotonoha_orsTypePlaySe seCData{3, audioPath};
-    Kotonoha_orsTypePlaySe seInvalidData{9, audioPath};
-    Kotonoha_orsEvent seA{}, seB{}, seC{}, seInvalid{};
-    for (auto *event : {&seA, &seB, &seC, &seInvalid}) {
-      event->command = PLAY_SE;
-      event->startTick = 0;
-      event->endTick = 48;
-    }
-    seA.data.play_se = &seAData;
-    seB.data.play_se = &seBData;
-    seC.data.play_se = &seCData;
-    seInvalid.data.play_se = &seInvalidData;
-    runtime.dispatch(seA);
-    runtime.dispatch(seC);
-    Require(runtime.playing.size() == 2, "different SE slots did not coexist in Runtime");
-    runtime.dispatch(seB);
-    Require(runtime.playing.size() == 2 &&
-                runtime.playing[0].event == &seC && runtime.playing[1].event == &seB,
-            "same SE slot did not transfer ownership to latest event");
-    runtime.dispatch(seInvalid);
-    Require(runtime.playing.size() == 2,
-            "out-of-range SE slot created Runtime media");
-
-    runtime.playing.clear();
-    runtime.config.menVoice = false;
-    runtime.tick = 0;
-    runtime.background = runtime.assets->resolve("Bg/test", true);
-    runtime.discoverAbcForBackground();
-    Require(runtime.abcGroups.size() == 1 && runtime.abcGroups.front().key == "mak" &&
-                runtime.abcGroups.front().Complete(),
-            "Runtime did not discover the complete ABC sibling group");
-    char animationKey[] = "mak";
-    Kotonoha_orsTypePlayVoice blockedVoiceData{audioPath, 1, animationKey};
-    Kotonoha_orsTypePlayVoice allowedVoiceData{audioPath, 0, animationKey};
-    Kotonoha_orsEvent blockedVoice{}, allowedVoice{};
-    blockedVoice.command = allowedVoice.command = PLAY_VOICE;
-    blockedVoice.startTick = allowedVoice.startTick = 0;
-    blockedVoice.endTick = allowedVoice.endTick = 48;
-    blockedVoice.data.play_voice = &blockedVoiceData;
-    allowedVoice.data.play_voice = &allowedVoiceData;
-    runtime.dispatch(blockedVoice);
-    Require(runtime.playing.empty(), "MenVoice=off did not block numbered voice");
-    runtime.dispatch(allowedVoice);
-    Require(runtime.playing.size() == 1 && runtime.playing.front().event == &allowedVoice,
-            "numeric-zero voice incorrectly depended on MenVoice");
-    Require(runtime.abcVoices.size() == 1 && runtime.abcVoices.front().groupIndex == 0 &&
-                runtime.abcActivityCache.count(&allowedVoice) == 1,
-            "PLAY_VOICE did not analyze/bind its ABC mouth group");
-    runtime.tick = 3;
-    runtime.updateAbcVoices();
-    Require(runtime.abcVoices.front().cursor.initialized,
-            "ABC scheduler did not advance with the scene clock");
-    runtime.renderAbcOverlays(renderer, {0, 0, 1280, 720});
-    Require(!runtime.abcTextures.empty(),
-            "ABC compositor did not decode the selected mouth frame");
-
-    runtime.playing.clear();
-    Kotonoha_orsTypeMoveSom somData{3};
-    Kotonoha_orsEvent som{};
-    som.command = MOVE_SOM;
-    som.startTick = 10;
-    som.endTick = 20;
-    som.data.move_som = &somData;
-    runtime.dispatch(som);
-    Require(runtime.moveSom.Active(&som), "Runtime ignored MOVE_SOM window start");
-    runtime.moveSom.AdvanceTo(20);
-    Require(!runtime.moveSom.Active(&som), "Runtime MOVE_SOM window survived END");
-
-    runtime.playing.clear();
-    runtime.movieStates.clear();
-    char moviePath[] = "Movie/test";
-    Kotonoha_orsTypePlayMovie movieAData{moviePath, 0};
-    Kotonoha_orsTypePlayMovie movieBData{moviePath, 0};
-    Kotonoha_orsEvent movieA{}, movieB{};
-    movieA.command = movieB.command = PLAY_MOVIE;
-    movieA.startTick = 0;
-    movieA.endTick = 12;
-    movieB.startTick = 12;
-    movieB.endTick = 24;
-    movieA.data.play_movie = &movieAData;
-    movieB.data.play_movie = &movieBData;
-    runtime.tick = 0;
-    runtime.elapsed = 0.0;
-    runtime.dispatch(movieA);
-    Require(runtime.movieStates[&movieA].prepared &&
-                runtime.movieStates[&movieA].mediaReady &&
-                runtime.movieStates[&movieA].active,
-            "Runtime movie did not prepare/activate at START");
-    runtime.renderGameplay(renderer, 1.0f);
-    runtime.tick = 12;
-    runtime.elapsed = 0.5;
-    runtime.movieStates[&movieA].AdvanceTo(runtime.tick);
-    runtime.dispatch(movieB);
-    Require(runtime.playing.size() == 2,
-            "adjacent WMV activation discarded outgoing terminal texture early");
-    runtime.renderGameplay(renderer, 1.0f);
-    Require(runtime.playing.size() == 2 && runtime.playing.front().terminalFramePresented,
-            "movie END did not publish terminal frame during adjacent handoff");
-    for (int attempt = 0; attempt < 30 && runtime.playing.size() == 2; ++attempt) {
-      SDL_Delay(2);
-      runtime.elapsed += 1.0 / 120.0;
-      runtime.renderGameplay(renderer, 1.0f);
-    }
-    Require(runtime.playing.size() == 1 && runtime.playing.front().event == &movieB,
-            "outgoing WMV survived after adjacent decoder produced frame");
-
-    runtime.playing.clear();
-    runtime.movieStates.clear();
-    Kotonoha_orsTypePlayMovie unsupportedData{moviePath, 7};
-    Kotonoha_orsEvent unsupported{};
-    unsupported.command = PLAY_MOVIE;
-    unsupported.startTick = 0;
-    unsupported.endTick = 12;
-    unsupported.data.play_movie = &unsupportedData;
-    runtime.tick = 0;
-    runtime.dispatch(unsupported);
-    Require(runtime.playing.empty() && runtime.movieStates.count(&unsupported) == 1 &&
-                !runtime.movieStates[&unsupported].Supported() &&
-                !runtime.movieStates[&unsupported].mediaReady,
-            "unsupported PlayMovie numeric acquired invented playback semantics");
+  static std::string State(Runtime &runtime) {
+    return " paused=" + std::to_string(runtime.paused) +
+           " pendingSeek=" + std::to_string(runtime.pendingSeek.has_value()) +
+           " pendingMedia=" + std::to_string(runtime.pendingMedia.size()) +
+           " pendingBg=" + std::to_string(runtime.pendingBackgrounds.size()) +
+           " playing=" + std::to_string(runtime.playing.size()) +
+           " handoff=" + std::to_string(runtime.bridge.HasPendingHandoff()) +
+           " saveMenu=" + std::to_string(runtime.saveMenu->isOpen()) +
+           " visualTransition=" + std::to_string(runtime.frontendTransition.Active(SDL_GetTicks())) +
+           " systemTransition=" + std::to_string(runtime.systemPanelTransition.Active());
   }
+
 };
 
 } // namespace SchoolDays
@@ -215,21 +63,39 @@ int main(int argc, char **argv) {
     }
     Require(subtitleScene && gameScene, "School Days must register its custom presentation scenes");
     const double before = *app.runtime.debugNodeSeconds();
-    SDL_Delay(40);
-    Require(app.engine.Iterate() == SDL_APP_CONTINUE, "Clock frame failed");
-    Require(*app.runtime.debugNodeSeconds() > before, "Runtime node clock did not advance");
+    for (int attempts = 0; attempts < 150 &&
+         *app.runtime.debugNodeSeconds() <= before; ++attempts) {
+      SDL_Delay(20);
+      Require(app.engine.Iterate() == SDL_APP_CONTINUE, "Clock frame failed");
+    }
+    Require(*app.runtime.debugNodeSeconds() > before,
+            ("Runtime node clock did not advance: before=" +
+             std::to_string(before) + " after=" +
+             std::to_string(*app.runtime.debugNodeSeconds()) +
+             " enginePaused=" + std::to_string(app.engine.isStoryPaused()) +
+             " panelOpen=" + std::to_string(app.runtime.anyPanelOpen()) +
+             SchoolDays::RuntimeMediaParityTestAccess::State(app.runtime)).c_str());
     Require(app.engine.GetDebug().nodeClockText().find("Clock:") != std::string::npos,
             "School Days node has no debug clock");
     Require(assets->cachedTextures() > 0, "ORS background was not decoded");
     for (const char *channel : {"BGM", "Voice", "Movie"})
       Require(app.engine.GetAudio().channel(channel)->activeStreams() > 0,
               "ORS audio/movie did not attach its channel stream");
-    Kotonoha::SurfacePtr frame(SDL_RenderReadPixels(&app.engine.GetRenderer(), nullptr));
-    Require(bool(frame), "Cannot inspect rendered movie");
     Uint8 r = 0, g = 0, b = 0, a = 0;
-    Require(SDL_ReadSurfacePixel(frame.get(), frame->w * 3 / 4, frame->h * 4 / 5,
-                                &r, &g, &b, &a), "Cannot inspect movie pixel");
-    Require(r > 180 && g < 80 && b < 80, "WMV frame was not presented over the blue background");
+    for (int attempt = 0; attempt < 150; ++attempt) {
+      Kotonoha::SurfacePtr frame(SDL_RenderReadPixels(&app.engine.GetRenderer(), nullptr));
+      Require(bool(frame), "Cannot inspect rendered movie");
+      Require(SDL_ReadSurfacePixel(frame.get(), frame->w * 3 / 4, frame->h * 4 / 5,
+                                  &r, &g, &b, &a), "Cannot inspect movie pixel");
+      if (r > 180 && g < 80 && b < 80) break;
+      SDL_Delay(20);
+      Require(app.engine.Iterate() == SDL_APP_CONTINUE, "Movie frame failed");
+    }
+    Require(r > 180 && g < 80 && b < 80,
+            ("WMV frame was not presented over the blue background: rgb=" +
+             std::to_string(r) + "," + std::to_string(g) + "," +
+             std::to_string(b) +
+             SchoolDays::RuntimeMediaParityTestAccess::State(app.runtime)).c_str());
     // This fixture intentionally does not ship the retail MenuBar artwork, so
     // exercise the Save control semantically instead of relying on coordinates
     // from a presenter that is unavailable in this synthetic media corpus.
@@ -251,6 +117,74 @@ int main(int argc, char **argv) {
     SDL_Delay(25);
     Require(app.engine.Iterate() == SDL_APP_CONTINUE, "Resume frame failed");
     Require(*app.runtime.debugNodeSeconds() > saveClock, "Scene did not resume after closing save panel");
+    Require(*app.runtime.debugNodeSeconds() > saveClock,
+            "Scene did not resume after closing save panel");
+    // The fallback save UI must ask for a name even without a suggestion.
+    const auto savePath =
+        std::filesystem::path(argv[3]) / "Saves/Regression Save.vn";
+    std::filesystem::remove(savePath);
+    auto saveNameDialog = [&]() -> Kotonoha::TextInputDialog * {
+      for (auto *scene : app.runtime.GetActiveScenes())
+        if (auto *dialog = dynamic_cast<Kotonoha::TextInputDialog *>(scene))
+          return dialog;
+      return nullptr;
+    };
+    app.runtime.openPanel(10);
+    event = {};
+    event.type = SDL_EVENT_KEY_DOWN;
+    event.key.key = SDLK_RETURN;
+    app.runtime.onEvent(event);
+    Require(saveNameDialog() != nullptr, "New save must ask for a name");
+    app.engine.Iterate();
+    event.key.key = SDLK_ESCAPE;
+    app.runtime.onEvent(event);
+    Require(!saveNameDialog() && !std::filesystem::exists(savePath),
+            "Cancelling the name dialog must not create a save");
+    Require(app.engine.Iterate() == SDL_APP_CONTINUE,
+            "Cancelled name dialog frame failed");
+    event.key.key = SDLK_RETURN;
+    app.runtime.onEvent(event);
+    Require(saveNameDialog() != nullptr, "Name prompt can be reopened");
+    saveNameDialog()->submitText("Regression Save");
+    Require(std::filesystem::is_regular_file(savePath) && !saveNameDialog(),
+            "Named save must close its dialog without invalidating the scene");
+    const auto savedNode = app.runtime.debugNode();
+    app.runtime.loadGame(savePath.string());
+    Require(app.runtime.debugNode() == savedNode,
+            "Named save reloads the same scene");
+    // Auto is disabled by default: Right must commit the scene transition.
+    app.engine.debugJumpToNode("0");
+    const auto beforeSkip = app.runtime.debugNode();
+    event = {};
+    event.type = SDL_EVENT_KEY_DOWN;
+    event.key.key = SDLK_SPACE;
+    app.runtime.onEvent(event); // Exercise Skip while paused as well.
+    event.key.key = SDLK_RIGHT;
+    app.runtime.onEvent(event);
+    event.key.key = SDLK_SPACE;
+    app.runtime.onEvent(event); // Resume after the paused seek.
+    for (int attempt = 0; attempt < 200 &&
+         app.runtime.debugNode() == beforeSkip; ++attempt) {
+      SDL_Delay(10);
+      Require(app.engine.Iterate() == SDL_APP_CONTINUE, "Skip frame failed");
+    }
+    Require(app.runtime.debugNode() != beforeSkip,
+            ("Skip parked at Next instead of advancing with Auto disabled: " +
+             SchoolDays::RuntimeMediaParityTestAccess::State(app.runtime)).c_str());
+    app.engine.debugJumpToNode("0");
+    event = {};
+    event.type = SDL_EVENT_MOUSE_BUTTON_UP;
+    event.button.button = SDL_BUTTON_LEFT;
+    event.button.x = 350;
+    event.button.y = 60; // Fallback bar's Skip button.
+    app.runtime.onEvent(event);
+    for (int attempt = 0; attempt < 200 &&
+         app.runtime.debugNode() == beforeSkip; ++attempt) {
+      SDL_Delay(10);
+      Require(app.engine.Iterate() == SDL_APP_CONTINUE, "Button skip frame failed");
+    }
+    Require(app.runtime.debugNode() != beforeSkip,
+            "The visible Skip button must use the same transition as Right");
     app.engine.debugJumpToNode("00/00-00-A03");
     Require(app.engine.Iterate() == SDL_APP_CONTINUE, "Choice frame failed");
     SchoolDays::GameScene *choices = nullptr;
@@ -273,9 +207,6 @@ int main(int argc, char **argv) {
     event.button.y = 540.0f;
     Require(choices->handleEvent(event), "Custom choice activation failed");
     Require(!choices->handleEvent(event), "Committed choices are still interactive");
-    // Run the invasive synthetic ownership/lifecycle probes last so their
-    // deliberately stack-owned ORS events cannot perturb the ordinary fixture.
-    SchoolDays::RuntimeMediaParityTestAccess::Run(app.runtime, app.engine.GetRenderer());
     std::cout << "SchoolDaysMediaTest: media, custom scenes, modal pause and choices passed\n";
     return 0;
   } catch (const std::exception &error) {

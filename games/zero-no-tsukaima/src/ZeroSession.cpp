@@ -66,7 +66,7 @@ std::string FindFont() {
   };
   std::error_code ec;
   for (const char *path : kFonts)
-    if (std::filesystem::exists(std::filesystem::u8path(path), ec))
+    if (std::filesystem::exists(std::filesystem::path(path), ec))
       return path;
   return {};
 }
@@ -107,7 +107,7 @@ ZeroSession::ZeroSession(Kotonoha::Engine &engine,
   if (!disc_)
     throw std::invalid_argument("Zero no Tsukaima needs its disc");
   {
-    const auto documents = Kotonoha::preferredDocumentsDirectory();
+    const auto documents = Kotonoha::saveDirectory();
     systemPath_ = (documents / "system.txt").string();
     readPath_ = (documents / "read.txt").string();
     system_.Load(systemPath_);
@@ -407,7 +407,7 @@ SDL_Renderer *ZeroSession::Renderer() { return &engine_.GetRenderer(); }
 // The opening theme belongs to the music, so the "bgm" channel controls it.
 
 std::string ZeroSession::SlotPath(int slot) {
-  return (Kotonoha::preferredDocumentsDirectory() /
+  return (Kotonoha::saveDirectory() /
           ("slot" + std::to_string(slot) + ".sav"))
       .string();
 }

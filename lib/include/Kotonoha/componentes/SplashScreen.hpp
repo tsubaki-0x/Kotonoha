@@ -10,9 +10,9 @@ namespace Kotonoha {
 
 class MediaPlayer;
 
-// Each picture follows the legacy Kotonoha commercial splash envelope: fade
-// in, hold, fade out, then advance. Any direct user activation skips the splash
-// sequence; missing or undecodable files are skipped.
+// Each image fades in, then advances after a timeout or a click/touch.
+// Videos play through once and include their embedded audio when present.
+// Confirm advances; missing or undecodable files are skipped.
 class SplashScreen : public Scene {
 public:
   static constexpr double fadeSeconds = 0.8;

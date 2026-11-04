@@ -406,7 +406,7 @@ public:
   void devInputProcessed(Kotonoha::EventRef event) override;
   void traceDev(const char *event);
   void renderMenu(Kotonoha::RendererRef renderer, float scale) override;
-  void onEvent(Kotonoha::EventRef event) override;
+  bool onEvent(Kotonoha::EventRef event) override;
   bool onScreenEvent(Kotonoha::EventRef event) override;
   void renderScreen(Kotonoha::RendererRef renderer, float scale) override;
   // Native panel state (tests and the debug tools).
@@ -417,6 +417,7 @@ public:
   void openPanel(int control) { activateControl(control); }
   SDL_Point viewport() const override { return {1280, 720}; }
   std::string debugNode() const override;
+  bool usesTimedNodeClock() const override { return true; }
   std::optional<double> debugNodeSeconds() const override { return elapsed; }
   std::vector<Kotonoha::DebugNode> debugNodes() const override;
   void debugJumpToNode(const std::string &id) override;
