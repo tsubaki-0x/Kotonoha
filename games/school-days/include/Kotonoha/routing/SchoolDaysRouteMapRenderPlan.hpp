@@ -97,7 +97,7 @@ public:
     static constexpr bool NodeHoverPrecedenceProven() { return false; }
 
     // Draw order follows SysMenuSDHQ.dll FUN_1000CE40/FUN_1000F330:
-    // base, per-node unlocked pass, common 0..10, optional current
+    // base, per-node unlocked pass, visible common 0..10, optional current
     // node, current-major records 11+major and 17+major, optional alternate
     // host records 23..28, then records 29..32.
     static std::vector<Sprite> Build(const SchoolDaysRouteMapModel& model);

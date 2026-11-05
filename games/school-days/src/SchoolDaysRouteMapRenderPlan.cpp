@@ -284,8 +284,11 @@ SchoolDaysRouteMapRenderPlan::Build(const SchoolDaysRouteMapModel &model) {
                              NodeRecord(major, subpage, i, band), layout));
   }
 
-  // Native common pass: records 0..10 are always emitted in ascending order.
+  // The first six records are pointer highlights.  The retail renderer keeps
+  // their objects alive but makes only the hovered episode visible; drawing
+  // all six gives every tab a blue border even with the pointer elsewhere.
   for (int record = 0; record <= 10; ++record) {
+    if (record < 6 && model.Selection() != record) continue;
     out.push_back(FromRecord(Role::CommonControl, record, record,
                              CommonRecord(record), layout));
   }

@@ -351,12 +351,12 @@ class Runtime final : public Kotonoha::Runtime {
   bool modal() const;
   bool panelOpen() const;
   void closePanels();
-  void openSaveLoad(bool save);
+  void openSaveLoad(bool save, bool playView = true);
   void openConfig(Kotonoha::SchoolDaysConfigMenuModel::Page page, bool playView = true);
-  void openRouteMap();
+  void openRouteMap(bool playView = true);
   void openExit();
   void openMainMenuConfirm();
-  void openBacklog();
+  void openBacklog(bool playView = true);
   void refreshSaveMetadata();
   void refreshRouteMap();
   void saveSlot(int slot, const std::u16string &comment);

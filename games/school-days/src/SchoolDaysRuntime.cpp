@@ -1147,11 +1147,11 @@ void Runtime::updateFrontendTransition(uint64_t nowMs) {
     break;
   case FrontendHandoff::TitleLoad:
     frontendChild = FrontendChild::Load;
-    openSaveLoad(false);
+    openSaveLoad(false, false);
     break;
   case FrontendHandoff::TitleConfig:
     frontendChild = FrontendChild::Config;
-    openConfig(Kotonoha::SchoolDaysConfigMenuModel::Page::Def);
+    openConfig(Kotonoha::SchoolDaysConfigMenuModel::Page::Def, false);
     break;
   case FrontendHandoff::TitleReplay:
     frontendChild = FrontendChild::Replay;
@@ -1296,11 +1296,11 @@ void Runtime::updateSystemPanelTransition(uint64_t nowMs) {
   case Transition::Event::OpenPanel:
     try {
       switch (systemPanelTransition.CurrentTarget()) {
-      case Transition::Target::Save: openSaveLoad(true); break;
-      case Transition::Target::Load: openSaveLoad(false); break;
-      case Transition::Target::BackLog: openBacklog(); break;
+      case Transition::Target::Save: openSaveLoad(true, false); break;
+      case Transition::Target::Load: openSaveLoad(false, false); break;
+      case Transition::Target::BackLog: openBacklog(false); break;
       case Transition::Target::Config:
-        openConfig(Kotonoha::SchoolDaysConfigMenuModel::Page::Def);
+        openConfig(Kotonoha::SchoolDaysConfigMenuModel::Page::Def, false);
         break;
       }
       if (!panelOpen()) systemPanelTransition.Reset();
@@ -3935,7 +3935,7 @@ bool Runtime::onEvent(Kotonoha::EventRef eventInput) {
       if (pointerToBackLog(event.button.x, event.button.y, &x, &y) &&
           backlogModel.ActivatePointer(x, y, &action) &&
           action.kind == Kotonoha::SchoolDaysBackLogModel::ActionKind::Close) {
-        playSound(Ui::UiSfxCue::Cancel);
+        playSound(Ui::UiSfxCue::Click);
         if (!beginSystemPanelClose()) closePanels();
       }
     }
@@ -3961,7 +3961,7 @@ bool Runtime::onEvent(Kotonoha::EventRef eventInput) {
       if (systemUi.IsRouteMapOpen()) {
         const bool returningToSave = routeMapReturnSave.value_or(false);
         const int selection = routeMapReturnSelection;
-        openSaveLoad(returningToSave);
+        openSaveLoad(returningToSave, false);
         systemUi.RestoreSaveLoadSelection(selection);
         routeMapReturnSave.reset();
       }
@@ -4010,7 +4010,7 @@ bool Runtime::onEvent(Kotonoha::EventRef eventInput) {
         Kotonoha::SchoolDaysTitleModel::Activation action;
         if (title.ActivateSelection(&action)) {
           using Result = Kotonoha::SchoolDaysTitleModel::Result;
-          playSound(Ui::UiSfxCue::Click);
+          if (action.result != Result::Exit) playSound(Ui::UiSfxCue::Click);
           if (action.result == Result::Start)
             beginTitleHandoff(FrontendHandoff::TitleStart, SDL_GetTicks());
           else if (action.result == Result::Load)
@@ -4175,6 +4175,7 @@ void Runtime::activateMenuAction(
       setStatus("Save/Load/BackLog is unavailable during HScene Replay");
       return;
     }
+    playSound(Ui::UiSfxCue::Click);
     if (action.kind == Kind::OpenSave)
       beginSystemPanel(Kotonoha::SchoolDaysSystemPanelTransition::Target::Save);
     else if (action.kind == Kind::OpenLoad)
@@ -4183,6 +4184,7 @@ void Runtime::activateMenuAction(
       beginSystemPanel(Kotonoha::SchoolDaysSystemPanelTransition::Target::BackLog);
     return;
   case Kind::OpenConfig:
+    playSound(Ui::UiSfxCue::Click);
     beginSystemPanel(Kotonoha::SchoolDaysSystemPanelTransition::Target::Config);
     return;
   case Kind::OpenMainMenuConfirm:
@@ -4191,7 +4193,7 @@ void Runtime::activateMenuAction(
   }
 }
 
-void Runtime::openSaveLoad(bool save) {
+void Runtime::openSaveLoad(bool save, bool playView) {
   traceDev(save ? "SaveLoadOpen:Save" : "SaveLoadOpen:Load");
   if (replayPlayback && replayPlayback->IsOpen()) {
     setStatus("Save/Load is unavailable during HScene Replay");
@@ -4211,7 +4213,7 @@ void Runtime::openSaveLoad(bool save) {
                                  : Kotonoha::SchoolDaysSaveLoadModel::Mode::Load,
                             profile.textInput, profile.useEnglish, profile.fontData, &failure)) {
     saveLoadOwner = owner;
-    playSound(Ui::UiSfxCue::View);
+    if (playView) playSound(Ui::UiSfxCue::View);
     refreshSaveMetadata();
     return;
   }
@@ -4384,7 +4386,7 @@ void Runtime::handleConfig(const Kotonoha::SchoolDaysConfigMenuModel::Action &ac
       engine->openSettings();
       return;
     }
-    openConfig(action.page);
+    openConfig(action.page, false);
     displayPanelResolutionOpen = false;
     displayPanelPresetOpen = false;
     displayPanelHoverRow = -1;
@@ -4555,7 +4557,7 @@ void Runtime::cacheConfigState() {
         "School Days Config.DAT cache update failed");
 }
 
-void Runtime::openRouteMap() {
+void Runtime::openRouteMap(bool playView) {
   const bool fromSaveLoad = systemUi.IsSaveLoadOpen();
   routeMapReturnSave = fromSaveLoad ? std::optional<bool>(saveLoadSaving)
                                     : std::nullopt;
@@ -4592,7 +4594,7 @@ void Runtime::openRouteMap() {
     routeMapReturnSave.reset();
     return;
   }
-  playSound(Ui::UiSfxCue::View);
+  if (playView) playSound(Ui::UiSfxCue::View);
   refreshRouteMap();
 }
 
@@ -4624,12 +4626,14 @@ void Runtime::refreshRouteMap() {
 }
 
 void Runtime::openExit() {
+  playSound(Ui::UiSfxCue::Click);
   closePanels();
   exitTransition.Begin(Kotonoha::SchoolDaysExitTransition::Target::Quit,
                        SDL_GetTicks());
 }
 
 void Runtime::openMainMenuConfirm() {
+  playSound(Ui::UiSfxCue::Click);
   closePanels();
   exitTransition.Begin(Kotonoha::SchoolDaysExitTransition::Target::Title,
                        SDL_GetTicks());
@@ -4643,7 +4647,6 @@ void Runtime::openExitDialog(bool returnToTitle) {
                             ? Kotonoha::SchoolDaysExitViewModel::BaseArtwork::Title
                             : Kotonoha::SchoolDaysExitViewModel::BaseArtwork::Exit,
                         &failure)) {
-    playSound(Ui::UiSfxCue::View);
     return;
   }
   exitTransition.Reset();
@@ -4680,7 +4683,7 @@ void Runtime::finishMainMenuReturn() {
   openTitle();
 }
 
-void Runtime::openBacklog() {
+void Runtime::openBacklog(bool playView) {
   if (replayPlayback && replayPlayback->IsOpen()) {
     setStatus("BackLog is unavailable during HScene Replay");
     return;
@@ -4706,7 +4709,7 @@ void Runtime::openBacklog() {
       backlogPresenter.Open(&engine->GetRenderer(), assets->root().string(),
                             backlogModel.CurrentOrientation(), true, font.font, nullptr, &failure)) {
     backlogOwner = owner;
-    playSound(Ui::UiSfxCue::View);
+    if (playView) playSound(Ui::UiSfxCue::View);
     return;
   }
   if (!failure.empty()) SDL_LogWarn(Kotonoha::LogUI, "School Days BackLog: %s", failure.c_str());
@@ -4763,7 +4766,7 @@ void Runtime::handlePanel(const Ui::Output &output) {
     if (output.routeMapAction.kind == Kind::ReturnToLoad) {
       const bool returningToSave = routeMapReturnSave.value_or(false);
       const int selection = routeMapReturnSelection;
-      openSaveLoad(returningToSave);
+      openSaveLoad(returningToSave, false);
       systemUi.RestoreSaveLoadSelection(selection);
       routeMapReturnSave.reset();
     }
@@ -4794,7 +4797,7 @@ void Runtime::handlePanel(const Ui::Output &output) {
     case Action::RouteMap:
       // The retail nested Replay Data LOAD reader is authenticated, but a
       // RouteMap handoff from that private owner is not. Consume it in place.
-      if (saveLoadOwner != SaveLoadOwner::PlayData) openRouteMap();
+      if (saveLoadOwner != SaveLoadOwner::PlayData) openRouteMap(false);
       break;
     case Action::LoadSlotRequested:
       try {
@@ -4831,6 +4834,7 @@ void Runtime::playSound(Ui::UiSfxCue cue) {
   default: return;
   }
   if (stem->empty()) return;
+  traceDev((std::string("Sfx:") + *stem).c_str());
   try {
     auto sound = std::make_unique<Kotonoha::MediaPlayer>(engine->GetAudio());
     sound->setBufferSeconds(SchoolDaysMediaCacheSeconds);

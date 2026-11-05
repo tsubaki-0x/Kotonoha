@@ -1492,11 +1492,8 @@ bool SchoolDaysSystemUi::HandleEvent(SDL_Renderer* renderer,
                 output->hasReplayAction = true;
                 output->replayAction = action;
             }
-            // SceneView ordinary activation calls id2; its explicit close path
-            // calls the shared cancel preset id0.
-            output->uiSfx =
-                action.kind == SchoolDaysReplayModel::ActionKind::Close
-                    ? UiSfxCue::Cancel : UiSfxCue::Click;
+            // Retail pointer clicks, including CLOSE, use SeClick_01.
+            output->uiSfx = UiSfxCue::Click;
             return true;
         }
         if (!pointerMoved) return false;
@@ -1529,6 +1526,7 @@ bool SchoolDaysSystemUi::HandleEvent(SDL_Renderer* renderer,
                 output->hasRouteMapAction = true;
                 output->routeMapAction = action;
             }
+            output->uiSfx = UiSfxCue::Click;
             return true;
         }
         return pointerMoved && routeMap_.SetSelectionFromPointer(virtualX, virtualY);
@@ -1541,10 +1539,7 @@ bool SchoolDaysSystemUi::HandleEvent(SDL_Renderer* renderer,
             if (!configMenu_.Activate(&action)) return false;
             output->hasConfigAction = true;
             output->configAction = action;
-            // ConfigMenu ordinary activation uses id2; close/back uses id0.
-            output->uiSfx =
-                action.kind == SchoolDaysConfigMenuModel::ActionKind::Close
-                    ? UiSfxCue::Cancel : UiSfxCue::Click;
+            output->uiSfx = UiSfxCue::Click;
             return true;
         }
         return pointerMoved &&
@@ -1558,6 +1553,7 @@ bool SchoolDaysSystemUi::HandleEvent(SDL_Renderer* renderer,
             if (!exitView_.Activate(&activation)) return false;
             output->hasExitActivation = true;
             output->exitActivation = activation;
+            output->uiSfx = UiSfxCue::Click;
             return true;
         }
         return pointerMoved && exitView_.SetSelectionFromPointer(virtualX, virtualY);
@@ -1586,11 +1582,7 @@ bool SchoolDaysSystemUi::HandleEvent(SDL_Renderer* renderer,
                 output->hasSaveLoadOutput = true;
                 output->saveLoadOutput = modelOutput;
             }
-            // SaveLoad ordinary activation uses id2; its explicit close/back
-            // path uses the shared cancel preset id0.
-            output->uiSfx =
-                modelOutput.action == SchoolDaysSaveLoadModel::Action::Close
-                    ? UiSfxCue::Cancel : UiSfxCue::Click;
+            output->uiSfx = UiSfxCue::Click;
             return true;
         }
         if (!pointerMoved) return false;
