@@ -48,6 +48,10 @@ function(kotonoha_configure_app target)
             "$<TARGET_FILE_DIR:SDL3::SDL3>"
             "$<TARGET_FILE_DIR:SDL3_ttf::SDL3_ttf>"
             ${FFMPEG_LIBRARY_DIRS} ${JSON_C_LIBRARY_DIRS} ${LIBASS_LIBRARY_DIRS})
+        if(APP_GAME STREQUAL "doki-doki-literature-club" AND Python3_EXECUTABLE)
+            get_filename_component(python_runtime_dir "${Python3_EXECUTABLE}" DIRECTORY)
+            list(APPEND windows_dependency_dirs "${python_runtime_dir}")
+        endif()
         foreach(library_dir IN LISTS FFMPEG_LIBRARY_DIRS JSON_C_LIBRARY_DIRS LIBASS_LIBRARY_DIRS)
             if(library_dir)
                 get_filename_component(dependency_prefix "${library_dir}" DIRECTORY)

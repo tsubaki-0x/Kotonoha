@@ -103,6 +103,33 @@ void gameLauncher(const std::filesystem::path &directory) {
           "The launcher persists a portable name rather than an absolute path");
   require(reopened.path() == root.string() && reopened.pathValid(),
           "The original single-path launcher remembers its path");
+
+  const auto external = directory.parent_path() /
+                        (directory.filename().string() + "-external-game");
+  struct RemoveExternal {
+    std::filesystem::path path;
+    ~RemoveExternal() {
+      std::error_code error;
+      std::filesystem::remove_all(path, error);
+    }
+  } cleanup{external};
+  std::filesystem::create_directory(external);
+  const auto externalSettings = (directory / "external-settings.json").string();
+  {
+    TestGameLauncher selected(externalSettings, external.string());
+    selected.open();
+    selected.iterate();
+    require(selected.pathValid() && selected.launch(),
+            "External game root is valid");
+    selected.close();
+  }
+  require(GameLauncher::rememberedPath(externalSettings, "game-path.txt") ==
+              external.string(),
+          "External game roots keep their full path");
+  TestGameLauncher externalReopened(externalSettings, "");
+  require(externalReopened.path() == external.string() &&
+              externalReopened.pathValid(),
+          "External game root reopens after saving");
 }
 
 void launcher(const std::filesystem::path &directory) {
