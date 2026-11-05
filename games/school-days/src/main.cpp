@@ -5,6 +5,7 @@
 #include "SchoolDaysAssets.hpp"
 #include "SchoolDaysLauncher.hpp"
 #include "SchoolDaysRuntime.hpp"
+#include <Kotonoha/core/DiscImage.hpp>
 #include <Kotonoha/core/Engine.hpp>
 #include <Kotonoha/core/CommandLine.hpp>
 #include <Kotonoha/core/FileSystem.hpp>
@@ -65,7 +66,9 @@ struct App {
   long frames = -1;
   void start(const std::string &directory) {
     DevStartupLog("assets-open", directory);
-    auto assets = std::make_shared<SchoolDays::Assets>(directory, scripts);
+    auto assets = std::make_shared<SchoolDays::Assets>(
+        Kotonoha::gameDataDirectory(directory),
+        scripts.empty() ? options.assetOverlayDirectory() : scripts);
     DevStartupLog("assets-ready");
     application = std::make_unique<Application>(std::move(assets), route, options, documents);
     DevStartupLog("engine-ready");
@@ -116,7 +119,9 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     app->options.settings.upscaling.factor = 2.0f;
 #endif
     Kotonoha::CommandLine arguments("SchoolDays", app->options);
-    arguments.option("--school-days", "DIRECTORY", "Retail Packs or extracted game directory", directory);
+    arguments.option("--school-days", "DIRECTORY|ISO",
+                     "Retail Packs, extracted game directory or ISO",
+                     directory);
     arguments.alias("--school-days", "--assets");
     arguments.option("--ktrf", "FILE", "School Days routing graph", app->route);
     arguments.option("--scripts", "DIRECTORY", "Translated ORS script directory", app->scripts);

@@ -9,6 +9,7 @@
 #include <cctype>
 #include <fstream>
 #include <iterator>
+#include <stdexcept>
 
 namespace Kotonoha {
 
@@ -38,6 +39,7 @@ SplashScreen::SplashScreen(Engine &engine,
 void SplashScreen::restart() {
   current = 0;
   texture.reset();
+  filteredTexture.reset();
   video.reset();
   loaded = false;
   startedNs = SDL_GetTicksNS();
@@ -46,6 +48,7 @@ void SplashScreen::restart() {
 void SplashScreen::next() {
   ++current;
   texture.reset();
+  filteredTexture.reset();
   video.reset();
   loaded = false;
   startedNs = SDL_GetTicksNS();
@@ -152,6 +155,20 @@ void SplashScreen::render(RendererRef renderer, float) {
 
   if (!texture)
     return;
+  const auto &settings = engine.GetUpscaler().getSettings();
+  if (settings.backend != imageUpscaling.backend ||
+      settings.preset != imageUpscaling.preset ||
+      settings.factor != imageUpscaling.factor ||
+      settings.shaderFiles != imageUpscaling.shaderFiles) {
+    filteredTexture.reset();
+    imageUpscaling = settings;
+  }
+  if (settings.enabled() && !filteredTexture) {
+    if (!SDL_SetTextureAlphaMod(texture.get(), 255))
+      throw std::runtime_error(SDL_GetError());
+    filteredTexture = engine.GetUpscaler().scaled(*texture, settings.factor);
+  }
+  auto *display = settings.enabled() ? filteredTexture.get() : texture.get();
   float textureWidth = 0, textureHeight = 0;
   SDL_GetTextureSize(texture.get(), &textureWidth, &textureHeight);
   const float fit = std::min(screen.w / textureWidth, screen.h / textureHeight);
@@ -161,9 +178,11 @@ void SplashScreen::render(RendererRef renderer, float) {
   const double time = elapsed();
   const double alpha = std::clamp(
       std::min(time, displaySeconds - time) / fadeSeconds, 0.0, 1.0);
-  SDL_SetTextureAlphaModFloat(texture.get(), static_cast<float>(alpha));
-  SDL_RenderTexture(&renderer, texture.get(), nullptr, &target);
-  SDL_SetTextureAlphaModFloat(texture.get(), 1.0f);
+  if (!SDL_SetTextureAlphaModFloat(display, static_cast<float>(alpha)) ||
+      !SDL_RenderTexture(&renderer, display, nullptr, &target))
+    throw std::runtime_error(SDL_GetError());
+  if (!SDL_SetTextureAlphaModFloat(display, 1.0f))
+    throw std::runtime_error(SDL_GetError());
 }
 
 } // namespace Kotonoha

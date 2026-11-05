@@ -184,7 +184,8 @@ DirectoryLayout directoryLayout(const StorageLocations &locations,
   if (!locations.packageIdentifier.empty()) {
     validateGame(locations.packageIdentifier);
     if (!locations.userData.empty())
-      result.saves = locations.userData / "Kotonoha" / locations.packageIdentifier;
+      result.saves =
+          locations.userData / "Kotonoha" / locations.packageIdentifier;
   }
   // Named selections (overlays, game folders/discs, scripts) share this
   // policy. Merely looking them up never creates a writable save directory.
@@ -238,20 +239,21 @@ referenceCandidates(const DirectoryLayout &layout,
 
 std::vector<std::filesystem::path>
 FileResolver::candidates(const std::filesystem::path &reference,
-                          const std::string &game) {
+                         const std::string &game) {
   return referenceCandidates(applicationDirectories(game), reference);
 }
 
 std::optional<std::filesystem::path>
 FileResolver::findAsset(const std::filesystem::path &reference,
-                       const std::string &game) {
+                        const std::string &game) {
   if (reference.empty())
     return std::nullopt;
   if (reference.is_absolute())
     if (auto found = find(reference))
       return found;
   auto first = reference.begin();
-  if (*first == "assets" || *first == "game-assets" || *first == "game_assets") {
+  if (*first == "assets" || *first == "game-assets" ||
+      *first == "game_assets") {
     const bool engine = *first == "assets";
     std::filesystem::path relative;
     for (++first; first != reference.end(); ++first)
@@ -280,7 +282,8 @@ static StorageLocations storageLocations() {
   } catch (const std::exception &) {
     // Read-only resource lookup must also work when external storage is absent.
   }
-  locations.privateGameAssets = androidDirectory("getKotonohaGameAssetDirectory");
+  locations.privateGameAssets =
+      androidDirectory("getKotonohaGameAssetDirectory");
   try {
     locations.obb = androidDirectory("getKotonohaDataDirectory");
   } catch (const std::exception &) {
@@ -345,9 +348,7 @@ findAssetOverlayDirectory(const std::filesystem::path &root) {
   return {};
 }
 
-std::filesystem::path preferredDocumentsDirectory() {
-  return saveDirectory();
-}
+std::filesystem::path preferredDocumentsDirectory() { return saveDirectory(); }
 
 std::filesystem::path preferredDocumentsDirectory(const std::string &game) {
   if (!game.empty())
@@ -361,7 +362,8 @@ std::filesystem::path preferredDocumentsDirectory(const std::string &game) {
 #endif
   auto directory = directoryLayout(locations).saves;
   if (directory.empty())
-    throw std::runtime_error("Set the application package identifier before accessing saves");
+    throw std::runtime_error(
+        "Set the application package identifier before accessing saves");
   std::filesystem::create_directories(directory);
   return normalizeDirectory(directory);
 }
@@ -429,6 +431,9 @@ FileResolver::findGameAsset(const std::string &game,
                             const std::filesystem::path &relative) {
   if (relative.is_absolute())
     return find(relative);
+  if (auto found =
+          findInDirectories(applicationDirectories(game).gameAssets, relative))
+    return found;
   std::error_code error;
   for (const auto &root : roots(game))
     for (const auto &candidate : {root / "game-assets" / relative,
@@ -465,8 +470,9 @@ std::filesystem::path FileResolver::fontDirectory() {
 
 bool FileResolver::isFontFile(const std::filesystem::path &path) {
   auto extension = path.extension().string();
-  std::transform(extension.begin(), extension.end(), extension.begin(),
-                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  std::transform(
+      extension.begin(), extension.end(), extension.begin(),
+      [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
   if (extension != ".ttf" && extension != ".otf" && extension != ".ttc")
     return false;
   std::error_code error;
@@ -517,7 +523,8 @@ FileResolver::getFontMap() {
           if (isFontFile(entry.path())) {
             std::string filename = entry.path().filename().string();
             if (cache.find(filename) == cache.end()) {
-              std::ifstream file(entry.path(), std::ios::binary | std::ios::ate);
+              std::ifstream file(entry.path(),
+                                 std::ios::binary | std::ios::ate);
               if (file) {
                 std::streamsize size = file.tellg();
                 file.seekg(0, std::ios::beg);
@@ -570,7 +577,7 @@ FileResolver::getFontBytes(const std::string &name) {
         static std::mutex mutex;
         static std::unordered_map<std::string, std::vector<uint8_t>> selected;
         std::lock_guard<std::mutex> lock(mutex);
-          const auto key = path.string();
+        const auto key = path.string();
         if (auto cached = selected.find(key); cached != selected.end())
           return &cached->second;
         std::ifstream input(path, std::ios::binary | std::ios::ate);
