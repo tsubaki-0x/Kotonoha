@@ -3,6 +3,7 @@
 
 #include <SDL3/SDL.h>
 #include <algorithm>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -423,7 +424,7 @@ FileResolver::engineAsset(const std::filesystem::path &relative) {
   for (const auto &directory : applicationDirectories().engineAssets)
     searched += "\n  " + (directory / relative).string();
   throw std::runtime_error("Engine asset not found: " + relative.string() +
-                           "; searched:" + searched);
+                           (searched.empty() ? "" : "; searched:" + searched));
 }
 
 std::optional<std::filesystem::path>

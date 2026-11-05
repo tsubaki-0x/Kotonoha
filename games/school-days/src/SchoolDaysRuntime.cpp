@@ -4079,29 +4079,7 @@ void Runtime::activateControl(int control) {
   else if (control == 13) openConfig(Kotonoha::SchoolDaysConfigMenuModel::Page::Def);
   else if (control == 15) openRouteMap();
   else if (control == 16) openExit();
-  else if (control == 14) {
-    retireSceneEventPointers();
-    Kotonoha_KtrfError error{};
-    Kotonoha::KtrfStateStore::Snapshot stateBefore;
-    Check(bridge.Session().State().Capture(&stateBefore, &error), error);
-    const auto persistenceBefore = bridge.Session().Persistence();
-    Check(bridge.Session().Persistence().WriteGlobalInteger(
-              "FLAG_LOGO", 11, -1, &bridge.Session().State(), &error),
-          error);
-    if (!bridge.ReleaseCurrentGameplayForFrontend(&error)) {
-      Kotonoha_KtrfError ignored{};
-      (void)bridge.Session().State().Restore(stateBefore, &ignored);
-      bridge.Session().Persistence() = persistenceBefore;
-      Check(false, error);
-    }
-    script = {};
-    backlogStore.ResetTransient();
-    if (backlogFallback) backlogFallback->clear();
-    backlogIndex = 0;
-    backlogScene.clear();
-    flushGlobal();
-    openTitle();
-  }
+  else if (control == 14) openMainMenuConfirm();
 }
 
 Runtime::MenuBarProjection Runtime::menuBarProjection() const {
