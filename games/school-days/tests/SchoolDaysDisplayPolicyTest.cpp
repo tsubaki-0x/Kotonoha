@@ -1,5 +1,7 @@
 #include <Kotonoha/routing/SchoolDaysDisplayPolicy.hpp>
+#include <Kotonoha/routing/SchoolDaysDesktopStartupProfile.hpp>
 #include <Kotonoha/routing/SchoolDaysConfigMenuModel.hpp>
+#include <Kotonoha/routing/SchoolDaysConfigMenuRenderPlan.hpp>
 
 #include <cstdlib>
 #include <chrono>
@@ -18,6 +20,122 @@ void Check(bool value, const char* message) {
 } // namespace
 
 int main() {
+    {
+        using Startup = Kotonoha::SchoolDaysDesktopStartupProfile;
+        Kotonoha::EngineSettings fresh;
+        fresh.mode = Kotonoha::WindowMode::Borderless;
+        Check(Startup::Apply(fresh, false, 2560, 1440, 143.89f),
+              "brand-new profile did not adopt the monitor desktop mode");
+        Check(fresh.width == 2560 && fresh.height == 1440 &&
+                  fresh.fullscreenWidth == 2560 &&
+                  fresh.fullscreenHeight == 1440 &&
+                  std::abs(fresh.refreshRate - 143.89f) < 0.01f,
+              "brand-new profile did not copy all native desktop fields");
+        // A subsequent launch on a different monitor/desktop must NEVER
+        // discard the size chosen by the user in settings.json.
+        Check(!Startup::Apply(fresh, true, 1920, 1080, 60.0f) &&
+                  fresh.width == 2560 && fresh.height == 1440 &&
+                  fresh.fullscreenWidth == 2560 &&
+                  fresh.fullscreenHeight == 1440,
+              "existing saved resolution was unexpectedly replaced");
+        Kotonoha::EngineSettings windowed;
+        windowed.mode = Kotonoha::WindowMode::Windowed;
+        windowed.width = 1366;
+        windowed.height = 768;
+        Check(Startup::Apply(windowed, true, 1920, 1080, 59.94f) &&
+                  windowed.width == 1366 && windowed.height == 768 &&
+                  windowed.fullscreenWidth == 1920 &&
+                  windowed.fullscreenHeight == 1080,
+              "legacy settings migration overwrote stored windowed geometry");
+        Check(!Startup::Apply(windowed, true, 800, 600, 60) &&
+                  windowed.width == 1366 && windowed.height == 768,
+              "legacy migrated settings changed again after a later launch");
+        Kotonoha::EngineSettings invalid;
+        Check(!Startup::Apply(invalid, false, 0, 1080, 60) &&
+                  invalid.width == 1280 && invalid.height == 720,
+              "invalid driver desktop values were applied to fresh settings");
+        Kotonoha::EngineSettings chosen;
+        chosen.mode = Kotonoha::WindowMode::Borderless;
+        Check(Startup::SelectResolution(chosen, 1280, 720, 60, 1920, 1080) &&
+                  chosen.mode == Kotonoha::WindowMode::Exclusive &&
+                  chosen.fullscreenWidth == 1280 &&
+                  chosen.fullscreenHeight == 720,
+              "borderless smaller resolution remained invisible until Exclusive");
+        chosen.mode = Kotonoha::WindowMode::Windowed;
+        Check(Startup::SelectResolution(chosen, 1024, 768, 75, 1920, 1080) &&
+                  chosen.width == 1024 && chosen.height == 768 &&
+                  chosen.mode == Kotonoha::WindowMode::Windowed,
+              "windowed resolution selection did not size the host window");
+        chosen.mode = Kotonoha::WindowMode::Borderless;
+        Check(Startup::SelectResolution(chosen, 1920, 1080, 60, 1920, 1080) &&
+                  chosen.mode == Kotonoha::WindowMode::Borderless,
+              "desktop-native borderless resolution unnecessarily toggled Exclusive");
+        chosen.mode = Kotonoha::WindowMode::Borderless;
+        Check(Startup::SelectResolution(chosen, 1920, 1080, 75, 1920, 1080, 60) &&
+                  chosen.mode == Kotonoha::WindowMode::Exclusive,
+              "borderless saved a non-desktop refresh rate without applying it");
+        // Display Options and the launcher share this same persisted settings
+        // object. An explicit choice (including refresh) must survive a clean
+        // restart even if the monitor's desktop mode is subsequently changed.
+        Kotonoha::EngineSettings persisted;
+        persisted.mode = Kotonoha::WindowMode::Borderless;
+        Check(Startup::SelectResolution(persisted, 1600, 900, 75.0f,
+                                        1920, 1080, 60.0f),
+              "cannot choose a non-desktop fullscreen resolution");
+        persisted.vsync = false;
+        persisted.resizable = false;
+        persisted.upscaling.factor = 2.5f;
+        const auto preferenceFile = std::filesystem::temp_directory_path() /
+            ("school-days-physical-settings-" + std::to_string(
+                std::chrono::steady_clock::now().time_since_epoch().count()) +
+             ".json");
+        persisted.save(preferenceFile.string());
+        auto restarted = Kotonoha::EngineSettings::load(preferenceFile.string());
+        std::error_code cleanup;
+        std::filesystem::remove(preferenceFile, cleanup);
+        Check(!Startup::Apply(restarted, true, 2560, 1440, 144.0f) &&
+                  restarted.mode == Kotonoha::WindowMode::Exclusive &&
+                  restarted.fullscreenWidth == 1600 &&
+                  restarted.fullscreenHeight == 900 &&
+                  std::abs(restarted.refreshRate - 75.0f) < 0.05f &&
+                  !restarted.vsync && !restarted.resizable &&
+                  std::abs(restarted.upscaling.factor - 2.5f) < 0.05f,
+              "explicit Display Options choice was not persisted on restart");
+        Kotonoha::EngineSettings general;
+        general.mode = Kotonoha::WindowMode::Windowed;
+        general.width = 1024;
+        general.height = 768;
+        general.resizable = false;
+        general.fullscreenWidth = 1600;
+        general.fullscreenHeight = 900;
+        general.refreshRate = 75.0f;
+        Check(Startup::SelectGeneralWindowSize(general, true, 1920, 1080, 60.0f) &&
+                  general.mode == Kotonoha::WindowMode::Exclusive &&
+                  general.fullscreenWidth == 1600 && general.fullscreenHeight == 900 &&
+                  std::abs(general.refreshRate - 75.0f) < 0.01f,
+              "General FULL did not enter Exclusive with the saved resolution and refresh");
+        Check(!Startup::SelectGeneralWindowSize(general, true, 1920, 1080, 60.0f),
+              "reselecting General FULL changed the existing Exclusive selection");
+        Check(Startup::SelectGeneralWindowSize(general, false, 1920, 1080, 60.0f) &&
+                  general.mode == Kotonoha::WindowMode::Windowed &&
+                  general.width == 1920 && general.height == 1080 && general.resizable &&
+                  general.fullscreenWidth == 1600 && general.fullscreenHeight == 900 &&
+                  std::abs(general.refreshRate - 75.0f) < 0.01f,
+              "General WINDOW did not prepare a resizable desktop window and retain the fullscreen mode");
+        Check(Startup::SelectGeneralWindowSize(general, true, 1920, 1080, 60.0f) &&
+                  general.mode == Kotonoha::WindowMode::Exclusive &&
+                  general.fullscreenWidth == 1600 && general.fullscreenHeight == 900 &&
+                  std::abs(general.refreshRate - 75.0f) < 0.01f,
+              "switching back to General FULL did not restore the saved fullscreen mode");
+
+        Kotonoha::EngineSettings legacy;
+        legacy.mode = Kotonoha::WindowMode::Borderless;
+        Check(Startup::SelectGeneralWindowSize(legacy, true, 2560, 1440, 143.89f) &&
+                  legacy.mode == Kotonoha::WindowMode::Exclusive &&
+                  legacy.fullscreenWidth == 2560 && legacy.fullscreenHeight == 1440 &&
+                  std::abs(legacy.refreshRate - 143.89f) < 0.01f,
+              "General FULL did not seed a missing fullscreen mode from the desktop");
+    }
     using Policy = Kotonoha::SchoolDaysDisplayPolicy;
     using Request = Policy::RetailConfigRequest;
     using Variant = Policy::Variant;
@@ -199,6 +317,42 @@ int main() {
                   control6.kind == Menu::ActionKind::RequestFull,
               "ConfigMenu Full controls did not produce Full requests");
         menu.Close();
+        // Sound level zero is an empty bar in the native plan. The presenter
+        // must skip these zero-size source rectangles rather than treating
+        // SDL_RenderTexture(false) as a fatal ConfigMenu failure.
+        {
+            const unsigned char soundCmapBytes[] = {2, 0, 0, 0, 1, 0, 0, 0, 7, 8};
+            std::ofstream soundCmap(fixture / "System/Option/Option_Sound.cmap",
+                                    std::ios::binary);
+            soundCmap.write(reinterpret_cast<const char*>(soundCmapBytes),
+                            sizeof(soundCmapBytes));
+        }
+        Check(menu.Open(fixture.string(), Menu::Variant::Standard,
+                        Menu::Page::Sound), "Sound zero-level fixture failed to open");
+        using Plan = Kotonoha::SchoolDaysConfigMenuRenderPlan;
+        Plan::VisualState soundState;
+        soundState.soundLevels = {{0, 0, 0}};
+        const auto emptyPlan = Plan::Build(menu, soundState);
+        int emptyBars = 0;
+        for (const auto &sprite : emptyPlan)
+            if (sprite.role == Plan::Role::SoundLevel) {
+                ++emptyBars;
+                Check(sprite.source.w == 0.0f && sprite.destination.w > 0.0f,
+                      "native level0 sound bar is not empty");
+            }
+        Check(emptyBars == 3, "Sound page did not emit three native empty bars");
+        soundState.soundLevels = {{1, 1, 1}};
+        const auto nonemptyPlan = Plan::Build(menu, soundState);
+        int nonemptyBars = 0;
+        for (const auto &sprite : nonemptyPlan)
+            if (sprite.role == Plan::Role::SoundLevel) {
+                ++nonemptyBars;
+                Check(sprite.source.w > 0.0f && sprite.destination.w > 0.0f,
+                      "volume level1 did not restore an authored bar");
+            }
+        Check(nonemptyBars == 3, "Sound level1 did not restore all three bars");
+        menu.Close();
+        std::filesystem::remove(fixture / "System/Option/Option_Sound.cmap");
         std::filesystem::remove(fixture / "System/Option/Option_Def.cmap");
         std::filesystem::remove(fixture / "System/Option");
         std::filesystem::remove(fixture / "System");

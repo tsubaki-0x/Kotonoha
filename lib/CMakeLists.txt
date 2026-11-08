@@ -123,7 +123,17 @@ else()
     set(kotonoha_json_target PkgConfig::JSON_C)
 endif()
 
-add_library(kotonoha_imgui SHARED
+# Opt-in portable builds may compile the engine and ImGui backend into the
+# application instead of deploying separate project DLLs. Defaults preserve
+# the original shared boundaries for existing Kotonoha games and platforms.
+option(KOTONOHA_STATIC_IMGUI "Link the ImGui backend statically into Kotonoha" OFF)
+option(KOTONOHA_STATIC_ENGINE "Link the Kotonoha engine statically into applications" OFF)
+if(KOTONOHA_STATIC_IMGUI)
+    set(kotonoha_imgui_linkage STATIC)
+else()
+    set(kotonoha_imgui_linkage SHARED)
+endif()
+add_library(kotonoha_imgui ${kotonoha_imgui_linkage}
     submodules/imgui/imgui.cpp
     submodules/imgui/imgui_draw.cpp
     submodules/imgui/imgui_tables.cpp
@@ -136,7 +146,12 @@ target_include_directories(kotonoha_imgui PUBLIC
     submodules/imgui submodules/imgui/backends submodules/imgui/misc/cpp)
 target_link_libraries(kotonoha_imgui PUBLIC SDL3::SDL3)
 
-add_library(KotonohaEngine SHARED
+if(KOTONOHA_STATIC_ENGINE)
+    set(kotonoha_engine_linkage STATIC)
+else()
+    set(kotonoha_engine_linkage SHARED)
+endif()
+add_library(KotonohaEngine ${kotonoha_engine_linkage}
     src/core/AssetProvider.cpp
     src/core/AssetOverlay.cpp
     src/core/Clock.cpp
@@ -154,6 +169,7 @@ add_library(KotonohaEngine SHARED
     src/core/Runtime.cpp
     src/core/UI.cpp
     src/componentes/ChoiceQuestionScene.cpp
+    src/componentes/DisplayModeCatalog.cpp
     src/componentes/FadeScene.cpp
     src/componentes/GameMenu.cpp
     src/componentes/InGameMenu.cpp
@@ -222,6 +238,24 @@ target_include_directories(KotonohaEngine PUBLIC
 target_link_libraries(KotonohaEngine PUBLIC SDL3::SDL3 SDL3_ttf::SDL3_ttf
     ${kotonoha_ffmpeg_target} kotonoha_imgui PRIVATE
     ${kotonoha_json_target} ${kotonoha_ass_target})
+# pkg-config's ordinary --libs omits Libs.private, which is correct for
+# dynamic FFmpeg/libass but incomplete when a portable Windows build embeds
+# their static archives. Propagate the full static transitive closure only
+# for the opt-in static engine; leave all existing shared builds unchanged.
+if(KOTONOHA_STATIC_ENGINE AND WIN32 AND
+   VCPKG_TARGET_TRIPLET MATCHES "static")
+    target_link_directories(KotonohaEngine PUBLIC
+        ${FFMPEG_STATIC_LIBRARY_DIRS}
+        ${LIBASS_STATIC_LIBRARY_DIRS}
+        ${JSON_C_STATIC_LIBRARY_DIRS})
+    target_link_libraries(KotonohaEngine PRIVATE
+        ${FFMPEG_STATIC_LIBRARIES}
+        ${LIBASS_STATIC_LIBRARIES}
+        ${JSON_C_STATIC_LIBRARIES})
+endif()
+if(WIN32 AND NOT ANDROID)
+    target_link_libraries(KotonohaEngine PRIVATE user32 ws2_32)
+endif()
 
 if(ANDROID)
     target_link_libraries(KotonohaEngine PRIVATE GLESv2)

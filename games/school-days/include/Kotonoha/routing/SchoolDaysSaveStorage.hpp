@@ -28,6 +28,10 @@ public:
                        std::string* error = nullptr) const;
     bool ReadSaveFile(int slot, std::vector<uint8_t>* bytes,
                       std::string* error = nullptr) const;
+    // Expose the verified per-profile path for optional L4 companion metadata.
+    // The native SaveFileName layout and its bytes remain unchanged.
+    bool SaveFilePath(int slot, std::filesystem::path* path,
+                      std::string* error = nullptr) const;
     bool WriteSaveFile(const SchoolDaysSaveService::Plan& plan,
                        std::string* error = nullptr) const;
     bool WriteGlobalFlag(const SchoolDaysSaveService::Plan& plan,

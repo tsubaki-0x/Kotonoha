@@ -134,11 +134,13 @@ SchoolDaysSaveLoadRenderPlan::Build(const SchoolDaysSaveLoadModel& model) {
                                                       layout)));
     }
 
-    // The fixed RouteMap CHIP object is drawn in both SAVE and LOAD. The host
-    // now accepts its visible control in either mode and returns to its owner.
-    sprites.push_back(Chip(Role::RouteMap, 21, {1.0f, 1.0f, 194.0f, 38.0f},
-                           ScaleSpriteDestination(10.0f, 54.0f, 194.0f,
-                                                  38.0f, layout)));
+    // Original runtime: LOAD has "Open Route Map"; the corresponding strip on
+    // SAVE is blank. The common CMAP does not make this sprite visible.
+    if (model.CurrentMode() == SchoolDaysSaveLoadModel::Mode::Load) {
+        sprites.push_back(Chip(Role::RouteMap, 21, {1.0f, 1.0f, 194.0f, 38.0f},
+                               ScaleSpriteDestination(10.0f, 54.0f, 194.0f,
+                                                      38.0f, layout)));
+    }
     return sprites;
 }
 

@@ -143,6 +143,23 @@ int main() {
     // Decrease path preserves the confirmed raw code 4 without naming it.
     StartChange(meter, 200u, 210u, 40, 20, 10, 20, 4);
 
+    // The original post-choice jingle is not the immediate Select click.
+    // The meter emits Up=3 or Down=4 only in Detect after its capture phase.
+    // When 001 is unchanged, a change to 002 has exactly the same mapping.
+    StartChange(meter, 210u, 211u, 20, 20, 20, 40, 3);
+    StartChange(meter, 212u, 213u, 20, 40, 20, 10, 4);
+    // Native 001 has precedence over 002 even when they change in opposite
+    // directions; never fire two musical effects for a single detection.
+    StartChange(meter, 214u, 215u, 10, 30, 11, 0, 3);
+    StartChange(meter, 216u, 217u, 20, 10, 19, 30, 4);
+    meter.Initialize(20, 20);
+    const auto sameCapture = meter.Tick(220u, 20, 20);
+    const auto sameDetect = meter.Tick(221u, 20, 20);
+    Check(sameCapture.hostDirectionCode == 0 &&
+              sameDetect.hostDirectionCode == 0 &&
+              meter.CurrentPhase() == Meter::Phase::PostTarget,
+          "unchanged feelings must not trigger the post-choice musical cue");
+
     // StateNotClamped: extremely large source values remain raw; only
     // classification derives a locally clamped extent.
     StartChange(meter, 300u, 310u, 0, 0, 1000, 0, 3);

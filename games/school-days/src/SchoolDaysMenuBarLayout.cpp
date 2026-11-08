@@ -159,6 +159,22 @@ SchoolDaysMenuBarPresenter::ControlChip(int control, Variant variant) {
 }
 
 SchoolDaysMenuBarPresenter::ChipRecord
+SchoolDaysMenuBarPresenter::SelectedSpeedChip(int speedIndex,
+                                             bool speedControlsEnabled,
+                                             bool transportLocked,
+                                             Variant variant) {
+    // SysMenuSDHQ.dll 0x10024914 calls FILMEngine vtable +0x11C (0x0042C060,
+    // returning main+0x504) and indexes 5+speedIndex into CHIP record table.
+    // Retail captures confirm an orange persistent square for x2..x32, but
+    // the ordinary white square for x1. Match host speed-control availability.
+    if (speedIndex <= 0 || speedIndex > 4 || !speedControlsEnabled ||
+        transportLocked) {
+        return {};
+    }
+    return ControlChip(5 + speedIndex, variant);
+}
+
+SchoolDaysMenuBarPresenter::ChipRecord
 SchoolDaysMenuBarPresenter::NormalSystemControlChip(int control,
                                                     Variant variant) {
     ChipRecord out;
@@ -219,6 +235,13 @@ uint8_t SchoolDaysMenuBarPresenter::ReplayOpacityAlphaForControl(int control) {
     return static_cast<uint8_t>(level * 25);
 }
 
+uint8_t SchoolDaysMenuBarPresenter::ReplayIndicatorAlphaForState(
+    bool playDataActive, uint8_t selectedAlpha,
+    bool fullBarSuppressed, bool meterOnly) {
+    return playDataActive && !fullBarSuppressed && !meterOnly
+               ? selectedAlpha : 0;
+}
+
 uint8_t SchoolDaysMenuBarPresenter::FadeAlpha(uint8_t startAlpha,
                                               bool targetVisible,
                                               uint32_t elapsedMs) {
@@ -234,6 +257,44 @@ uint8_t SchoolDaysMenuBarPresenter::FadeAlpha(uint8_t startAlpha,
     return static_cast<uint8_t>(
         (static_cast<unsigned>(startAlpha) * (kFadeOutMs - elapsedMs)) /
         kFadeOutMs);
+}
+
+SchoolDaysMenuBarPresenter::RenderVisibility
+SchoolDaysMenuBarPresenter::VisibilityForState(uint8_t barAlpha,
+                                               bool fullBarSuppressed,
+                                               bool meterOnly) {
+    const bool chrome = barAlpha != 0 && !fullBarSuppressed && !meterOnly;
+    return {chrome || meterOnly, chrome};
+}
+
+SchoolDaysMenuBarPresenter::PersistentTransport
+SchoolDaysMenuBarPresenter::PersistentTransportForState(
+    bool autoMode, int speedIndex, bool speedControlsEnabled,
+    bool transportLocked, bool fullBarSuppressed, bool meterOnly) {
+    // Persistent native sprites are distinct from the fading 800x75 chrome.
+    // Choice-tail meterOnly and an explicit handoff suppression hide them.
+    if (fullBarSuppressed || meterOnly) return {};
+    return {speedIndex > 0 && speedIndex < 5 && speedControlsEnabled &&
+                !transportLocked,
+            autoMode};
+}
+
+int SchoolDaysMenuBarPresenter::AutoLightRecordForTime(
+    uint32_t nowMs, uint32_t autoOnMs, int speedIndex) {
+    if (speedIndex < 0 || speedIndex >= 5) return -1;
+    // Retail 0x100252F4..0x10025323 uses integer division twice:
+    // GetTickCount - host+0x224 (AUTO-on timestamp), divided by
+    // 1000 / (host speedIndex+1), modulo 13, then 29 for the CHIP record.
+    const uint32_t elapsed = nowMs - autoOnMs;
+    // The v3 runtime captures nowMs at the beginning of an update, before
+    // SetRuntimeState observes a just-enabled AUTO and samples SDL_GetTicks.
+    // That single pre-toggle frame must use frame zero, not interpret a small
+    // negative scheduling difference as ~49 days of unsigned elapsed time.
+    // Ordinary 32-bit tick rollover still produces a small positive delta.
+    if (elapsed > 0x7fffffffu) return 29;
+    const uint32_t framePeriodMs =
+        1000u / (static_cast<uint32_t>(speedIndex) + 1u);
+    return 29 + static_cast<int>((elapsed / framePeriodMs) % 13u);
 }
 
 int SchoolDaysMenuBarPresenter::HitTest(float logicalX, float logicalY,

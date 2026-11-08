@@ -1095,6 +1095,7 @@ SchoolDaysSystemUi::Viewport SchoolDaysSystemUi::ComputeViewport(
     const float sy = static_cast<float>(outputHeight) /
                      static_cast<float>(virtualHeight);
     viewport.scale = std::min(sx, sy);
+    viewport.scaleY = viewport.scale;
     viewport.x = (static_cast<float>(outputWidth) -
                   static_cast<float>(virtualWidth) * viewport.scale) *
                  0.5f;
@@ -1104,11 +1105,25 @@ SchoolDaysSystemUi::Viewport SchoolDaysSystemUi::ComputeViewport(
     return viewport;
 }
 
+SchoolDaysSystemUi::Viewport SchoolDaysSystemUi::ComputeConfigViewport(
+    int outputWidth, int outputHeight, int virtualWidth, int virtualHeight) const {
+    auto viewport = ComputeViewport(outputWidth, outputHeight,
+                                    virtualWidth, virtualHeight);
+    if (!configStandardFullscreenStretch_ || !configMenu_.IsOpen() ||
+        configMenu_.CurrentVariant() != SchoolDaysConfigMenuModel::Variant::Standard ||
+        viewport.scale <= 0.0f) return viewport;
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.scale = static_cast<float>(outputWidth) / virtualWidth;
+    viewport.scaleY = static_cast<float>(outputHeight) / virtualHeight;
+    return viewport;
+}
+
 SDL_FRect SchoolDaysSystemUi::TransformRect(const SDL_FRect& native,
                                             const Viewport& viewport) {
     return {viewport.x + native.x * viewport.scale,
-            viewport.y + native.y * viewport.scale,
-            native.w * viewport.scale, native.h * viewport.scale};
+            viewport.y + native.y * viewport.scaleY,
+            native.w * viewport.scale, native.h * viewport.scaleY};
 }
 
 bool SchoolDaysSystemUi::PointerToVirtual(SDL_Renderer* renderer, float x, float y,
@@ -1135,11 +1150,16 @@ bool SchoolDaysSystemUi::PointerToVirtual(SDL_Renderer* renderer, float x, float
                                               : (replay_.IsOpen()
                                                      ? replay_.Cmap()
                                                      : routeMap_.Cmap()))));
-    const auto viewport = ComputeViewport(
-        width, height, static_cast<int>(cmap.Width()), static_cast<int>(cmap.Height()));
+    const auto viewport = configMenu_.IsOpen()
+        ? ComputeConfigViewport(width, height,
+                                static_cast<int>(cmap.Width()),
+                                static_cast<int>(cmap.Height()))
+        : ComputeViewport(width, height,
+                          static_cast<int>(cmap.Width()),
+                          static_cast<int>(cmap.Height()));
     if (viewport.scale <= 0.0f) return false;
     const float vx = (renderX - viewport.x) / viewport.scale;
-    const float vy = (renderY - viewport.y) / viewport.scale;
+    const float vy = (renderY - viewport.y) / viewport.scaleY;
     if (vx < 0.0f || vy < 0.0f ||
         vx >= static_cast<float>(cmap.Width()) ||
         vy >= static_cast<float>(cmap.Height())) {
@@ -1800,7 +1820,7 @@ bool SchoolDaysSystemUi::Render(SDL_Renderer* renderer, std::string* error) {
         int outputHeight = 0;
         outputWidth = area_.x;
         outputHeight = area_.y;
-        const auto viewport = ComputeViewport(
+        const auto viewport = ComputeConfigViewport(
             outputWidth, outputHeight,
             static_cast<int>(configMenu_.Cmap().Width()),
             static_cast<int>(configMenu_.Cmap().Height()));
@@ -1821,6 +1841,12 @@ bool SchoolDaysSystemUi::Render(SDL_Renderer* renderer, std::string* error) {
             const SDL_FRect source = {sprite.source.x, sprite.source.y,
                                       sprite.source.w, sprite.source.h};
             const SDL_FRect* sourcePtr = sprite.hasSource ? &source : nullptr;
+            // Retail bank level0 has an intentionally empty strip. SDL
+            // must not be asked to render its 0-width source/destination;
+            // that is not a UI failure and the Sound page must stay open.
+            if ((sprite.hasSource && (source.w <= 0.0f || source.h <= 0.0f)) ||
+                dst.w <= 0.0f || dst.h <= 0.0f)
+                continue;
             if (!SDL_RenderTexture(renderer, texture, sourcePtr, &dst)) {
                 if (error != nullptr) *error = SDL_GetError();
                 return false;

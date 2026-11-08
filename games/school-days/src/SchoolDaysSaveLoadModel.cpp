@@ -53,6 +53,9 @@ int SchoolDaysSaveLoadModel::HitControl(int x, int y) const {
     if (!open_) return -1;
     const int region = cmap_.Get(x, y);
     if (region <= 0 || region > 32) return -1;
+    // On the retail SAVE page the Route Map toolbar space is empty, although
+    // the shared CMAP still contains region 22 (logical control 21).
+    if (mode_ == Mode::Save && region == 22) return -1;
     return region - 1;
 }
 
@@ -72,7 +75,12 @@ bool SchoolDaysSaveLoadModel::Activate(Output* output) {
     // 10..19 are page tabs.  Activation changes page and refreshes the ten
     // visible slot rows; it does not emit a SysMenu result.
     if (selection_ >= 10 && selection_ <= 19) {
-        page_ = selection_ - 10;
+        const int nextPage = selection_ - 10;
+        // The host refreshes row occupancy only when Page() changes.  Clicking
+        // the already-selected tab must not clear an otherwise valid LOAD
+        // page: the rows remain visible but would become impossible to load.
+        if (nextPage == page_) return true;
+        page_ = nextPage;
         rowOccupied_.fill(false);
         occupancyReady_ = false;
         return true;
@@ -84,8 +92,8 @@ bool SchoolDaysSaveLoadModel::Activate(Output* output) {
         return true;
     }
 
-    // The visible RouteMap control is available in both Save and Load panels.
-    if (selection_ == 21) {
+    // The retail Route Map launcher is present only on LOAD, not SAVE.
+    if (selection_ == 21 && mode_ == Mode::Load) {
         output->action = Action::RouteMap;
         return true;
     }

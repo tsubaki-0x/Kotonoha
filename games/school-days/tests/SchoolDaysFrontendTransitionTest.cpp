@@ -1,5 +1,7 @@
 #include <Kotonoha/routing/SchoolDaysFrontendTransition.hpp>
 #include <Kotonoha/routing/SchoolDaysExitTransition.hpp>
+#include <Kotonoha/routing/SchoolDaysLoadTransition.hpp>
+#include <Kotonoha/routing/SchoolDaysTransportFade.hpp>
 
 #include <cstdlib>
 #include <iostream>
@@ -28,6 +30,7 @@ int main() {
 
     const auto child = Transition::SpecFor(Transition::Profile::TitleToChild);
     const auto back = Transition::SpecFor(Transition::Profile::ChildToTitle);
+    const auto hScene = Transition::SpecFor(Transition::Profile::ReplayToHScene);
     Check(child.outgoingMs == 500u && child.incomingMs == 500u &&
               child.outgoingColor == Transition::Color::White &&
               child.incomingColor == Transition::Color::White &&
@@ -35,6 +38,10 @@ int main() {
               back.outgoingColor == Transition::Color::White &&
               back.incomingColor == Transition::Color::White,
           "white child transition profiles drifted");
+    Check(hScene.outgoingMs == 1000u && hScene.incomingMs == 1000u &&
+              hScene.outgoingColor == Transition::Color::Black &&
+              hScene.incomingColor == Transition::Color::Black,
+          "Replay H-scene must fade black both before and after its handoff");
 
     Check(Transition::OutgoingAlpha(0u, 500u) == 0u &&
               Transition::OutgoingAlpha(250u, 500u) == 127u &&
@@ -112,6 +119,82 @@ int main() {
               exit.Update(12350u) == Exit::Event::Confirmed,
           "EXIT shutdown fade timing drifted");
 
+    using Load = Kotonoha::SchoolDaysLoadTransition;
+    Load load;
+    Check(!load.Begin(-1, 0u) && !load.Active(),
+          "negative save slot must not start the loading transition");
+    Check(load.Begin(4, 100u) && load.Slot() == 4 && !load.Begin(7, 100u) &&
+              load.BlackAlpha(600u) == 127u &&
+              load.Update(1099u) == Load::Event::None &&
+              load.CurrentPhase() == Load::Phase::FadeOutPanel,
+          "LOAD must dim the old SaveLoad panel before showing its card");
+    Check(load.Update(1100u) == Load::Event::None &&
+              load.CurrentPhase() == Load::Phase::ShowLoading &&
+              load.BlackAlpha(1100u) == 0u &&
+              load.InputLocked(),
+          "LOAD card must replace the dimmed panel and lock input");
+    Check(load.Update(1999u) == Load::Event::None &&
+              load.CurrentPhase() == Load::Phase::ShowLoading &&
+              load.Update(2000u) == Load::Event::None &&
+              load.CurrentPhase() == Load::Phase::FadeOutLoading &&
+              load.BlackAlpha(2250u) == 127u,
+          "LOAD card must remain visible before fading to black");
+    Check(load.Update(2500u) == Load::Event::RestoreSlot &&
+              load.CurrentPhase() == Load::Phase::AwaitRestore &&
+              load.BlackAlpha(2500u) == 255u &&
+              load.Update(2800u) == Load::Event::None,
+          "LOAD must restore exactly once behind an opaque frame");
+    load.Restored(2800u);
+    Check(load.CurrentPhase() == Load::Phase::RevealScene &&
+              load.BlackAlpha(3050u) == 128u &&
+              load.Update(3300u) == Load::Event::None &&
+              !load.Active(),
+          "LOAD must reveal the restored scene and release input lock");
+    Check(load.Begin(2, 4000u), "LOAD should be reusable after successful restore");
+    load.Reset();
+    Check(!load.Active() && load.Slot() == -1,
+          "LOAD reset must release its pending slot after failure");
+    Check(load.BeginReplayData(3, 6000u) && load.Slot() == 3 &&
+              load.Target() == Load::Destination::ReplayData &&
+              load.Update(7000u) == Load::Event::None &&
+              load.Update(7900u) == Load::Event::None &&
+              load.Update(8400u) == Load::Event::RestoreSlot,
+          "Replay Data must use the retail loading card before starting PlayData");
+    load.Reset();
+    Check(load.Target() == Load::Destination::SaveSlot,
+          "Replay Data target must not survive a reset");
+
+    // EXE FILMEngine state4 control2/control3 black fade sequencing:
+    // 500 ms OUT, reconstruction while black, 1000 ms IN.
+    using SeekFade = Kotonoha::SchoolDaysTransportFade;
+    SeekFade seekFade;
+    Check(seekFade.Begin(SeekFade::Operation::SkipToEnd, 10000u) &&
+              !seekFade.Begin(SeekFade::Operation::Rewind, 10000u) &&
+              seekFade.CurrentPhase() == SeekFade::Phase::FadeOut &&
+              seekFade.BlackAlpha(10250u) == 127u &&
+              seekFade.Update(10499u) == SeekFade::Event::None &&
+              seekFade.Update(10500u) == SeekFade::Event::Navigate &&
+              seekFade.BlackAlpha(10500u) == 255u &&
+              seekFade.Update(10600u) == SeekFade::Event::None,
+          "transport operation crossed its 500ms outgoing fade early or twice");
+    seekFade.Navigated();
+    Check(seekFade.CurrentPhase() == SeekFade::Phase::AwaitReady &&
+              seekFade.BlackAlpha(11000u) == 255u,
+          "transport must stay black until its async seek is ready");
+    seekFade.Reveal(11000u);
+    Check(seekFade.CurrentPhase() == SeekFade::Phase::FadeIn &&
+              seekFade.BlackAlpha(11500u) == 128u &&
+              seekFade.Update(11999u) == SeekFade::Event::None &&
+              seekFade.Active() &&
+              seekFade.Update(12000u) == SeekFade::Event::None &&
+              !seekFade.Active() &&
+              seekFade.BlackAlpha(12000u) == 0u,
+          "transport did not fade in over 1000ms or release its input lock");
+    Check(seekFade.Begin(SeekFade::Operation::Rewind, 13000u) &&
+              seekFade.CurrentOperation() == SeekFade::Operation::Rewind,
+          "transport fade cannot be reused for Rewind");
+    seekFade.Reset();
+
     std::cout << "SCHOOL DAYS FRONTEND TRANSITION GATE PASS\n"
               << "profile_specs=PASS\n"
               << "integer_alpha=PASS\n"
@@ -123,6 +206,10 @@ int main() {
     std::cout << "exit_title_sysbase_500ms=PASS\n"
               << "exit_cancel_500ms=PASS\n"
               << "topmenu_confirm_500ms=PASS\n"
-              << "exit_confirm_750ms=PASS\n";
+              << "exit_confirm_750ms=PASS\n"
+              << "load_retail_card_and_restore_handoff=PASS\n";
+    std::cout << "replay_data_loading_card=PASS\n"
+              << "h_scene_black_fade_profile=PASS\n";
+    std::cout << "rewind_skip_black_500_out_1000_in=PASS\n";
     return 0;
 }

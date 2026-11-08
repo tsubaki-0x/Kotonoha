@@ -23,10 +23,10 @@ struct SchoolDaysSubtitleTypography {
     static constexpr SDL_Color Shadow{0, 0, 0, 150};
 
     // Returns a newly-owned RGBA surface with shadow + outline + fill. The
-    // caller owns the returned surface. The font's size/outline state is
-    // restored before returning.
+    // caller owns the returned surface. Both fonts' size/outline state is
+    // restored before returning. The fallback must already be registered.
     static SDL_Surface* Render(TTF_Font* font, const char* utf8,
-                               std::size_t bytes);
+                               std::size_t bytes, TTF_Font* fallback = nullptr);
 };
 
 } // namespace Kotonoha

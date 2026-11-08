@@ -25,13 +25,102 @@ add_executable(SchoolDaysSceneTimelineTest SchoolDaysSceneTimelineTest.cpp)
 target_link_libraries(SchoolDaysSceneTimelineTest PRIVATE school_days)
 add_test(NAME SchoolDaysSceneTimelineTest COMMAND SchoolDaysSceneTimelineTest)
 
+# School Days-specific integration of Ruaneri's standard per-NODE JSON
+# dictionary; all ORS/text in this fixture are synthetic.
+add_executable(SchoolDaysJsonTranslationTest SchoolDaysJsonTranslationTest.cpp)
+target_link_libraries(SchoolDaysJsonTranslationTest PRIVATE school_days)
+add_test(NAME SchoolDays.JsonTranslation COMMAND SchoolDaysJsonTranslationTest
+    "${SCHOOL_DAYS_ROUTE}")
+set_tests_properties(SchoolDays.JsonTranslation PROPERTIES
+    ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy")
+
+add_executable(SchoolDaysTranslationCoverageTest
+    SchoolDaysTranslationCoverageTest.cpp)
+target_link_libraries(SchoolDaysTranslationCoverageTest PRIVATE school_days)
+add_test(NAME SchoolDays.TranslationCoverage
+    COMMAND SchoolDaysTranslationCoverageTest)
+
+add_executable(SchoolDaysTranslationContextTest
+    SchoolDaysTranslationContextTest.cpp)
+target_link_libraries(SchoolDaysTranslationContextTest PRIVATE school_days)
+add_test(NAME SchoolDays.TranslationContext
+    COMMAND SchoolDaysTranslationContextTest)
+
+add_executable(SchoolDaysLxhLocaleTest SchoolDaysLxhLocaleTest.cpp)
+target_link_libraries(SchoolDaysLxhLocaleTest PRIVATE school_days)
+add_test(NAME SchoolDays.LxhLocale COMMAND SchoolDaysLxhLocaleTest)
+
+add_executable(SchoolDaysDisplayNarrativeMarkupTest
+    SchoolDaysDisplayNarrativeMarkupTest.cpp)
+target_link_libraries(SchoolDaysDisplayNarrativeMarkupTest PRIVATE school_days)
+add_test(NAME SchoolDays.DisplayNarrativeMarkup
+    COMMAND SchoolDaysDisplayNarrativeMarkupTest)
+
+# Optional private-content QA. It consumes user-provided GPKs and JSON at
+# explicit CLI paths and is never automatically executed by CTest.
+add_executable(SchoolDaysSpanishChoiceWrapProbe
+    SchoolDaysSpanishChoiceWrapProbe.cpp)
+target_link_libraries(SchoolDaysSpanishChoiceWrapProbe PRIVATE school_days)
+
 add_executable(SchoolDaysAudioEventStateTest SchoolDaysAudioEventStateTest.cpp)
 target_link_libraries(SchoolDaysAudioEventStateTest PRIVATE school_days)
 add_test(NAME SchoolDaysAudioEventStateTest COMMAND SchoolDaysAudioEventStateTest)
 
+# Synthetic ORS-only regression: LxH soundtrack is one PlaySe, with no
+# independently selectable male voice stream. Never load proprietary media.
+add_executable(SchoolDaysLxhMixedAudioTest SchoolDaysLxhMixedAudioTest.cpp)
+target_link_libraries(SchoolDaysLxhMixedAudioTest PRIVATE school_days)
+add_test(NAME SchoolDaysLxhMixedAudioTest COMMAND SchoolDaysLxhMixedAudioTest)
+
 add_executable(SchoolDaysAssetsListTest SchoolDaysAssetsListTest.cpp)
 target_link_libraries(SchoolDaysAssetsListTest PRIVATE school_days)
 add_test(NAME SchoolDaysAssetsListTest COMMAND SchoolDaysAssetsListTest)
+
+# User-supplied retail GPKs plus mandatory Packs/LxH.GPK are NEVER bundled or
+# committed. This optional read-only validation binary requires explicit local
+# paths and is deliberately not registered with CTest (no proprietary fixtures).
+add_executable(SchoolDaysLxhPrivateMountProbe SchoolDaysLxhPrivateMountProbe.cpp)
+target_link_libraries(SchoolDaysLxhPrivateMountProbe PRIVATE school_days)
+
+# Immutable 7-ending / 28-path manifest; no LxH ON/OFF preference exists.
+add_executable(SchoolDaysLxhContentTest SchoolDaysLxhContentTest.cpp)
+target_link_libraries(SchoolDaysLxhContentTest PRIVATE school_days)
+add_test(NAME SchoolDaysLxhContentTest COMMAND SchoolDaysLxhContentTest)
+
+add_executable(SchoolDaysLxhFadeTest SchoolDaysLxhFadeTest.cpp)
+target_link_libraries(SchoolDaysLxhFadeTest PRIVATE school_days)
+add_test(NAME SchoolDaysLxhFadeTest COMMAND SchoolDaysLxhFadeTest)
+
+# Pure wall-clock regression for the shared-tick WMV/OGG preparation stall.
+# No retail packs, decoder, saves, or GUI are needed by this synthetic test.
+add_executable(SchoolDaysMediaPreparationWatchdogTest
+    SchoolDaysMediaPreparationWatchdogTest.cpp)
+target_include_directories(SchoolDaysMediaPreparationWatchdogTest PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+target_compile_features(SchoolDaysMediaPreparationWatchdogTest PRIVATE cxx_std_17)
+add_test(NAME SchoolDays.MediaPreparationWatchdog
+    COMMAND SchoolDaysMediaPreparationWatchdogTest)
+
+add_executable(SchoolDaysMediaCancellationPoolTest
+    SchoolDaysMediaCancellationPoolTest.cpp)
+target_include_directories(SchoolDaysMediaCancellationPoolTest PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+target_compile_features(SchoolDaysMediaCancellationPoolTest PRIVATE cxx_std_17)
+add_test(NAME SchoolDays.MediaCancellationPool
+    COMMAND SchoolDaysMediaCancellationPoolTest)
+
+# No retail data, GUI, or real saves: all SLog/ORS and files are synthetic,
+# isolated under a fresh temporary --documents-like directory.
+add_executable(SchoolDaysSaveProvenanceTest SchoolDaysSaveProvenanceTest.cpp)
+target_link_libraries(SchoolDaysSaveProvenanceTest PRIVATE school_days)
+add_test(NAME SchoolDays.SaveProvenance
+    COMMAND SchoolDaysSaveProvenanceTest "${SCHOOL_DAYS_ROUTE}")
+
+# Pure, private CMAP regression: clicking the currently selected Save/Load tab
+# must not clear the occupancy latch and disable an otherwise valid LOAD row.
+add_executable(SchoolDaysSaveLoadSamePageTest SchoolDaysSaveLoadSamePageTest.cpp)
+target_link_libraries(SchoolDaysSaveLoadSamePageTest PRIVATE school_days)
+add_test(NAME SchoolDays.SaveLoadSamePage COMMAND SchoolDaysSaveLoadSamePageTest)
 
 add_executable(SchoolDaysGpkStreamingTest SchoolDaysGpkStreamingTest.cpp)
 target_link_libraries(SchoolDaysGpkStreamingTest PRIVATE school_days ZLIB::ZLIB)
@@ -57,6 +146,7 @@ set_tests_properties(SchoolDaysMenuBarRuntimeTest PROPERTIES
 foreach(_school_days_policy_test IN ITEMS
         SchoolDaysChoiceTextPlanTest
         SchoolDaysDisplayPolicyTest
+        SchoolDaysConfigMenuDisplayTest
         SchoolDaysExitTransitionTest
         SchoolDaysFrontendTransitionTest
         SchoolDaysInputPolicyTest
@@ -190,12 +280,16 @@ if(WIN32)
         SchoolDaysSceneTimelineTest
         SchoolDaysAudioEventStateTest
         SchoolDaysAssetsListTest
+        SchoolDaysLxhFadeTest
+        SchoolDaysLxhContentTest
         SchoolDaysGpkStreamingTest
         SchoolDaysTitleMovieClockTest
         SchoolDaysEpisodeOverlayTest
+        SchoolDays.DisplayNarrativeMarkup
         SchoolDaysMenuBarRuntimeTest
         SchoolDaysChoiceTextPlanTest
         SchoolDaysDisplayPolicyTest
+        SchoolDaysConfigMenuDisplayTest
         SchoolDaysExitTransitionTest
         SchoolDaysFrontendTransitionTest
         SchoolDaysInputPolicyTest
@@ -241,7 +335,9 @@ if(SCHOOL_DAYS_DATA_DIR)
     add_executable(SchoolDaysSaveTest SchoolDaysSaveTest.cpp)
     target_link_libraries(SchoolDaysSaveTest PRIVATE school_days)
     kotonoha_copy_assets(SchoolDaysSaveTest)
-    add_test(NAME SchoolDays.Save COMMAND SchoolDaysSaveTest "${SCHOOL_DAYS_DATA_DIR}" "${SCHOOL_DAYS_ROUTE}")
+    add_test(NAME SchoolDays.Save COMMAND SchoolDaysSaveTest
+      "${SCHOOL_DAYS_DATA_DIR}" "${SCHOOL_DAYS_ROUTE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/../display-options")
     set_tests_properties(SchoolDays.Save PROPERTIES TIMEOUT 90
         ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy")
     if(WIN32)

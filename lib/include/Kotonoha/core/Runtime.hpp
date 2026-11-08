@@ -83,6 +83,11 @@ public:
   // Games with scene transactions can retain the fully composed Novel raster
   // in an engine-owned target. Readiness means a primary image/video drew.
   virtual bool useOwnedNarrativeTarget() const { return false; }
+  // Optional game-authored vertical presentation inside the normal Novel
+  // canvas. 1.0 fills the fitted canvas; e.g. 0.75 keeps the whole frame but
+  // compresses it into the centered 75%, leaving black bands above/below.
+  // The physical window and generic engine Settings UI remain unchanged.
+  virtual float narrativePresentationHeightScale() const { return 1.0f; }
   virtual bool narrativeFrameDrawable() const { return false; }
   virtual bool narrativeBoundaryFrame() const { return false; }
   virtual std::string narrativeVisualOwner() const { return {}; }

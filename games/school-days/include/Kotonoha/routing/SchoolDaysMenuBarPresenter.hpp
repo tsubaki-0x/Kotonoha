@@ -39,6 +39,16 @@ public:
         SDL_FRect source{};
     };
 
+    struct RenderVisibility {
+        bool meter = false;
+        bool chrome = false;
+    };
+
+    struct PersistentTransport {
+        bool selectedSpeed = false;
+        bool autoOn = false;
+    };
+
     enum class ActionKind {
         None,
         ToggleAutoMode,
@@ -75,6 +85,11 @@ public:
     // internal 0..24 control geometry and MenuBar_Chip record table.
     static SDL_FRect ControlRect(int control, Variant variant);
     static ChipRecord ControlChip(int control, Variant variant);
+    // FILMEngine speed index (0..4) selects native CHIP record 5+index.
+    // In retail the default x1 is unlit while x2/x4/x16/x32 keep their
+    // orange selection outside pointer hover.
+    static ChipRecord SelectedSpeedChip(int speedIndex, bool speedControlsEnabled,
+                                        bool transportLocked, Variant variant);
     static ChipRecord NormalSystemControlChip(int control, Variant variant);
     static ChipRecord FixedChipRecord(int record, Variant variant);
     // SysMenuSDHQ.dll FUN_100262E0: the native hover-help sprite selected for
@@ -85,8 +100,25 @@ public:
     // level set {0,2,3,4,5,6,7,8,9,10}.  Alpha is level*25.
     static int ReplayOpacityLevelForControl(int control);
     static uint8_t ReplayOpacityAlphaForControl(int control);
+    // Replay Data's cyan status label is composited independently of MenuBar
+    // hover fade. Only its own 0..10 opacity selector controls its alpha.
+    static uint8_t ReplayIndicatorAlphaForState(
+        bool playDataActive, uint8_t selectedAlpha,
+        bool fullBarSuppressed, bool meterOnly);
     static uint8_t FadeAlpha(uint8_t startAlpha, bool targetVisible,
                              uint32_t elapsedMs);
+    static RenderVisibility VisibilityForState(uint8_t barAlpha,
+                                               bool fullBarSuppressed,
+                                               bool meterOnly);
+    // The retail x2..x32 selection and AUTO ON remain visible at full opacity
+    // after ordinary hover chrome fades completely out.
+    static PersistentTransport PersistentTransportForState(
+        bool autoMode, int speedIndex, bool speedControlsEnabled,
+        bool transportLocked, bool fullBarSuppressed, bool meterOnly);
+    // SysMenuSDHQ.dll 0x100252BA..0x10025323: 13 authored CHIP frames 29..41.
+    // EXE host+0x11C returns speedIndex, +0x138 returns the AUTO-on tick.
+    static int AutoLightRecordForTime(uint32_t nowMs, uint32_t autoOnMs,
+                                      int speedIndex);
     static int HitTest(float logicalX, float logicalY, Variant variant);
     // Exact FUN_10023FB0 availability projection for the authenticated host
     // predicates used by controls0..14. Controls15..24 are replay-latched and
@@ -106,11 +138,32 @@ public:
     void Close();
 
     void RequestFeelingRefresh() { feelingLatch_ = true; }
+    // Loading a different save replaces the KTRF feeling state without a
+    // normal SET_FLAG writer notification. Keep the MenuBar textures/chrome,
+    // but rebase its visual value and clear any old choice animation/cue.
+    void RestoreFeelingState(int feeling001, int feeling002);
     void Update(uint32_t nowMs, int feeling001, int feeling002);
+    // SysMenuSDHQ.dll 0x10026CA1/0x10026CB8 sends host+0x50 code 3/4
+    // only in the meter's Detect phase, when captured feelings have changed.
+    // Deliver it once to the game host, never on an ordinary button click.
+    int ConsumeFeelingDirectionCode() {
+        const int code = pendingFeelingDirectionCode_;
+        pendingFeelingDirectionCode_ = 0;
+        return code;
+    }
     void SetRuntimeState(bool autoMode, bool paused, int speedIndex,
                          bool superSkipEnabled, bool speedControlsEnabled,
                          bool transportLocked, bool actionInhibit,
                          bool fullBarSuppressed);
+    // During the outgoing choice tail retail keeps only the feeling meter.
+    // This survives an invisible/suppressed MenuBar and uses full opacity.
+    void SetMeterOnly(bool enabled) {
+        meterOnly_ = enabled;
+        if (enabled) {
+            selection_ = -1;
+            pointerInsideBar_ = false;
+        }
+    }
     void SetReplayIndicatorState(bool available, int control = -1) {
         replayIndicatorAvailable_ = available;
         if (control >= 15 && control <= 24)
@@ -147,17 +200,21 @@ private:
     SDL_Texture* base_ = nullptr;
     SDL_Texture* chip_ = nullptr;
     SchoolDaysTopMeterModel meter_;
+    int pendingFeelingDirectionCode_ = 0;
     bool feelingLatch_ = false;
     bool opened_ = false;
     int selection_ = -1;
     bool pointerInsideBar_ = false;
     bool autoMode_ = false;
+    uint32_t autoOnAtMs_ = 0;
+    int autoLightRecord_ = 43;
     bool paused_ = false;
     bool superSkipEnabled_ = false;
     bool speedControlsEnabled_ = false;
     bool transportLocked_ = false;
     bool actionInhibit_ = false;
     bool fullBarSuppressed_ = false;
+    bool meterOnly_ = false;
     int speedIndex_ = 0;
     bool replayIndicatorAvailable_ = false;
     int replayIndicatorControl_ = 24;

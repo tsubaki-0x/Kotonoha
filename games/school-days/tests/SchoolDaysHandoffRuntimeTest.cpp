@@ -52,6 +52,9 @@ void WritePng(const fs::path &path) {
 }
 
 void WriteSystemUiAssets(const fs::path &root) {
+  const auto meter = root / "System" / "MenuBar";
+  WritePng(meter / "MenuBar.PNG");
+  WritePng(meter / "MenuBar_Chip.PNG");
   const auto saveLoad = root / "System" / "SaveLoad";
   WriteCmap(saveLoad / "Pop_Save_Feel.cmap");
   WriteCmap(saveLoad / "Pop_Save_Feel_Wide.cmap");
@@ -237,6 +240,36 @@ public:
             error.message);
     Require(runtime.bridge.Session().State().WriteSessionInt("002", two, &error),
             error.message);
+  }
+
+  static void OpenMeter(Runtime &runtime) {
+    Require(runtime.gameScene && runtime.gameScene->ensureMenuBar(),
+            "cannot open the real MenuBar before changing SaveFile");
+  }
+
+  static void RebaseMeter(Runtime &runtime) {
+    runtime.gameScene->restoreMenuBarFeelingState();
+  }
+
+  static Kotonoha::SchoolDaysTopMeterModel::Visual MeterVisual(Runtime &runtime) {
+    Require(runtime.gameScene && runtime.gameScene->menuBar.IsOpen(),
+            "MenuBar was unexpectedly replaced or closed");
+    return runtime.gameScene->menuBar.Meter().CurrentVisual();
+  }
+
+  static int64_t Feeling(Runtime &runtime, const char *key) {
+    int64_t value = 0;
+    Kotonoha_KtrfError error{};
+    Require(runtime.bridge.Session().State().ReadSessionInt(key, &value, &error),
+            error.message);
+    return value;
+  }
+
+  static void LoadSlot(Runtime &runtime, int slot) { runtime.loadSlot(slot); }
+  static void StartFresh(Runtime &runtime) { runtime.reset(); }
+
+  static bool MeterLatch(Runtime &runtime) {
+    return runtime.gameScene->menuBar.FeelingLatch();
   }
 
   static void OpenDeferred(Runtime &runtime) { runtime.updateHandoffUi(); }
@@ -445,6 +478,36 @@ void TestSaveFeelAndSaveLoad(const char *route, const fs::path &root) {
   SchoolDays::RuntimeHandoffTestAccess::ContinueAgain(app.runtime);
   Require(app.runtime.debugNode() == "01/01-00-A00",
           "duplicate ContinueHandoff changed scene after completion");
+
+  // Regression for loading a different ending while the SAME game process
+  // and physical MenuBar stay alive. Before the fix, Open() was skipped and
+  // the previous saturated green fill persisted indefinitely until exit.
+  using Access = SchoolDays::RuntimeHandoffTestAccess;
+  Access::SetFeelings(app.runtime, -200, 200);
+  Access::OpenMeter(app.runtime);
+  // The presenter may already be open from earlier real UI frames; establish
+  // the A-save display explicitly before the subsequent genuine B-slot LOAD.
+  Access::RebaseMeter(app.runtime);
+  Require(Access::MeterVisual(app.runtime).primary == -1000.0f,
+          "saved ending with extreme feelings did not saturate the meter");
+  Access::LoadSlot(app.runtime, 0);
+  const int64_t restored001 = Access::Feeling(app.runtime, "001");
+  const int64_t restored002 = Access::Feeling(app.runtime, "002");
+  const auto restored = Access::MeterVisual(app.runtime);
+  Require(restored.primary == static_cast<float>(restored001 - restored002) * 2.5f &&
+              restored.opposite == -restored.primary &&
+              restored.primary != -1000.0f && !Access::MeterLatch(app.runtime),
+          "LOAD in the same process kept the saturated meter from the previous save");
+  Access::SetFeelings(app.runtime, 200, -200);
+  // Normally a session refresh has a 1500ms animation. A NEW GAME is a
+  // session replacement, so it must use the new initial feelings immediately.
+  Access::StartFresh(app.runtime);
+  const int64_t fresh001 = Access::Feeling(app.runtime, "001");
+  const int64_t fresh002 = Access::Feeling(app.runtime, "002");
+  const auto fresh = Access::MeterVisual(app.runtime);
+  Require(fresh.primary == static_cast<float>(fresh001 - fresh002) * 2.5f &&
+              fresh.opposite == -fresh.primary && !Access::MeterLatch(app.runtime),
+          "new gameplay after an ending inherited its old meter state");
 }
 
 void TestOrdinaryCommentEscape(const char *route, const fs::path &root) {

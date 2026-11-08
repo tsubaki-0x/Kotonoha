@@ -66,18 +66,22 @@ bool SchoolDaysMenuBarPresenter::Open(SDL_Renderer* renderer,
     // Initialize() mirrors native callback_30(0): no update cycle is active
     // until a feeling writer raises the host latch again.
     feelingLatch_ = false;
+    pendingFeelingDirectionCode_ = 0;
     pointerInsideBar_ = false;
     fadeTargetVisible_ = false;
     fadeStartAlpha_ = 0;
     fadeStartMs_ = 0;
     barAlpha_ = 0;
     autoMode_ = false;
+    autoOnAtMs_ = 0;
+    autoLightRecord_ = 43;
     paused_ = false;
     superSkipEnabled_ = false;
     speedControlsEnabled_ = false;
     transportLocked_ = false;
     actionInhibit_ = false;
     fullBarSuppressed_ = false;
+    meterOnly_ = false;
     speedIndex_ = 0;
     replayIndicatorAvailable_ = false;
     replayIndicatorControl_ = 24;
@@ -93,13 +97,18 @@ void SchoolDaysMenuBarPresenter::Close() {
     chip_ = nullptr;
     assets_ = nullptr;
     feelingLatch_ = false;
+    pendingFeelingDirectionCode_ = 0;
     selection_ = -1;
     pointerInsideBar_ = false;
     fadeTargetVisible_ = false;
     fadeStartAlpha_ = 0;
     fadeStartMs_ = 0;
     barAlpha_ = 0;
+    autoMode_ = false;
+    autoOnAtMs_ = 0;
+    autoLightRecord_ = 43;
     opened_ = false;
+    meterOnly_ = false;
     replayIndicatorAvailable_ = false;
     replayIndicatorControl_ = 24;
     replayIndicatorAlpha_ = 255;
@@ -109,7 +118,8 @@ bool SchoolDaysMenuBarPresenter::HandleEvent(SDL_Renderer* renderer,
                                              const SDL_Event* event,
                                              Action* action) {
     if (action != nullptr) *action = {};
-    if (!opened_ || renderer == nullptr || event == nullptr || action == nullptr) {
+    if (!opened_ || meterOnly_ || renderer == nullptr ||
+        event == nullptr || action == nullptr) {
         return false;
     }
     if (event->type != SDL_EVENT_MOUSE_MOTION &&
@@ -189,15 +199,34 @@ bool SchoolDaysMenuBarPresenter::HandleBackLogEvent(
     return consumed;
 }
 
+void SchoolDaysMenuBarPresenter::RestoreFeelingState(int feeling001,
+                                                    int feeling002) {
+    if (!opened_) return;
+    (void)meter_.Initialize(feeling001, feeling002);
+    feelingLatch_ = false;
+    pendingFeelingDirectionCode_ = 0;
+}
+
 void SchoolDaysMenuBarPresenter::Update(uint32_t nowMs, int feeling001,
                                         int feeling002) {
     if (!opened_) return;
+
+    // EXE host+0x108 returns the pause latch (+0x200). SysMenu branches past
+    // the animation update while paused, retaining its last submitted frame.
+    // The epoch is still wall-clock time, so resuming jumps to the current
+    // authored phase, just as GetTickCount() does in the retail DLL.
+    if (autoMode_ && !paused_) {
+        autoLightRecord_ = AutoLightRecordForTime(
+            nowMs, autoOnAtMs_, speedIndex_);
+    }
 
     const uint32_t elapsed = nowMs - fadeStartMs_;
     barAlpha_ = FadeAlpha(fadeStartAlpha_, fadeTargetVisible_, elapsed);
 
     if (feelingLatch_) {
         const auto tick = meter_.Tick(nowMs, feeling001, feeling002);
+        if (tick.hostDirectionCode == 3 || tick.hostDirectionCode == 4)
+            pendingFeelingDirectionCode_ = tick.hostDirectionCode;
         if (tick.clearFeelingLatch) feelingLatch_ = false;
     }
 }
@@ -209,6 +238,14 @@ void SchoolDaysMenuBarPresenter::SetRuntimeState(bool autoMode, bool paused,
                                                  bool transportLocked,
                                                  bool actionInhibit,
                                                  bool fullBarSuppressed) {
+    if (autoMode && !autoMode_) {
+        // EXE 0x00425295..0x0042529E writes GetTickCount to host+0x224 when
+        // the AUTO host latch transitions OFF -> ON, never on pointer hover.
+        autoOnAtMs_ = static_cast<uint32_t>(SDL_GetTicks());
+        autoLightRecord_ = 43; // retail persistent ON art before first update
+    } else if (!autoMode) {
+        autoLightRecord_ = 43;
+    }
     autoMode_ = autoMode;
     paused_ = paused;
     speedIndex_ = std::clamp(speedIndex, 0, 4);
@@ -298,27 +335,77 @@ bool SchoolDaysMenuBarPresenter::Render(SDL_Renderer* renderer,
         return Fail(error, "School Days MenuBar viewport is invalid");
     }
 
-    // Native 0x100255C0 stops submitting the entire bar once its common alpha
-    // reaches zero. Every MenuBar layer shares that same fade.
-    if (barAlpha_ == 0 || fullBarSuppressed_) return true;
+    // Native persistent AUTO ON, selected x2..x32 and the Replay Data status
+    // label survive the ordinary hover-bar fade. A replay-opacity selector
+    // controls that label independently; only chrome obeys barAlpha_.
+    const RenderVisibility visibility =
+        VisibilityForState(barAlpha_, fullBarSuppressed_, meterOnly_);
+    const PersistentTransport persistent = PersistentTransportForState(
+        autoMode_, speedIndex_, speedControlsEnabled_, transportLocked_,
+        fullBarSuppressed_, meterOnly_);
+    const uint8_t replayAlpha = ReplayIndicatorAlphaForState(
+        replayIndicatorAvailable_, replayIndicatorAlpha_, fullBarSuppressed_,
+        meterOnly_);
+    if (!visibility.meter && !persistent.selectedSpeed && !persistent.autoOn &&
+        replayAlpha == 0)
+        return true;
 
     SDL_SetTextureAlphaMod(base_, barAlpha_);
-    SDL_SetTextureAlphaMod(chip_, barAlpha_);
+    SDL_SetTextureAlphaMod(chip_, visibility.chrome ? barAlpha_ : 255);
+
+    // The persistent artwork has an independent full-opacity composition;
+    // restoring chrome alpha matters for the subsequent hover/help sprites.
+    const auto drawPersistentChip = [&](const ChipRecord& record) {
+        SDL_SetTextureAlphaMod(chip_, 255);
+        const bool ok = RenderClipped(renderer, chip_, record.source,
+                                      record.destination, viewport, error);
+        SDL_SetTextureAlphaMod(chip_, visibility.chrome ? barAlpha_ : 255);
+        return ok;
+    };
+    const auto drawPersistentSpeed = [&]() {
+        return !persistent.selectedSpeed ||
+            drawPersistentChip(SelectedSpeedChip(
+                speedIndex_, speedControlsEnabled_, transportLocked_, variant_));
+    };
+    const auto drawPersistentAuto = [&]() {
+        if (!persistent.autoOn) return true;
+        // Retail records29..41 are complete blue AUTO sprites, not merely a
+        // translucent light mask. Replace rec43 with the chosen full frame
+        // instead of double-compositing their partly transparent boundaries.
+        const int record =
+            autoLightRecord_ >= 29 && autoLightRecord_ <= 41
+                ? autoLightRecord_ : 43;
+        return drawPersistentChip(FixedChipRecord(record, variant_));
+    };
+    const auto drawReplayLabel = [&]() {
+        if (replayAlpha == 0) return true;
+        // The retail transparency selector is meaningful even with no hover:
+        // record68 is a separate authored cyan "REPLAY MODE" label. Never
+        // multiply its selected alpha by the disappearing MenuBar chrome.
+        SDL_SetTextureAlphaMod(chip_, replayAlpha);
+        const ChipRecord label = FixedChipRecord(68, variant_);
+        const bool ok = RenderClipped(renderer, chip_, label.source,
+                                      label.destination, viewport, error);
+        SDL_SetTextureAlphaMod(chip_, visibility.chrome ? barAlpha_ : 255);
+        return ok;
+    };
 
     // Retail bar is authored at 800x75; WideFull/WideNote scale only the
     // destination. The physical monitor remains completely independent.
-    const SDL_FRect baseSource{0.0f, 0.0f, 800.0f, 75.0f};
-    const SDL_FRect baseLogical{0.0f, 0.0f,
-                                layout_.barWidth, layout_.barHeight};
-    const SDL_FRect basePhysical = Transform(baseLogical, viewport);
-    if (!SDL_RenderTexture(renderer, base_, &baseSource, &basePhysical)) {
-        if (error != nullptr) *error = SDL_GetError();
-        return false;
+    if (visibility.chrome) {
+        const SDL_FRect baseSource{0.0f, 0.0f, 800.0f, 75.0f};
+        const SDL_FRect baseLogical{0.0f, 0.0f,
+                                    layout_.barWidth, layout_.barHeight};
+        const SDL_FRect basePhysical = Transform(baseLogical, viewport);
+        if (!SDL_RenderTexture(renderer, base_, &baseSource, &basePhysical)) {
+            if (error != nullptr) *error = SDL_GetError();
+            return false;
+        }
     }
 
     // Static feeling-meter artwork (record67) carries the authored
     // KOTONOHA/SEKAI labels/frame that are not part of MenuBar.PNG.
-    {
+    if (visibility.meter) {
         const ChipRecord meterFrame = FixedChipRecord(67, variant_);
         if (!RenderClipped(renderer, chip_, meterFrame.source,
                            meterFrame.destination, viewport, error)) {
@@ -326,6 +413,7 @@ bool SchoolDaysMenuBarPresenter::Render(SDL_Renderer* renderer,
         }
     }
 
+    if (visibility.chrome) {
     // Repeat-mode strip. Retail 0x10021C20 always submits this family: record69
     // is the ordinary gray strip, record70 is the cyan replay-active strip,
     // and record71 is the movable 12x17 selector. The active-state predicate
@@ -347,24 +435,8 @@ bool SchoolDaysMenuBarPresenter::Render(SDL_Renderer* renderer,
             return false;
         }
 
-        // record68 is the authored cyan "MODO REPETIÇÃO" indicator. Static
-        // SysMenu code submits this sprite locally, but retail runtime
-        // observation closes the parent-composition seam: ordinary Gameplay
-        // presents only the gray strip, while the label is visible only with
-        // the replay latch (+0x98) active.
-        if (replayIndicatorAvailable_) {
-            const ChipRecord repeatLabel = FixedChipRecord(68, variant_);
-            const uint8_t effectiveAlpha = static_cast<uint8_t>(
-                (static_cast<unsigned>(barAlpha_) * replayIndicatorAlpha_ + 127u) /
-                255u);
-            SDL_SetTextureAlphaMod(chip_, effectiveAlpha);
-            if (!RenderClipped(renderer, chip_, repeatLabel.source,
-                               repeatLabel.destination, viewport, error)) {
-                SDL_SetTextureAlphaMod(chip_, barAlpha_);
-                return false;
-            }
-            SDL_SetTextureAlphaMod(chip_, barAlpha_);
-        }
+        // Render the Replay Data label over its live selector while hovered.
+        if (!drawReplayLabel()) return false;
     }
 
     // Persistent transport state. Native ordinary draw order after MenuBar.PNG
@@ -377,6 +449,7 @@ bool SchoolDaysMenuBarPresenter::Render(SDL_Renderer* renderer,
                             variant_);
         if (!RenderClipped(renderer, chip_, speedsNormal.source,
                            speedsNormal.destination, viewport, error)) return false;
+        if (!drawPersistentSpeed()) return false;
         const ChipRecord skipNormal =
             FixedChipRecord(!transportLocked_ && superSkipEnabled_ ? 46 : 65,
                             variant_);
@@ -385,9 +458,13 @@ bool SchoolDaysMenuBarPresenter::Render(SDL_Renderer* renderer,
         const ChipRecord pauseNormal = FixedChipRecord(paused_ ? 45 : 44, variant_);
         if (!RenderClipped(renderer, chip_, pauseNormal.source,
                            pauseNormal.destination, viewport, error)) return false;
-        const ChipRecord autoNormal = FixedChipRecord(autoMode_ ? 43 : 42, variant_);
-        if (!RenderClipped(renderer, chip_, autoNormal.source,
-                           autoNormal.destination, viewport, error)) return false;
+        if (persistent.autoOn) {
+            if (!drawPersistentAuto()) return false;
+        } else {
+            const ChipRecord autoNormal = FixedChipRecord(42, variant_);
+            if (!RenderClipped(renderer, chip_, autoNormal.source,
+                               autoNormal.destination, viewport, error)) return false;
+        }
     }
 
     // The five system labels are separate CHIP sprites in retail.
@@ -424,6 +501,15 @@ bool SchoolDaysMenuBarPresenter::Render(SDL_Renderer* renderer,
             return false;
         }
     }
+
+    } else {
+        // Chrome faded to zero: keep the active status sprites, not the idle
+        // controls/selector strip. Replay Data label still obeys transparency.
+        if (!drawPersistentSpeed() || !drawPersistentAuto() ||
+            !drawReplayLabel()) return false;
+    } // MenuBar controls, help, and repeat strip are absent in meter-only mode.
+
+    if (!visibility.meter) return true;
 
     const auto plan = SchoolDaysTopMeterRenderPlan::Build(
         meter_.CurrentVisual(), layout_.layoutScale);

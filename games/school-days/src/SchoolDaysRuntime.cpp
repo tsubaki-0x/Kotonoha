@@ -1,8 +1,11 @@
 #include "SchoolDaysRuntime.hpp"
-#if defined(KOTONOHA_DEV_CONTROL) && defined(_WIN32)
-#include "SchoolDaysDevBridge.hpp"
-#endif
+#include "SchoolDaysLauncher.hpp"
+#include <Kotonoha/routing/SchoolDaysDisplayNarrativeMarkup.hpp>
+#include <Kotonoha/routing/SchoolDaysLxhContent.hpp>
+#include <Kotonoha/routing/SchoolDaysMediaCancellationPool.hpp>
+#include <Kotonoha/routing/SchoolDaysTranslationCoverage.hpp>
 #include <Kotonoha/componentes/TextInputDialog.hpp>
+#include <Kotonoha/componentes/DisplayModeCatalog.hpp>
 #include <Kotonoha/events/BackAction.hpp>
 #include <Kotonoha/events/ControllerEvent.hpp>
 #include <Kotonoha/localization/Encoding.hpp>
@@ -11,7 +14,9 @@
 #include <Kotonoha/SchoolDaysAudioEventState.hpp>
 #include <Kotonoha/SchoolDaysBgmEventState.hpp>
 #include <Kotonoha/SchoolDaysMovieEventState.hpp>
-#include <Kotonoha/componentes/FadeScene.hpp>
+#include <Kotonoha/routing/SchoolDaysOrsFadeFrame.hpp>
+#include <Kotonoha/routing/SchoolDaysDesktopStartupProfile.hpp>
+#include <Kotonoha/routing/SchoolDaysOrsFadeBoundary.hpp>
 #include <Kotonoha/componentes/SettingsMenu.hpp>
 #include <Kotonoha/componentes/SplashScreen.hpp>
 #include <Kotonoha/componentes/VNBacklog.hpp>
@@ -23,6 +28,7 @@
 #include <Kotonoha/media/MediaDecoder.hpp>
 #include <Kotonoha/media/TextureAlpha.hpp>
 #include <Kotonoha/mobile/AndroidDisplay.hpp>
+#include <Kotonoha/parsers/Documents.hpp>
 #include <Kotonoha/routing/SchoolDaysPlaybackPolicy.hpp>
 #include <Kotonoha/routing/SchoolDaysChoiceTextPlan.hpp>
 #include <Kotonoha/routing/SchoolDaysTitleProfile.hpp>
@@ -49,6 +55,11 @@
 #include <mutex>
 #include <stdexcept>
 #include <thread>
+#if defined(_WIN32) && !defined(__ANDROID__)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 namespace SchoolDays {
 namespace {
@@ -177,6 +188,49 @@ struct DisplayPopupLayout {
   int visibleRows = 0;
 };
 
+// Display Options artwork is always authored in 800x450 coordinates. Standard
+// adds 75 canvas units on top, and Standard+FULL deliberately stretches its
+// 800x600 CMAP over the entire physical Screen (rather than letterboxing it).
+// This must mirror SchoolDaysSystemUi::ComputeConfigViewport, including Y scale.
+struct DesktopDisplayCanvas {
+  float ox = 0.0f, oy = 0.0f, sx = 1.0f, sy = 1.0f;
+  SDL_FRect map(float x, float y, float w, float h) const {
+    return {ox + x * sx, oy + y * sy, w * sx, h * sy};
+  }
+};
+
+DesktopDisplayCanvas DesktopCanvas(
+    Kotonoha::SchoolDaysConfigMenuModel::Variant variant, SDL_FPoint output,
+    bool standardFullStretch) {
+  const auto layout = Kotonoha::SchoolDaysConfigMenuRenderPlan::LayoutFor(variant);
+  const float width = std::max(1.0f, output.x);
+  const float height = std::max(1.0f, output.y);
+  const float fit = std::min(width / layout.logicalWidth,
+                             height / layout.logicalHeight);
+  float px = (width - layout.logicalWidth * fit) * 0.5f;
+  float py = (height - layout.logicalHeight * fit) * 0.5f;
+  float sx = fit, sy = fit;
+  if (standardFullStretch &&
+      variant == Kotonoha::SchoolDaysConfigMenuModel::Variant::Standard) {
+    px = py = 0.0f;
+    sx = width / layout.logicalWidth;
+    sy = height / layout.logicalHeight;
+  }
+  return {px, py + layout.yOffset * layout.scale * sy,
+          layout.scale * sx, layout.scale * sy};
+}
+
+constexpr float kDesktopPopupX = 245.0f;
+constexpr float kDesktopPopupY = 92.0f;
+constexpr float kDesktopPopupWidth = 510.0f;
+constexpr float kDesktopPopupRow = 29.0f;
+constexpr int kDesktopPopupRows = 9;
+
+std::string DisplayClipText(const std::string &value, size_t maxChars) {
+  if (value.size() <= maxChars) return value;
+  return "..." + value.substr(value.size() - maxChars + 3u);
+}
+
 DisplayPanelGeometry DisplayGeometry(
     Kotonoha::SchoolDaysConfigMenuModel::Variant variant, float outputWidth,
     float outputHeight) {
@@ -248,12 +302,33 @@ std::vector<DisplayResolution> DisplayResolutions(int displayIndex) {
   std::vector<DisplayResolution> result;
   const SDL_DisplayID display = DisplayIdForIndex(displayIndex);
   if (display == 0) return result;
+  const SDL_DisplayMode *desktop = SDL_GetDesktopDisplayMode(display);
+  // Display Options redraws every frame. Windows mode enumeration starts a
+  // potentially expensive driver query on index 0; cache the catalog while
+  // the selected monitor/desktop mode is stable, with a periodic refresh for
+  // external driver/monitor settings changes that preserve desktop geometry.
+  struct ResolutionCache {
+    SDL_DisplayID display = 0;
+    int width = 0;
+    int height = 0;
+    float refreshRate = 0.0f;
+    uint64_t queriedAtMs = 0;
+    std::vector<DisplayResolution> values;
+  };
+  static ResolutionCache cache;
+  constexpr uint64_t kModeCacheLifetimeMs = 15000;
+  const uint64_t nowMs = SDL_GetTicks();
+  if (desktop && cache.display == display && cache.width == desktop->w &&
+      cache.height == desktop->h &&
+      std::abs(cache.refreshRate - desktop->refresh_rate) < 0.01f &&
+      nowMs - cache.queriedAtMs < kModeCacheLifetimeMs)
+    return cache.values;
   auto add = [&](int width, int height, float refreshRate) {
     if (width <= 0 || height <= 0) return;
     const bool duplicate = std::any_of(
         result.begin(), result.end(), [&](const DisplayResolution &candidate) {
           return candidate.width == width && candidate.height == height &&
-                 std::abs(candidate.refreshRate - refreshRate) < 0.01f;
+                 std::abs(candidate.refreshRate - refreshRate) < 0.75f;
         });
     if (!duplicate) result.push_back({width, height, refreshRate});
   };
@@ -264,19 +339,57 @@ std::vector<DisplayResolution> DisplayResolutions(int displayIndex) {
       if (modes[i]) add(modes[i]->w, modes[i]->h, modes[i]->refresh_rate);
     SDL_free(modes);
   }
-  if (const SDL_DisplayMode *desktop = SDL_GetDesktopDisplayMode(display))
+  if (desktop)
     add(desktop->w, desktop->h, desktop->refresh_rate);
+#if defined(_WIN32) && !defined(__ANDROID__)
+  // SDL's fullscreen catalog is often narrower than the Windows Settings
+  // resolution picker. Ask the display driver's own Win32 mode table too;
+  // resolve SDL's monitor handle instead of assuming Display 1 maps to
+  // \\.\DISPLAY1 (that assumption breaks multi-monitor reorder/hotplug).
+  const SDL_PropertiesID properties = SDL_GetDisplayProperties(display);
+  const HMONITOR monitor = static_cast<HMONITOR>(SDL_GetPointerProperty(
+      properties, SDL_PROP_DISPLAY_WINDOWS_HMONITOR_POINTER, nullptr));
+  if (monitor) {
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof(info);
+    if (GetMonitorInfoW(monitor, &info)) {
+      for (DWORD modeIndex = 0;; ++modeIndex) {
+        DEVMODEW mode{};
+        mode.dmSize = sizeof(mode);
+        if (!EnumDisplaySettingsExW(info.szDevice, modeIndex, &mode, 0)) break;
+        // Windows exposes low-color legacy modes that the modern SDL
+        // renderer cannot enter reliably. Windows Settings presents modern
+        // 32bpp resolutions; keep only those and positive refresh rates.
+        if (mode.dmBitsPerPel != 32 || mode.dmPelsWidth < 320 ||
+            mode.dmPelsHeight < 240 || mode.dmPelsWidth > 16384 ||
+            mode.dmPelsHeight > 16384 || mode.dmDisplayFrequency == 0)
+          continue;
+        add(static_cast<int>(mode.dmPelsWidth),
+            static_cast<int>(mode.dmPelsHeight),
+            static_cast<float>(mode.dmDisplayFrequency));
+      }
+    }
+  }
+#endif
   std::sort(result.begin(), result.end(),
             [](const DisplayResolution &left, const DisplayResolution &right) {
               const long long leftArea =
                   static_cast<long long>(left.width) * left.height;
               const long long rightArea =
                   static_cast<long long>(right.width) * right.height;
-              if (leftArea != rightArea) return leftArea < rightArea;
-              if (left.width != right.width) return left.width < right.width;
-              if (left.height != right.height) return left.height < right.height;
-              return left.refreshRate < right.refreshRate;
+              if (leftArea != rightArea) return leftArea > rightArea;
+              if (left.width != right.width) return left.width > right.width;
+              if (left.height != right.height) return left.height > right.height;
+              return left.refreshRate > right.refreshRate;
             });
+  if (desktop) {
+    cache.display = display;
+    cache.width = desktop->w;
+    cache.height = desktop->h;
+    cache.refreshRate = desktop->refresh_rate;
+    cache.queriedAtMs = nowMs;
+    cache.values = result;
+  }
   return result;
 }
 
@@ -381,12 +494,13 @@ void FormatDisplayResolution(const DisplayResolution &resolution, char *buffer,
 int SelectedDisplayResolution(const std::vector<DisplayResolution> &resolutions,
                               const Kotonoha::EngineSettings &settings) {
   if (resolutions.empty()) return -1;
-  const int width = settings.fullscreenWidth > 0
-                        ? settings.fullscreenWidth
-                        : settings.width;
-  const int height = settings.fullscreenHeight > 0
-                         ? settings.fullscreenHeight
-                         : settings.height;
+  // The selected label must reflect the actual Windowed dimensions, not a
+  // stale fullscreen tuple retained for the next switch into Full.
+  const bool windowed = settings.mode == Kotonoha::WindowMode::Windowed;
+  const int width = !windowed && settings.fullscreenWidth > 0
+                        ? settings.fullscreenWidth : settings.width;
+  const int height = !windowed && settings.fullscreenHeight > 0
+                         ? settings.fullscreenHeight : settings.height;
   if (settings.refreshRate > 0.0f)
     for (size_t i = 0; i < resolutions.size(); ++i)
       if (resolutions[i].width == width && resolutions[i].height == height &&
@@ -539,25 +653,40 @@ public:
     std::vector<std::pair<std::string, Kotonoha::SurfacePtr>> backgroundAbcSurfaces;
   };
   explicit AbcAnalysisWorker(Assets &source, uint64_t generation)
-      : assets(source), currentGeneration(generation), worker([this] { run(); }) {}
+      : assets(source), currentGeneration(generation),
+        worker([this] { run(Lane::Analysis); }),
+        mediaWorker([this] { run(Lane::Media); }),
+        backgroundWorker([this] { run(Lane::Background); }) {}
   ~AbcAnalysisWorker() {
     {
       std::lock_guard<std::mutex> lock(mutex);
       stopping = true;
       cancellation->store(true);
+      mediaCancellations.CancelAll();
       pending.clear();
+      mediaPending.clear();
+      backgroundPending.clear();
     }
-    wake.notify_one();
+    wake.notify_all();
+    mediaWake.notify_all();
+    backgroundWake.notify_all();
     worker.join();
+    mediaWorker.join();
+    backgroundWorker.join();
   }
   void reset(uint64_t generation) {
     std::lock_guard<std::mutex> lock(mutex);
     cancellation->store(true);
+    mediaCancellations.CancelAll();
     cancellation = std::make_shared<std::atomic_bool>(false);
     currentGeneration = generation;
     pending.clear();
+    mediaPending.clear();
+    backgroundPending.clear();
     completed.clear();
-    wake.notify_one();
+    wake.notify_all();
+    mediaWake.notify_all();
+    backgroundWake.notify_all();
   }
   bool enqueue(uint64_t generation, size_t ordinal, std::string logical,
                uint64_t durationMs) {
@@ -572,23 +701,38 @@ public:
   bool enqueueMedia(uint64_t generation, size_t ordinal, std::string logical,
                     bool audioOnly, std::string loop) {
     std::lock_guard<std::mutex> lock(mutex);
-    if (stopping || generation != currentGeneration || pending.size() >= 8u)
+    // Media required by the authored timeline cannot sit behind speculative
+    // mouth-analysis/background decoding in the ABC lane.  A separate worker
+    // keeps the due PlayMovie/PlaySE handoff independent from those jobs.
+    if (stopping || generation != currentGeneration || mediaPending.size() >= 8u)
       return false;
-    pending.push_back({generation, ordinal, std::move(logical), std::move(loop), {}, 0,
-                       true, false, audioOnly, cancellation});
-    wake.notify_one();
+    // MediaPlayer::State::~State() marks its own token cancelled. A common
+    // scene-wide token made discarding one speculative PreparedInput cancel
+    // every subsequent WMV/OGG and background handoff in this scene. Each
+    // media job must own its own token; Reset still cancels them all.
+    const auto jobCancellation = mediaCancellations.Allocate();
+    mediaPending.push_back({generation, ordinal, std::move(logical),
+                            std::move(loop), {}, 0, true, false, audioOnly,
+                            jobCancellation});
+    // The optional BGM loop input is a separate decoder State. If the loop
+    // input is retired it must not cancel the currently playing intro.
+    if (!mediaPending.back().loop.empty())
+      mediaPending.back().loopCancelled = mediaCancellations.Allocate();
+    mediaWake.notify_one();
     return true;
   }
   bool enqueueBackground(uint64_t generation, size_t ordinal,
                          std::string logical,
                          std::vector<std::string> abcKeys) {
     std::lock_guard<std::mutex> lock(mutex);
-    if (stopping || generation != currentGeneration || pending.size() >= 8u)
+    if (stopping || generation != currentGeneration || backgroundPending.size() >= 8u)
       return false;
-    pending.push_back({generation, ordinal, std::move(logical), {},
+    // A full voice/ABC waveform scan may take seconds. Backgrounds required
+    // by the authored story clock must not wait behind those speculative jobs.
+    backgroundPending.push_back({generation, ordinal, std::move(logical), {},
                        std::move(abcKeys), 0,
                        false, true, false, cancellation});
-    wake.notify_one();
+    backgroundWake.notify_one();
     return true;
   }
   std::vector<Result> drain() {
@@ -599,7 +743,7 @@ public:
       result.push_back(std::move(completed.front()));
       completed.pop_front();
     }
-    wake.notify_one();
+    wake.notify_all();
     return result;
   }
 private:
@@ -614,17 +758,29 @@ private:
     bool background;
     bool audioOnly;
     std::shared_ptr<std::atomic_bool> cancelled;
+    std::shared_ptr<std::atomic_bool> loopCancelled;
   };
-  void run() {
+  enum class Lane { Analysis, Media, Background };
+  void run(Lane lane) {
     for (;;) {
       Job job;
       {
         std::unique_lock<std::mutex> lock(mutex);
-        wake.wait(lock, [this] { return stopping || !pending.empty(); });
+        auto &queue = lane == Lane::Media ? mediaPending
+                      : lane == Lane::Background ? backgroundPending : pending;
+        auto &queueWake = lane == Lane::Media ? mediaWake
+                          : lane == Lane::Background ? backgroundWake : wake;
+        queueWake.wait(lock, [this, &queue] { return stopping || !queue.empty(); });
         if (stopping) return;
-        job = std::move(pending.front());
-        pending.pop_front();
+        job = std::move(queue.front());
+        queue.pop_front();
       }
+      const Uint64 jobStarted = SDL_GetTicks();
+      if (job.media)
+        SDL_LogInfo(Kotonoha::LogUI,
+                    "School Days media worker BEGIN generation=%llu ordinal=%zu %s",
+                    static_cast<unsigned long long>(job.generation),
+                    job.ordinal, job.logical.c_str());
       Result result;
       result.generation = job.generation;
       result.ordinal = job.ordinal;
@@ -675,7 +831,8 @@ private:
                 assets, resolved, job.audioOnly, job.cancelled);
             if (!job.loop.empty() && !job.cancelled->load())
               result.loopInput = Kotonoha::MediaPlayer::prepareInput(
-                  assets, assets.resolve(job.loop), true, job.cancelled);
+                  assets, assets.resolve(job.loop), true,
+                  job.loopCancelled ? job.loopCancelled : job.cancelled);
             if (!job.cancelled->load()) result.mediaInput = std::move(input);
           } else {
             const auto bytes = assets.read(resolved);
@@ -693,6 +850,14 @@ private:
         SDL_LogWarn(Kotonoha::LogUI, "School Days %s %s: %s",
                     operation, job.logical.c_str(), error.what());
       }
+      if (job.media)
+        SDL_LogInfo(Kotonoha::LogUI,
+                    "School Days media worker END generation=%llu ordinal=%zu ageMs=%llu ready=%d cancelled=%d %s",
+                    static_cast<unsigned long long>(job.generation),
+                    job.ordinal,
+                    static_cast<unsigned long long>(SDL_GetTicks() - jobStarted),
+                    result.mediaInput ? 1 : 0, job.cancelled->load() ? 1 : 0,
+                    job.logical.c_str());
       std::unique_lock<std::mutex> lock(mutex);
       wake.wait(lock, [&] {
         return stopping || job.cancelled->load() ||
@@ -706,25 +871,60 @@ private:
   Assets &assets;
   std::mutex mutex;
   std::condition_variable wake;
+  std::condition_variable mediaWake;
+  std::condition_variable backgroundWake;
   std::deque<Job> pending;
+  std::deque<Job> mediaPending;
+  std::deque<Job> backgroundPending;
+  Kotonoha::SchoolDaysMediaCancellationPool mediaCancellations;
   std::deque<Result> completed;
   std::shared_ptr<std::atomic_bool> cancellation =
       std::make_shared<std::atomic_bool>(false);
   uint64_t currentGeneration = 0;
   bool stopping = false;
   std::thread worker;
+  std::thread mediaWorker;
+  std::thread backgroundWorker;
 };
 
-Runtime::Runtime(std::shared_ptr<Assets> source, std::string route, std::filesystem::path saveDirectory)
+Runtime::Runtime(std::shared_ptr<Assets> source, std::string route,
+                 std::filesystem::path saveDirectory,
+                 std::string settingsFile)
     : Kotonoha::Runtime("School Days HQ", "0.1.0", "me.hirameki.kotonoha.schooldays"),
       assets(std::move(source)), systemUi(assets.get()), backlogPresenter(assets.get()),
-      routePath(std::move(route)), documents(std::move(saveDirectory)) {
+      routePath(std::move(route)), documents(std::move(saveDirectory)),
+      physicalSettingsPath(std::move(settingsFile)) {
   Kotonoha_KtrfError error{};
   Check(bridge.Open(routePath.c_str(), assets->orsRoot().string().c_str(), nullptr,
                     {createPresentation, destroyPresentation, this}, &error), error);
 }
 
 Runtime::~Runtime() { shutdown(); }
+
+void Runtime::setLxhTranslation(Kotonoha::Translation translation,
+                                std::string locale) {
+  if (currentState == Kotonoha::GameState::Gameplay)
+    throw std::runtime_error("Cannot change LxH language during gameplay");
+  lxhTranslation = std::move(translation);
+  lxhSubtitleLocale = std::move(locale);
+}
+
+std::string Runtime::translateText(std::size_t ordinal, std::size_t slot,
+                                   const std::string &original) const {
+  if (!engine) return original;
+  const bool epilogue =
+      lxhFirstTranslationEvent && ordinal >= *lxhFirstTranslationEvent;
+  const auto translated = Kotonoha::SchoolDaysTranslationGate::TranslateLayered(
+      engine->GetTranslation(), lxhTranslation, translationRoute(), ordinal,
+      slot, original, epilogue);
+  // Preserve the immutable GPK and translation keys, but never present the
+  // Spanish-only LxH attribution in an English or Chinese playback. This is
+  // a display projection used by BackLog/PlayData as well as native cues.
+  if (epilogue && Kotonoha::SchoolDaysDisplayNarrativeMarkup::SuppressLxhCredit(
+                      original, translated, lxhSubtitleLocale))
+    return "\xE2\x80\x8B"; // zero-width placeholder; nonempty for the gate
+  return translated;
+}
 
 Kotonoha::Gameplay *Runtime::createPresentation(const char *path, Kotonoha_Game *, void *userdata) {
   auto &self = *static_cast<Runtime *>(userdata);
@@ -752,9 +952,6 @@ bool Runtime::resolveReplayScene(const char *sceneKey,
 }
 
 void Runtime::shutdown() {
-#if defined(KOTONOHA_DEV_CONTROL) && defined(_WIN32)
-  devBridge.reset();
-#endif
   // Join before the asset mount and decoder dependencies are released.
   abcAnalysisWorker.reset();
   resetPreparedMedia();
@@ -792,7 +989,6 @@ void Runtime::shutdown() {
   backlogPresenter.Close();
   subtitles.reset();
   gameScene.reset();
-  fadeScene.reset();
   engineSplash.reset();
   logoSplash.reset();
   saveMenu.reset();
@@ -829,65 +1025,10 @@ void Runtime::resetCarryFrame() {
   if (engine) engine->GetVisualTransition().reset();
 }
 
-bool Runtime::devPauseRequested() const {
-#if defined(KOTONOHA_DEV_CONTROL) && defined(_WIN32)
-  return devPaused;
-#else
-  return false;
-#endif
-}
-
-bool Runtime::devConsumeStep() {
-#if defined(KOTONOHA_DEV_CONTROL) && defined(_WIN32)
-  if (devStepBudget == 0) return false;
-  --devStepBudget;
-  devStepping = true;
-  return true;
-#else
-  return false;
-#endif
-}
-
-void Runtime::devIdle() { lastClock = SDL_GetTicks(); }
-
-void Runtime::devControlPump(Kotonoha::RendererRef renderer) {
-#if defined(KOTONOHA_DEV_CONTROL) && defined(_WIN32)
-  ++devFrameIndex;
-  devStepping = false;
-  const bool active = engine && engine->GetVisualTransition().active();
-  if (devLastTransitionActive && !active) traceDev("SceneTransitionCommit");
-  devLastTransitionActive = active;
-  if (devBridge) devBridge->poll(*this, renderer);
-#else
-  (void)renderer;
-#endif
-}
-
-void Runtime::devInputProcessed(Kotonoha::EventRef event) {
-#if defined(KOTONOHA_DEV_CONTROL) && defined(_WIN32)
-  if (event.common.reserved == 0 ||
-      (event.type != SDL_EVENT_MOUSE_BUTTON_DOWN &&
-       event.type != SDL_EVENT_MOUSE_BUTTON_UP &&
-       event.type != SDL_EVENT_MOUSE_MOTION &&
-       event.type != SDL_EVENT_KEY_DOWN &&
-       event.type != SDL_EVENT_KEY_UP)) return;
-  devLastActionId = event.common.reserved;
-  devLastActionFrame = devFrameIndex + 1;
-  devLastActionTimestampNs = SDL_GetTicksNS();
-  devLastActionScene = scene.sceneKey;
-  devLastActionNode = scene.nodeIndex;
-  traceDev("ActionInputProcessed");
-#else
-  (void)event;
-#endif
-}
-
 void Runtime::traceDev(const char *event) {
-#if defined(KOTONOHA_DEV_CONTROL) && defined(_WIN32)
-  if (devBridge) devBridge->trace(event, *this);
-#else
+  // The old School Days-only TCP diagnostic server was removed. Engine MCP,
+  // including its opt-in socket transport, owns remote control now.
   (void)event;
-#endif
 }
 
 void Runtime::init(Kotonoha::Engine &owner) {
@@ -896,26 +1037,22 @@ void Runtime::init(Kotonoha::Engine &owner) {
     engine->GetDebug().getSettings().showFPS = false;
     engine->GetDebug().getSettings().showNodeClock = false;
 #if defined(_WIN32) && !defined(__ANDROID__)
-    // The physical mode tuple was absent in older settings.json profiles.
-    // Fill only that missing tuple; a selected mode (including Windowed mode)
-    // stays authoritative on every later launch.
+    // Only a fresh profile tracks the monitor's desktop resolution. A chosen
+    // size is persisted in settings.json and must survive subsequent launches
+    // even if the screen's current desktop mode has since changed.
     {
       const auto settingsBefore = engine->GetSettings();
-      if (settingsBefore.fullscreenWidth <= 0 ||
+      if (!engine->HasStoredSettings() ||
+          settingsBefore.fullscreenWidth <= 0 ||
           settingsBefore.fullscreenHeight <= 0 ||
           settingsBefore.refreshRate <= 0.0f) {
         const SDL_DisplayID display = DisplayIdForIndex(settingsBefore.display);
         if (const auto *desktop = display ? SDL_GetDesktopDisplayMode(display) : nullptr) {
           auto settings = settingsBefore;
-          settings.fullscreenWidth = desktop->w;
-          settings.fullscreenHeight = desktop->h;
-          settings.refreshRate = desktop->refresh_rate;
-          if (!engine->HasStoredSettings() &&
-              settings.mode != Kotonoha::WindowMode::Windowed) {
-            settings.width = desktop->w;
-            settings.height = desktop->h;
-          }
-          engine->applySettings(settings);
+          if (Kotonoha::SchoolDaysDesktopStartupProfile::Apply(
+                  settings, engine->HasStoredSettings(), desktop->w,
+                  desktop->h, desktop->refresh_rate))
+            engine->applySettings(settings);
         }
       }
     }
@@ -973,18 +1110,9 @@ void Runtime::init(Kotonoha::Engine &owner) {
 #endif
     subtitles = std::make_unique<Subtitles>(owner);
     gameScene = std::make_unique<GameScene>(owner, *this);
-    fadeScene = std::make_unique<Kotonoha::FadeScene>(owner);
     logoSplash = std::make_unique<LogoSplash>(owner, *assets);
     saveMenu = std::make_unique<Kotonoha::VNSaveMenu>(owner);
     backlogFallback = std::make_unique<Kotonoha::VNBacklog>(owner);
-#if defined(KOTONOHA_DEV_CONTROL) && defined(_WIN32)
-    unsigned short port = 47321;
-    if (const char *value = std::getenv("KOTONOHA_DEV_PORT")) {
-      const long parsed = std::strtol(value, nullptr, 10);
-      if (parsed > 0 && parsed <= 65535) port = static_cast<unsigned short>(parsed);
-    }
-    devBridge = std::make_unique<DevBridge>(port);
-#endif
 
     // FILMENGINE.INI drives the retail save layout, FONTDATA and system SFX.
     std::string failure;
@@ -1024,7 +1152,6 @@ void Runtime::init(Kotonoha::Engine &owner) {
 
 void Runtime::initGlobal(Kotonoha::Engine &) {
   AddScene(subtitles.get(), Kotonoha::GameState::Gameplay);
-  AddScene(fadeScene.get(), Kotonoha::GameState::Gameplay);
   AddScene(gameScene.get(), Kotonoha::GameState::Gameplay);
   AddScene(backlogFallback.get(), Kotonoha::GameState::Gameplay);
   AddScene(saveMenu.get(), Kotonoha::GameState::Menu);
@@ -1058,11 +1185,13 @@ bool Runtime::panelOpen() const {
 }
 
 bool Runtime::modal() const {
-  return panelOpen() || exitTransition.Active() || systemPanelTransition.Active() ||
+  return panelOpen() || loadTransition.Active() || exitTransition.Active() ||
+         systemPanelTransition.Active() ||
          (engine && engine->isStoryPaused());
 }
 
 void Runtime::closePanels() {
+  discardDesktopDisplayDraft();
   systemUi.Close();
   backlogModel.Close();
   backlogPresenter.Close();
@@ -1136,6 +1265,27 @@ void Runtime::beginChildToTitle(uint64_t nowMs) {
 void Runtime::updateFrontendTransition(uint64_t nowMs) {
   if (!frontendTransition.NeedsHandoff(nowMs)) {
     frontendTransition.Update(nowMs);
+    if (replayHSceneTransitionActive && !frontendTransition.Active(nowMs))
+      replayHSceneTransitionActive = false;
+    return;
+  }
+
+  if (pendingReplayIndex >= 0) {
+    const int index = pendingReplayIndex;
+    const int choiceIndex = pendingReplayChoice;
+    pendingReplayIndex = -1;
+    pendingReplayChoice = -1;
+    try {
+      startReplayPlayback(index, choiceIndex);
+      frontendChild = FrontendChild::None;
+      frontendTransition.CompleteHandoff(SDL_GetTicks());
+    } catch (const std::exception &error) {
+      frontendTransition.Reset();
+      replayHSceneTransitionActive = false;
+      setStatus(error.what());
+      SDL_LogError(Kotonoha::LogUI,
+                   "School Days H-scene handoff failed: %s", error.what());
+    }
     return;
   }
 
@@ -1198,6 +1348,111 @@ void Runtime::renderFrontendTransition(Kotonoha::RendererRef renderer, uint64_t 
   (void)SDL_SetRenderDrawBlendMode(&renderer, previousBlend);
 }
 
+void Runtime::updateLoadTransition(uint64_t nowMs) {
+  if (loadTransition.Update(nowMs) !=
+      Kotonoha::SchoolDaysLoadTransition::Event::RestoreSlot)
+    return;
+  try {
+    // Restore only after the opaque loading card has covered the old LOAD
+    // owner. Keep the existing synchronous persistence transaction intact.
+    if (loadTransition.Target() ==
+        Kotonoha::SchoolDaysLoadTransition::Destination::ReplayData)
+      startPlayDataPlayback(loadTransition.Slot());
+    else
+      loadSlot(loadTransition.Slot());
+    loadTransition.Restored(SDL_GetTicks());
+  } catch (const std::exception &error) {
+    loadTransition.Reset();
+    setStatus(error.what());
+    SDL_LogError(Kotonoha::LogUI,
+                 "School Days LOAD restore failed: %s", error.what());
+  }
+}
+
+void Runtime::renderLoadTransition(Kotonoha::RendererRef renderer, uint64_t nowMs) {
+  using Phase = Kotonoha::SchoolDaysLoadTransition::Phase;
+  const Phase phase = loadTransition.CurrentPhase();
+  if (phase == Phase::Idle) return;
+
+  SDL_BlendMode oldBlend = SDL_BLENDMODE_NONE;
+  Uint8 oldRed = 0, oldGreen = 0, oldBlue = 0, oldAlpha = 0;
+  (void)SDL_GetRenderDrawBlendMode(&renderer, &oldBlend);
+  (void)SDL_GetRenderDrawColor(&renderer, &oldRed, &oldGreen, &oldBlue,
+                               &oldAlpha);
+  (void)SDL_SetRenderDrawBlendMode(&renderer, SDL_BLENDMODE_BLEND);
+
+  if (phase == Phase::ShowLoading || phase == Phase::FadeOutLoading) {
+    (void)SDL_SetRenderDrawColor(&renderer, 0, 0, 0, 255);
+    (void)SDL_RenderFillRect(&renderer, nullptr);
+    try {
+      // This is the actual 800x450 retail loading card stored in System.gpk.
+      // Resolve through the user's mounted archives; never bundle its pixels.
+      auto &texture = assets->texture(
+          renderer, assets->resolve("System/SAVELOAD/POPUP_LOAD", true));
+      const SDL_FPoint screen = engine->screenSize();
+      const float scale = std::min(screen.x / 800.0f, screen.y / 450.0f);
+      const SDL_FRect dest{(screen.x - 800.0f * scale) * 0.5f,
+                           (screen.y - 450.0f * scale) * 0.5f,
+                           800.0f * scale, 450.0f * scale};
+      (void)SDL_RenderTexture(&renderer, &texture, nullptr, &dest);
+    } catch (const std::exception &error) {
+      SDL_LogWarn(Kotonoha::LogUI,
+                  "School Days retail loading card unavailable: %s",
+                  error.what());
+    }
+  }
+
+  const Uint8 alpha = loadTransition.BlackAlpha(nowMs);
+  if (alpha != 0u) {
+    (void)SDL_SetRenderDrawColor(&renderer, 0, 0, 0, alpha);
+    (void)SDL_RenderFillRect(&renderer, nullptr);
+  }
+  (void)SDL_SetRenderDrawColor(&renderer, oldRed, oldGreen, oldBlue, oldAlpha);
+  (void)SDL_SetRenderDrawBlendMode(&renderer, oldBlend);
+}
+
+void Runtime::beginTransportFade(Kotonoha::SchoolDaysTransportFade::Operation operation) {
+  if (currentState != Kotonoha::GameState::Gameplay || panelOpen() ||
+      pendingSeek || pendingBackCapture || exitTransition.Active() ||
+      systemPanelTransition.Active() || transportFade.Active()) return;
+  if (operation == Kotonoha::SchoolDaysTransportFade::Operation::SkipToEnd &&
+      !timeline.ComputeSkipToEndTarget(tick)) return;
+  (void)transportFade.Begin(operation, SDL_GetTicks());
+}
+
+void Runtime::updateTransportFade(uint64_t nowMs) {
+  using Fade = Kotonoha::SchoolDaysTransportFade;
+  if (transportFade.Update(nowMs) != Fade::Event::Navigate) return;
+  try {
+    if (transportFade.CurrentOperation() == Fade::Operation::Rewind) {
+      back();
+    } else if (auto target = timeline.ComputeSkipToEndTarget(tick)) {
+      seek(*target);
+    }
+    transportFade.Navigated();
+  } catch (const std::exception &error) {
+    transportFade.Reset();
+    setStatus(error.what());
+    SDL_LogError(Kotonoha::LogUI, "School Days transport fade seek failed: %s",
+                 error.what());
+  }
+}
+
+void Runtime::renderTransportFade(Kotonoha::RendererRef renderer, uint64_t nowMs) {
+  if (!transportFade.Active()) return;
+  const Uint8 alpha = transportFade.BlackAlpha(nowMs);
+  if (!alpha) return;
+  SDL_BlendMode oldBlend = SDL_BLENDMODE_NONE;
+  Uint8 r = 0, g = 0, b = 0, a = 0;
+  (void)SDL_GetRenderDrawBlendMode(&renderer, &oldBlend);
+  (void)SDL_GetRenderDrawColor(&renderer, &r, &g, &b, &a);
+  (void)SDL_SetRenderDrawBlendMode(&renderer, SDL_BLENDMODE_BLEND);
+  (void)SDL_SetRenderDrawColor(&renderer, 0, 0, 0, alpha);
+  (void)SDL_RenderFillRect(&renderer, nullptr);
+  (void)SDL_SetRenderDrawColor(&renderer, r, g, b, a);
+  (void)SDL_SetRenderDrawBlendMode(&renderer, oldBlend);
+}
+
 void Runtime::updateExitTransition(uint64_t nowMs) {
   using Transition = Kotonoha::SchoolDaysExitTransition;
   const auto target = exitTransition.CurrentTarget();
@@ -1214,6 +1469,7 @@ void Runtime::updateExitTransition(uint64_t nowMs) {
       frontendTransition.BeginIncoming(FrontendTransition::Color::Black, 500u, nowMs);
     } else {
       closePanels();
+      exitConfirmedByPlayer = true;
       SDL_Event quit{};
       quit.type = SDL_EVENT_QUIT;
       SDL_PushEvent(&quit);
@@ -1350,6 +1606,10 @@ bool Runtime::pointerToBackLog(float x, float y, int *virtualX, int *virtualY) c
 }
 
 void Runtime::openTitle(bool startBgm) {
+  transportFade.Reset();
+  lxhFade.Reset();
+  choiceSpeedOverrideActive = false;
+  setPlaybackSpeedIndex(0);
   resetCarryFrame();
   resetPreparedMedia();
   abcActivityCache.clear();
@@ -1371,13 +1631,13 @@ void Runtime::openTitle(bool startBgm) {
   replayPlayback.reset();
   playDataPlayback.reset();
   script = {};
+  lxhFirstTranslationEvent.reset();
   timeline.Bind(&script);
   caption = choice = fade = nullptr;
   background.clear();
   replaySelectResult = -2;
   backAtSceneStart = false;
   if (subtitles) subtitles->clear();
-  if (fadeScene) fadeScene->clear();
   closePanels();
   if (!preserveTitleBgm) titleBgm.reset();
   frontendBgmOwner = FrontendBgmOwner::Title;
@@ -1566,6 +1826,20 @@ void Runtime::startReplayPlayback(int index, int choiceIndex) {
   bindScene(replayPlayback->CurrentScene(), replayPlayback->CurrentGameplay());
 }
 
+void Runtime::beginReplayHScene(int index, int choiceIndex) {
+  // Retail: fade the Replay gallery to black, create the H-scene only at the
+  // opaque handoff, then reveal it from black. This is distinct from Replay
+  // Data, whose path uses the retail "Please wait. Now loading." card.
+  const uint64_t nowMs = SDL_GetTicks();
+  if (index < 0 || pendingReplayIndex >= 0 ||
+      loadTransition.Active() || frontendTransition.Active(nowMs))
+    return;
+  pendingReplayIndex = index;
+  pendingReplayChoice = choiceIndex;
+  replayHSceneTransitionActive = true;
+  frontendTransition.Begin(FrontendTransition::Profile::ReplayToHScene, nowMs);
+}
+
 void Runtime::startPlayDataPlayback(int slot) {
   traceDev("PlayDataOpen");
   if (temporaryPlaybackActive())
@@ -1598,6 +1872,10 @@ void Runtime::startPlayDataPlayback(int slot) {
 }
 
 void Runtime::finishTemporaryPlayback(bool returnToReplay) {
+  lxhFade.Reset();
+  pendingReplayIndex = -1;
+  pendingReplayChoice = -1;
+  replayHSceneTransitionActive = false;
   resetPreparedMedia();
   abcActivityCache.clear();
   abcVoices.clear();
@@ -1629,6 +1907,12 @@ void Runtime::openScene(const Kotonoha::SchoolDaysKtrfScene &next, bool restoreC
 
 void Runtime::bindScene(const Kotonoha::SchoolDaysKtrfScene &next,
                         Kotonoha::Gameplay *gameplay, bool restoreChoice) {
+  // EXE 0x4251D0 restores the pre-SETSELECT effective speed after a choice
+  // handoff. Keep the selected speed index unchanged for the persistent chip.
+  if (choiceSpeedOverrideActive) {
+    choiceSpeedOverrideActive = false;
+    setPlaybackSpeedIndex(speedIndex);
+  }
   // All Gameplay owner replacements share one visual transaction, including
   // Replay, PlayData and private Load paths that do not call advance().
   if (engine && currentState == Kotonoha::GameState::Gameplay &&
@@ -1653,11 +1937,14 @@ void Runtime::bindScene(const Kotonoha::SchoolDaysKtrfScene &next,
   scene = next;
   script = presentation->data;
   timeline.Bind(&script);
+  lxhFirstTranslationEvent = Kotonoha::SchoolDaysTranslationGate::LxhFirstEvent(
+      script, scene.sceneKey);
+  configureLxhFade();
   resetPreparedMedia();
   for (auto *event = script.data; event != nullptr; event = event->next)
     event->eventPrepared = false;
-  if (subtitles) subtitles->bind(script);
-  if (fadeScene) fadeScene->clear();
+    if (subtitles) subtitles->bind(script, translationRoute(), &lxhTranslation,
+                                  lxhFirstTranslationEvent, lxhSubtitleLocale);
   // Native ScriptChange truncates abandoned-branch BackLog messages. Replay
   // Data owns an isolated transient history; ordinary HScene Replay owns none.
   const bool playData = playDataPlayback && playDataPlayback->IsOpen();
@@ -1695,6 +1982,54 @@ void Runtime::bindScene(const Kotonoha::SchoolDaysKtrfScene &next,
   traceDev("SceneBound");
 }
 
+void Runtime::configureLxhFade() {
+  lxhFade.Reset();
+  // LxH is part of the installed School Days game, not a selectable DLC.
+  // Replay sessions still use their own timeline and must not own these fades.
+  if (!assets || temporaryPlaybackActive()) return;
+  std::string expectedMovie;
+  for (const auto ending : Kotonoha::SchoolDaysLxhContent::Endings) {
+    if (scene.sceneKey == "05/" + std::string(ending)) {
+      expectedMovie = "lxh/media/" + std::string(ending) + "-lxh";
+      std::transform(expectedMovie.begin(), expectedMovie.end(),
+                     expectedMovie.begin(), [](unsigned char ch) {
+                       return static_cast<char>(std::tolower(ch));
+                     });
+      break;
+    }
+  }
+  if (expectedMovie.empty()) return;
+
+  uint32_t creditsEnd = 0u, movieStart = 0u;
+  int creditEvents = 0, extraMovies = 0, nextEvents = 0;
+  for (const auto *event = script.data; event; event = event->next) {
+    if (event->command == END_ROLL && event->data.path_end) {
+      ++creditEvents;
+      creditsEnd = event->endTick;
+    } else if (event->command == PLAY_MOVIE && event->data.play_movie) {
+      std::string path = Text(event->data.play_movie->path);
+      std::transform(path.begin(), path.end(), path.begin(),
+                     [](unsigned char ch) {
+                       return static_cast<char>(std::tolower(ch));
+                     });
+      if (path.find(expectedMovie) != std::string::npos) {
+        ++extraMovies;
+        movieStart = event->startTick;
+      }
+    } else if (event->command == Next) {
+      ++nextEvents;
+    }
+  }
+  // Only grafted LxH ORS: same original credits, one extra movie, one Next.
+  // A mismatched or base retail script must never receive these new fades.
+  lxhFade.Configure(creditEvents == 1 && extraMovies == 1 && nextEvents == 1,
+                    creditsEnd, movieStart);
+  if (lxhFade.Enabled())
+    SDL_LogInfo(Kotonoha::LogUI,
+                "LxH fade armed for %s: EndRoll.end=%u, extraMovie.start=%u",
+                scene.sceneKey.c_str(), creditsEnd, movieStart);
+}
+
 void Runtime::reset() {
   resetCarryFrame();
   retireSceneEventPointers();
@@ -1706,6 +2041,7 @@ void Runtime::reset() {
   backlogIndex = 0;
   backlogScene.clear();
   openScene(result.scene);
+  if (gameScene) gameScene->restoreMenuBarFeelingState();
 }
 
 bool Runtime::play(Kotonoha_orsEvent &event, const std::string &logical,
@@ -1742,7 +2078,10 @@ void Runtime::resetPreparedMedia() {
   ++abcAnalysisGeneration;
   abcAnalysisQueued.clear();
   mediaPreparationFailed.clear();
+  mediaPreparationWatchdogs.clear();
+  mediaDueWatchdogs.clear();
   pendingBackgrounds.clear();
+  backgroundPreparationWatchdogs.clear();
   backgroundPreparationFailed.clear();
   if (abcAnalysisWorker) abcAnalysisWorker->reset(abcAnalysisGeneration);
   preparedMedia.clear();
@@ -1816,8 +2155,13 @@ void Runtime::pollAbcActivity() {
       event = event->next;
     if (!event) continue;
     if (result.background) {
-      pendingBackgrounds.erase(result.ordinal);
+      // Once a due background timed out and its synchronous resolver ran,
+      // a stale decode must never overwrite the later presented image.
+      if (pendingBackgrounds.erase(result.ordinal) == 0u) continue;
+      auto watch = backgroundPreparationWatchdogs.find(event);
       if (result.backgroundResource.empty() || !result.backgroundSurface) {
+        if (watch != backgroundPreparationWatchdogs.end())
+          (void)watch->second.Fail();
         backgroundPreparationFailed.insert(event);
         continue;
       }
@@ -1829,10 +2173,14 @@ void Runtime::pollAbcActivity() {
         preparedBackgroundAbc[event] = std::move(result.backgroundGroups);
         preparedBackgroundAbcSurfaces[event] =
             std::move(result.backgroundAbcSurfaces);
+        if (watch != backgroundPreparationWatchdogs.end())
+          (void)watch->second.Complete();
         traceDev("MediaPrepareEnd:Background");
       } catch (const std::exception &error) {
         SDL_LogWarn(Kotonoha::LogUI, "School Days background adoption: %s",
                     error.what());
+        if (watch != backgroundPreparationWatchdogs.end())
+          (void)watch->second.Fail();
         backgroundPreparationFailed.insert(event);
       }
       continue;
@@ -1840,7 +2188,18 @@ void Runtime::pollAbcActivity() {
     if (result.media) {
       auto pending = pendingMedia.find(result.ordinal);
       if (pending == pendingMedia.end()) continue;
+      const auto watch = mediaPreparationWatchdogs.find(event);
+      if (watch == mediaPreparationWatchdogs.end() ||
+          !watch->second.IsPending()) {
+        // The authored clock already retired this request, or this result
+        // belongs to a superseded request. Never adopt a late decoder.
+        pendingMedia.erase(pending);
+        continue;
+      }
       if (!result.mediaInput) {
+        watch->second.Fail();
+        if (auto due = mediaDueWatchdogs.find(event);
+            due != mediaDueWatchdogs.end()) (void)due->second.Fail();
         mediaPreparationFailed.insert(event);
         pendingMedia.erase(pending);
         continue;
@@ -1859,9 +2218,15 @@ void Runtime::pollAbcActivity() {
         pending->second.player = std::move(player);
         pending->second.loopInput = std::move(result.loopInput);
         preparedMedia[event] = std::move(pending->second);
+        (void)watch->second.Complete();
+        if (auto due = mediaDueWatchdogs.find(event);
+            due != mediaDueWatchdogs.end()) (void)due->second.Complete();
         traceDev("MediaPrepareEnd:Media");
       } catch (const std::exception &error) {
         SDL_LogWarn(Kotonoha::LogUI, "School Days media adoption: %s", error.what());
+        watch->second.Fail();
+        if (auto due = mediaDueWatchdogs.find(event);
+            due != mediaDueWatchdogs.end()) (void)due->second.Fail();
         mediaPreparationFailed.insert(event);
       }
       pendingMedia.erase(pending);
@@ -1880,24 +2245,86 @@ void Runtime::pollAbcActivity() {
   }
 }
 
+bool Runtime::mediaPreparationStillPending(Kotonoha_orsEvent &event,
+                                           size_t ordinal, uint64_t nowMs) {
+  auto pending = pendingMedia.find(ordinal);
+  if (pending == pendingMedia.end()) return false;
+  auto &due = mediaDueWatchdogs[&event];
+  if (due.CanQueue()) (void)due.Begin(nowMs);
+  const auto age = due.PendingAgeMs(nowMs);
+  if (!due.Expire(
+          nowMs,
+          Kotonoha::SchoolDaysMediaPreparationWatchdog::DefaultDeadlineMs))
+    return true;
+  // Never leave EndRoll -> LxH under an indefinite fully-black AwaitMovie
+  // transition if a speculative decoder stalls. The authored event remains
+  // prepared so it cannot be enqueued twice; the existing direct play() path
+  // may still resolve a local asset at its original START, but the deadline
+  // is reported explicitly and is not a successful media QA result.
+  SDL_LogWarn(Kotonoha::LogUI,
+              "School Days speculative media deadline ordinal=%zu ageMs=%llu resource=%s",
+              ordinal,
+              static_cast<unsigned long long>(age.value_or(0u)),
+              pending->second.logical.c_str());
+  mediaPreparationFailed.insert(&event);
+  if (auto watch = mediaPreparationWatchdogs.find(&event);
+      watch != mediaPreparationWatchdogs.end())
+    (void)watch->second.Fail();
+  pendingMedia.erase(pending);
+  return false;
+}
+
+bool Runtime::backgroundPreparationStillPending(Kotonoha_orsEvent &event,
+                                                size_t ordinal,
+                                                uint64_t nowMs) {
+  if (pendingBackgrounds.count(ordinal) == 0u) return false;
+  auto &due = backgroundPreparationWatchdogs[&event];
+  if (due.CanQueue()) (void)due.Begin(nowMs);
+  // Larger budget for arbitrary local disks/network shares. A normal
+  // completed background is consumed without ever reaching this deadline.
+  constexpr uint64_t BackgroundDueDeadlineMs = 30000u;
+  const auto age = due.PendingAgeMs(nowMs).value_or(0u);
+  if (!due.Expire(nowMs, BackgroundDueDeadlineMs)) return true;
+  SDL_LogWarn(Kotonoha::LogUI,
+              "School Days speculative background deadline ordinal=%zu ageMs=%llu",
+              ordinal,
+              static_cast<unsigned long long>(age));
+  backgroundPreparationFailed.insert(&event);
+  pendingBackgrounds.erase(ordinal);
+  return false;
+}
+
 bool Runtime::waitForDueMedia(Kotonoha_SceneTick candidateTick) {
+  const uint64_t nowMs = SDL_GetTicks();
   size_t ordinal = 0;
+  bool waiting = false;
   for (auto *event = script.data; event; event = event->next, ++ordinal) {
     if (event->eventTouched || event->startTick > candidateTick) continue;
-    if (pendingMedia.count(ordinal) != 0 ||
-        pendingBackgrounds.count(ordinal) != 0) return true;
+    const bool pendingMediaDue =
+        mediaPreparationStillPending(*event, ordinal, nowMs);
+    const bool pendingBackgroundDue =
+        backgroundPreparationStillPending(*event, ordinal, nowMs);
+    if (pendingMediaDue || pendingBackgroundDue) {
+      waiting = true;
+      continue;
+    }
     if (event->eventPrepared) continue;
     switch (event->command) {
     case CREATE_BG: case PLAY_VOICE: case PLAY_SE: case PLAY_BGM: case END_BGM:
-    case PLAY_MOVIE: case END_ROLL:
+    case PLAY_MOVIE: case END_ROLL: {
       (void)prepareMediaEvent(*event);
-      if (pendingMedia.count(ordinal) != 0 ||
-          pendingBackgrounds.count(ordinal) != 0) return true;
+      const bool newlyPendingMedia =
+          mediaPreparationStillPending(*event, ordinal, nowMs);
+      const bool newlyPendingBackground =
+          backgroundPreparationStillPending(*event, ordinal, nowMs);
+      waiting = waiting || newlyPendingMedia || newlyPendingBackground ||
+                !event->eventPrepared;
       break;
+    }
     default: break;
     }
   }
-  return false;
+  return waiting;
 }
 
 bool Runtime::prepareMediaEvent(Kotonoha_orsEvent &event) {
@@ -2017,6 +2444,7 @@ bool Runtime::prepareMediaEvent(Kotonoha_orsEvent &event) {
     prepared.loop = loop;
     prepared.movie = movie;
     pendingMedia[ordinal] = std::move(prepared);
+    (void)mediaPreparationWatchdogs[&event].Begin(SDL_GetTicks());
     if (event.command == PLAY_VOICE)
       prepareAbcActivity(event, logical);
   } catch (const std::exception &error) {
@@ -2024,6 +2452,8 @@ bool Runtime::prepareMediaEvent(Kotonoha_orsEvent &event) {
                 "School Days media prepare failed for %s: %s", logical.c_str(),
                 error.what());
     mediaPreparationFailed.insert(&event);
+    if (auto watch = mediaPreparationWatchdogs.find(&event);
+        watch != mediaPreparationWatchdogs.end()) (void)watch->second.Fail();
   }
   return true;
 }
@@ -2424,16 +2854,28 @@ void Runtime::dispatch(Kotonoha_orsEvent &event) {
     break;
   case PRINT_TEXT:
     caption = &event;
+    {
+    const auto speaker = Text(event.data.print_text->character);
+    const auto original = std::string(Text(event.data.print_text->text));
+    std::string localized = original;
+    if (engine && (!engine->GetTranslation().getSections().empty() ||
+                   lxhFirstTranslationEvent)) {
+      const auto ordinal = Kotonoha::SchoolDaysTranslationGate::EventOrdinal(
+          script, &event);
+      localized = translateText(ordinal, 0, original);
+    }
+    const std::string displayed =
+        Kotonoha::SchoolDaysDisplayNarrativeMarkup::Project(localized);
     if (!temporaryPlaybackActive()) {
-      backlogStore.AppendLogMessage(backlogIndex++, Utf16(Text(event.data.print_text->character)),
-                                    Utf16(Text(event.data.print_text->text)));
-      backlogFallback->addEntry(Text(event.data.print_text->character), Text(event.data.print_text->text));
+      backlogStore.AppendLogMessage(backlogIndex++, Utf16(speaker),
+                                    Utf16(displayed));
+      backlogFallback->addEntry(speaker, displayed);
     } else if (playDataPlayback && playDataPlayback->IsOpen() &&
                !systemUi.IsOpen() && !backlogModel.IsOpen() &&
                !(backlogFallback && backlogFallback->isVisible())) {
       playDataBacklogStore.AppendLogMessage(
-          playDataBacklogIndex++, Utf16(Text(event.data.print_text->character)),
-          Utf16(Text(event.data.print_text->text)));
+          playDataBacklogIndex++, Utf16(speaker), Utf16(displayed));
+    }
     }
     break;
   case SetSELECT: {
@@ -2454,19 +2896,9 @@ void Runtime::dispatch(Kotonoha_orsEvent &event) {
   }
   case BLACK_FADE:
   case WHITE_FADE: {
-    // data.fade->a selects fade-in (from the color); otherwise fade out.
-    const Uint8 value = event.command == WHITE_FADE ? 255 : 0;
-    Kotonoha::FadeScene::Event fade;
-    fade.start = event.startTick / 24.0;
-    fade.end = event.endTick / 24.0;
-    fade.color = {value, value, value, 255};
-    fade.direction = event.data.fade && event.data.fade->a ? Kotonoha::FadeScene::Direction::In
-                                                            : Kotonoha::FadeScene::Direction::Out;
-    // Old Fade::Render returns COMPLETE outside the authored interval. A held
-    // OUT overlay reappears after a later IN fade and can cover the rest of an
-    // H-scene replay with solid black or white, including the next movie.
-    fade.hold = false;
-    fadeScene->add(fade);
+    // The fade drawable's native 24-fps alpha is projected from the touched
+    // ORS event in renderGameplay. No duration extension or generic fade is
+    // registered; unlike FadeScene, retail never samples fractional ticks.
     break;
   }
   default:
@@ -2492,6 +2924,14 @@ void Runtime::configureChoice(Kotonoha_orsEvent &event) {
   }
   choiceInteraction.Configure(policy, count);
   choiceInteraction.SetAutoMode(config.autoMode);
+  // Original v1.02 0x431740 calls 0x4250B0(0) while SETSELECT is shown:
+  // effective +0x538 becomes 1x, while the selected MenuBar index at +0x504
+  // remains untouched and is restored after the choice. This also unmutes
+  // audio for the choice SE and gives the player its full 48-tick exit tail.
+  if (!choiceSpeedOverrideActive) {
+    choiceSpeedOverrideActive = true;
+    applyEffectivePlaybackRate(1.0);
+  }
 }
 
 int Runtime::semanticChoiceForSlot(int slot) const {
@@ -2766,8 +3206,9 @@ bool Runtime::completePendingSeek() {
     case CREATE_BG: case PLAY_VOICE: case PLAY_SE: case PLAY_BGM: case END_BGM:
     case PLAY_MOVIE: case END_ROLL:
       if (!event->eventPrepared) (void)prepareMediaEvent(*event);
-      if (!event->eventPrepared || pendingMedia.count(ordinal) != 0 ||
-          pendingBackgrounds.count(ordinal) != 0)
+      if (!event->eventPrepared ||
+          mediaPreparationStillPending(*event, ordinal, SDL_GetTicks()) ||
+          backgroundPreparationStillPending(*event, ordinal, SDL_GetTicks()))
         waiting = true;
       break;
     default: break;
@@ -2783,7 +3224,6 @@ bool Runtime::completePendingSeek() {
   choicePresentation = {};
   choiceInteraction.ResetSelection();
   choiceInteraction.SetAutoMode(config.autoMode);
-  fadeScene->clear();
   background.clear();
   backgroundStartTick = backgroundEndTick = 0;
   abcGroups.clear();
@@ -2803,6 +3243,11 @@ bool Runtime::completePendingSeek() {
 }
 
 void Runtime::seek(Kotonoha_SceneTick target) {
+  lxhFade.SeekTo(target);
+  if (choiceSpeedOverrideActive) {
+    choiceSpeedOverrideActive = false;
+    setPlaybackSpeedIndex(speedIndex);
+  }
   pendingSceneAdvance = false;
   pendingBackCapture = false;
   // An input-driven seek runs between presented frames. Keep the latest
@@ -2867,9 +3312,6 @@ void Runtime::skipToNextChoice() {
 }
 
 void Runtime::update() {
-#if defined(KOTONOHA_DEV_CONTROL) && defined(_WIN32)
-  ++devUpdateIndex;
-#endif
   const Uint64 now = SDL_GetTicks();
   const double delta = (now - lastClock) / 1000.0;
   lastClock = now;
@@ -2893,6 +3335,9 @@ void Runtime::update() {
   updateFrontendTransition(now);
   updateExitTransition(now);
   updateSystemPanelTransition(now);
+  updateLoadTransition(now);
+  updateTransportFade(now);
+  lxhFade.Update(now);
   gameScene->update();
   if (backlogFallback->isVisible()) backlogFallback->update();
   updateHandoffUi();
@@ -2909,30 +3354,66 @@ void Runtime::update() {
       Check(bridge.Session().State().ReadSessionInt("002", &feeling002, &error), error);
     }
     Ui::Output output;
-    systemUi.Update(static_cast<uint32_t>(now), feeling001, feeling002, &output);
-    handlePanel(output);
+    // The countdown begins with its first Tick(). Preserve the full 30 s:
+    // the opening 500 ms black reveal must not consume invisible seconds.
+    if (!lxhFade.HoldCountdown()) {
+      systemUi.Update(static_cast<uint32_t>(now), feeling001, feeling002, &output);
+      handlePanel(output);
+    }
   }
   sounds.erase(std::remove_if(sounds.begin(), sounds.end(),
       [](const auto &sound) { return sound->finished(); }), sounds.end());
   const bool stopped = modal();
   if (titleBgm) titleBgm->setPaused(stopped && currentState != Kotonoha::GameState::Menu);
   if (currentState != Kotonoha::GameState::Gameplay) return;
+  using TransportPhase = Kotonoha::SchoolDaysTransportFade::Phase;
+  if (transportFade.CurrentPhase() == TransportPhase::FadeOut ||
+      transportFade.CurrentPhase() == TransportPhase::AwaitNavigation) {
+    for (auto &item : playing) item.player->setPaused(true);
+    return;
+  }
   if (pendingBackCapture) {
     if (engine && (engine->GetVisualTransition().hasLastPresented() ||
                    engine->GetVisualTransition().outgoingValid())) back();
     return;
   }
   if (pendingSceneAdvance) {
+    // Only a grafted LxH ending enters SaveFeel through this 500 ms physical
+    // black transition. All base HQ endings retain their retail handoff.
+    const bool firstLxhExitFrame =
+        lxhFade.CurrentPhase() != Kotonoha::SchoolDaysLxhFade::Phase::ExitOut;
+    if (lxhFade.StartCountdownExit(now)) {
+      if (firstLxhExitFrame)
+        SDL_LogInfo(Kotonoha::LogUI,
+                    "LxH countdown fade OUT at Next: %s tick=%u",
+                    scene.sceneKey.c_str(), tick);
+      for (auto &item : playing) item.player->setPaused(true);
+      if (!lxhFade.ExitReady(now)) return;
+      lxhFade.CountdownOpened(now);
+      SDL_LogInfo(Kotonoha::LogUI,
+                  "LxH countdown fade IN: %s (SaveFeel countdown held until visible)",
+                  scene.sceneKey.c_str());
+    }
     advance();
+    return;
+  }
+  if (lxhFade.ClockHeld()) {
+    for (auto &item : playing) item.player->setPaused(true);
     return;
   }
   pollAbcActivity();
   if (pendingSeek) {
     for (auto &item : playing) item.player->setPaused(true);
-    if (completePendingSeek() && (paused || modal()))
-      for (auto &item : playing) item.player->setPaused(true);
+    if (completePendingSeek()) {
+      if (transportFade.CurrentPhase() == TransportPhase::AwaitReady)
+        transportFade.Reveal(now);
+      if (paused || modal())
+        for (auto &item : playing) item.player->setPaused(true);
+    }
     return;
   }
+  if (transportFade.CurrentPhase() == TransportPhase::AwaitReady)
+    transportFade.Reveal(now);
   for (auto &voice : abcVoices)
     if (voice.event && abcActivityCache.count(voice.event) == 0)
       prepareAbcActivity(*voice.event,
@@ -2946,12 +3427,50 @@ void Runtime::update() {
                       (!temporaryPlaybackActive() && bridge.HasPendingHandoff());
   for (auto &item : playing) item.player->setPaused(halted);
   if (halted) return;
-  const auto candidateTick = static_cast<Kotonoha_SceneTick>(
-      (elapsed + delta * speed) * 24);
+  const double candidateElapsed = elapsed + delta * speed;
+  auto candidateTick = static_cast<Kotonoha_SceneTick>(candidateElapsed * 24);
+  bool clampedToChoice = false;
+  // The original 0x431740/0x4250B0 lowers the effective narrative clock to
+  // 1x when SETSELECT is entered. Fast-forward must never jump beyond the
+  // authored choice start during a long frame: stop the accelerated clock
+  // exactly on that pending event, dispatch the prompt, then advance at 1x.
+  if (!choiceSpeedOverrideActive && speed > 1.0) {
+    for (auto *event = script.data; event != nullptr; event = event->next) {
+      if (event->startTick > candidateTick) break;
+      if (event->command == SetSELECT && !event->eventTouched &&
+          event->startTick >= tick) {
+        candidateTick = event->startTick;
+        clampedToChoice = true;
+        break;
+      }
+    }
+  }
+  if (lxhFade.BeginAtCreditBoundary(candidateTick, now)) {
+    SDL_LogInfo(Kotonoha::LogUI,
+                "LxH entrance fade OUT after original EndRoll: %s tick=%u",
+                scene.sceneKey.c_str(), tick);
+    for (auto &item : playing) item.player->setPaused(true);
+    return;
+  }
   if (waitForDueMedia(candidateTick)) return;
-  elapsed += delta * speed;
-  tick = static_cast<Kotonoha_SceneTick>(elapsed * 24);
-  for (auto *event : timeline.AdvanceTo(tick)) dispatch(*event);
+  // An authored choice boundary may have truncated the accelerated frame.
+  // Match the exact timeline tick instead of using the discarded overshoot.
+  elapsed = clampedToChoice ? static_cast<double>(candidateTick) / 24.0
+                            : candidateElapsed;
+  tick = candidateTick;
+  for (auto *event : timeline.AdvanceTo(tick)) {
+    dispatch(*event);
+    if (event->command == PLAY_MOVIE) {
+      const bool reveal = lxhFade.CurrentPhase() ==
+                          Kotonoha::SchoolDaysLxhFade::Phase::AwaitMovie;
+      lxhFade.MovieStarted(event->startTick, now);
+      if (reveal && lxhFade.CurrentPhase() ==
+                        Kotonoha::SchoolDaysLxhFade::Phase::EntryIn)
+        SDL_LogInfo(Kotonoha::LogUI,
+                    "LxH entrance fade IN with extra movie: %s tick=%u",
+                    scene.sceneKey.c_str(), tick);
+    }
+  }
   updateAbcVoices();
   moveSom.AdvanceTo(tick);
   for (auto &[event, state] : movieStates) {
@@ -3032,7 +3551,8 @@ void Runtime::renderMenu(Kotonoha::RendererRef renderer, float) {
       ui.button(renderer, {400, 250.0f + i * 70, 480, 55}, labels[i], titleSelection == i);
   }
   renderPanels(renderer);
-  renderFrontendTransition(renderer, SDL_GetTicks());
+  if (!replayHSceneTransitionActive)
+    renderFrontendTransition(renderer, SDL_GetTicks());
 }
 
 void Runtime::renderGameplay(Kotonoha::RendererRef renderer, float) {
@@ -3048,9 +3568,6 @@ void Runtime::renderGameplay(Kotonoha::RendererRef renderer, float) {
     catch (const std::exception &error) { setStatus(error.what()); background.clear(); }
   }
   const bool halted = pendingSeek.has_value() || paused || modal() ||
-#if defined(KOTONOHA_DEV_CONTROL) && defined(_WIN32)
-                      (devPaused && !devStepping) ||
-#endif
                       (!temporaryPlaybackActive() && bridge.HasPendingHandoff());
   for (auto it = playing.begin(); it != playing.end();) {
     if (!it->movie && tick >= it->event->endTick) {
@@ -3116,9 +3633,33 @@ void Runtime::renderGameplay(Kotonoha::RendererRef renderer, float) {
       }
     } catch (const std::exception &error) { setStatus(error.what()); item.player->stop(); }
   }
-  fadeScene->setPosition(elapsed);
-  renderScene(*fadeScene, renderer, 1);
-  // Retail TextView=Off hides the message layer.
+  // Render the ORS fade over background/media, but UNDER the subtitle layer.
+  // Script text must remain legible even when a BlackFade or WhiteFade reaches
+  // full coverage; this is distinct from a physical frontend/transport fade.
+  // Never use elapsed's fractional sub-tick phase here: retail computes
+  // alpha=floor((tick-start)*255/(end-start)) at 24 fixed script fps.
+  const auto authoredNext = timeline.NextTick();
+  const auto authoredFade = Kotonoha::SchoolDaysOrsFadeFrame::AtTick(
+      script, tick,
+      authoredNext ? std::optional<Kotonoha_SceneTick>{*authoredNext}
+                   : std::nullopt,
+      pendingSceneAdvance);
+  if (authoredFade.drawable && authoredFade.alpha != 0) {
+    SDL_BlendMode oldBlend = SDL_BLENDMODE_NONE;
+    Uint8 red = 0, green = 0, blue = 0, alpha = 0;
+    (void)SDL_GetRenderDrawBlendMode(&renderer, &oldBlend);
+    (void)SDL_GetRenderDrawColor(&renderer, &red, &green, &blue, &alpha);
+    (void)SDL_SetRenderDrawBlendMode(&renderer, SDL_BLENDMODE_BLEND);
+    (void)SDL_SetRenderDrawColor(&renderer, authoredFade.color,
+                                 authoredFade.color, authoredFade.color,
+                                 authoredFade.alpha);
+    (void)SDL_RenderFillRect(&renderer, &area);
+    (void)SDL_SetRenderDrawColor(&renderer, red, green, blue, alpha);
+    (void)SDL_SetRenderDrawBlendMode(&renderer, oldBlend);
+  }
+  // TextView=Off still removes the authored subtitle layer entirely.
+  // Always compose visible subtitles after the ORS fade, independently of
+  // whether the next script is awaiting a deferred handoff.
   if (config.textView) {
     subtitles->setPosition(elapsed);
     renderScene(*subtitles, renderer, 1);
@@ -3147,14 +3688,10 @@ void Runtime::renderGameplay(Kotonoha::RendererRef renderer, float) {
   // Neither entrance nor exit at full opacity is a drawable primary visual.
   // Copying the terminal black/white exit into LastPresented would make the
   // next scene's outgoing lease itself opaque, causing a transition flash.
-  const bool visualCoveredByFade = fadeScene->fullyCoveredByFade();
+  const bool visualCoveredByFade =
+      authoredFade.drawable && authoredFade.alpha == 255;
   framePrimaryReady = primaryReady && !visualCoveredByFade &&
                       !pendingSeek && !modal();
-#if defined(KOTONOHA_DEV_CONTROL) && defined(_WIN32)
-  if (framePrimaryReady && !devLastPrimaryReady)
-    traceDev(background.empty() ? "IncomingMovieFrameReady" : "IncomingBackgroundReady");
-  devLastPrimaryReady = framePrimaryReady;
-#endif
   frameBoundary = (pendingSceneAdvance || choicePresentation.finalFrameRendered) &&
                   !modal();
 }
@@ -3162,7 +3699,8 @@ void Runtime::renderGameplay(Kotonoha::RendererRef renderer, float) {
 void Runtime::renderNarrativeOverlay(Kotonoha::RendererRef renderer, float) {
   if (currentState != Kotonoha::GameState::Gameplay) return;
   renderPanels(renderer);
-  renderFrontendTransition(renderer, SDL_GetTicks());
+  if (!replayHSceneTransitionActive)
+    renderFrontendTransition(renderer, SDL_GetTicks());
 }
 
 void Runtime::renderPanels(Kotonoha::RendererRef renderer) {
@@ -3203,6 +3741,19 @@ void Runtime::renderScreen(Kotonoha::RendererRef renderer, float scale) {
     const SDL_FPoint screen = engine->screenSize();
     systemUi.SetArea({std::max(1, static_cast<int>(std::lround(screen.x))),
                       std::max(1, static_cast<int>(std::lround(screen.y)))});
+    const bool standardFullConfig = systemUi.IsConfigOpen() &&
+        narrativePresentationHeightScale() < 0.999f;
+    systemUi.SetConfigStandardFullscreenStretch(standardFullConfig);
+    if (standardFullConfig) {
+      // The Standard authored 800x450 option art leaves transparent physical
+      // 75px bands. Clear the old story beneath the whole output; a black
+      // backdrop and stretched native 800x600 host frame reproduce the image.
+      Uint8 red = 0, green = 0, blue = 0, alpha = 0;
+      (void)SDL_GetRenderDrawColor(&renderer, &red, &green, &blue, &alpha);
+      (void)SDL_SetRenderDrawColor(&renderer, 0, 0, 0, 255);
+      (void)SDL_RenderFillRect(&renderer, nullptr);
+      (void)SDL_SetRenderDrawColor(&renderer, red, green, blue, alpha);
+    }
     std::string failure;
     if (!systemUi.Render(&renderer, &failure)) {
       SDL_LogWarn(Kotonoha::LogUI, "School Days panel: %s", failure.c_str());
@@ -3210,13 +3761,586 @@ void Runtime::renderScreen(Kotonoha::RendererRef renderer, float scale) {
       setStatus("School Days panel failed: " + failure);
       return;
     }
-    // The commercial remaster covers the retired SOMCON tab over the physical
-    // presentation, not over an already-letterboxed 1280x720 intermediate.
+    // The desktop Display base+CHIP are rendered by the native CMAP presenter:
+    // only dynamic values and modal selectors belong to this overlay. Android
+    // deliberately retains its historical overlay on all Config pages.
+#if defined(__ANDROID__) || defined(ANDROID)
     if (systemUi.IsConfigOpen()) renderDisplayPanel(renderer);
+#else
+    if (displayPanelOpen()) renderDisplayPanel(renderer);
+#endif
+  }
+  // The H-scene handoff covers the physical Replay gallery on the outgoing
+  // phase and the entire presentation on the incoming phase. A fade drawn
+  // only in renderMenu would otherwise sit UNDER SystemUi's native panel.
+  if (replayHSceneTransitionActive && frontendTransition.Active(SDL_GetTicks())) {
+    SDL_BlendMode oldBlend = SDL_BLENDMODE_NONE;
+    Uint8 r = 0, g = 0, b = 0, a = 0;
+    (void)SDL_GetRenderDrawBlendMode(&renderer, &oldBlend);
+    (void)SDL_GetRenderDrawColor(&renderer, &r, &g, &b, &a);
+    (void)SDL_SetRenderDrawBlendMode(&renderer, SDL_BLENDMODE_BLEND);
+    (void)SDL_SetRenderDrawColor(&renderer, 0, 0, 0,
+                                 frontendTransition.Alpha(SDL_GetTicks()));
+    (void)SDL_RenderFillRect(&renderer, nullptr);
+    (void)SDL_SetRenderDrawColor(&renderer, r, g, b, a);
+    (void)SDL_SetRenderDrawBlendMode(&renderer, oldBlend);
   }
   renderExitTransition(renderer, SDL_GetTicks());
   renderSystemPanelTransition(renderer, SDL_GetTicks());
+  renderLoadTransition(renderer, SDL_GetTicks());
+  renderTransportFade(renderer, SDL_GetTicks());
+  renderLxhFade(renderer, SDL_GetTicks());
 }
+
+void Runtime::renderLxhFade(Kotonoha::RendererRef renderer, uint64_t nowMs) {
+  const Uint8 overlayAlpha = lxhFade.BlackAlpha(nowMs);
+  if (overlayAlpha == 0u) return;
+  // This overlay is intentionally AFTER SystemUi, physical menu controls and
+  // subtitles. It must not enter the Novel texture/LastPresented snapshots.
+  SDL_BlendMode blend = SDL_BLENDMODE_NONE;
+  Uint8 red = 0, green = 0, blue = 0, alpha = 0;
+  (void)SDL_GetRenderDrawBlendMode(&renderer, &blend);
+  (void)SDL_GetRenderDrawColor(&renderer, &red, &green, &blue, &alpha);
+  (void)SDL_SetRenderDrawBlendMode(&renderer, SDL_BLENDMODE_BLEND);
+  (void)SDL_SetRenderDrawColor(&renderer, 0, 0, 0, overlayAlpha);
+  (void)SDL_RenderFillRect(&renderer, nullptr);
+  (void)SDL_SetRenderDrawColor(&renderer, red, green, blue, alpha);
+  (void)SDL_SetRenderDrawBlendMode(&renderer, blend);
+}
+
+#if !defined(__ANDROID__) && !defined(ANDROID)
+void Runtime::discardDesktopDisplayDraft() {
+  if (desktopDisplayPopup == DesktopDisplayPopup::GlslPath && engine)
+    SDL_StopTextInput(&engine->GetWindow());
+  desktopDisplayPopup = DesktopDisplayPopup::None;
+  desktopDisplayPopupHover = -1;
+  desktopDisplayPopupScroll = 0;
+  desktopDisplayPathEdit.clear();
+  desktopDisplayModes.clear();
+  desktopDisplayDraftActive = false;
+}
+
+void Runtime::resetDesktopDisplayDraft() {
+  discardDesktopDisplayDraft();
+  if (!engine) return;
+  desktopDisplayDraft = engine->GetSettings();
+  desktopDisplayDraftActive = true;
+}
+
+void Runtime::activateDesktopDisplayControl(int control) {
+  if (!engine || !desktopDisplayDraftActive || !displayPanelOpen()) return;
+  auto &draft = desktopDisplayDraft;
+  const auto openPopup = [&](DesktopDisplayPopup popup, int selected) {
+    desktopDisplayPopup = popup;
+    desktopDisplayPopupHover = selected;
+    desktopDisplayPopupScroll = std::max(0, selected - 3);
+  };
+  switch (control) {
+  case 4: {
+    const SDL_DisplayID display = DisplayIdForIndex(draft.display);
+    desktopDisplayModes = Kotonoha::DisplayModeCatalog::Enumerate(display);
+    if (desktopDisplayModes.empty()) {
+      setStatus("No supported resolutions for this monitor");
+      return;
+    }
+    int width = draft.width, height = draft.height;
+    float refresh = draft.refreshRate;
+    if (draft.mode == Kotonoha::WindowMode::Borderless) {
+      if (const auto *native = SDL_GetDesktopDisplayMode(display)) {
+        width = native->w;
+        height = native->h;
+        refresh = native->refresh_rate;
+      }
+    } else if (draft.mode != Kotonoha::WindowMode::Windowed &&
+               draft.fullscreenWidth > 0 && draft.fullscreenHeight > 0) {
+      width = draft.fullscreenWidth;
+      height = draft.fullscreenHeight;
+    }
+    openPopup(DesktopDisplayPopup::Resolution,
+              Kotonoha::DisplayModeCatalog::FindSelected(
+                  desktopDisplayModes, width, height, refresh));
+    break;
+  }
+  case 5: draft.resizable = true; break;
+  case 6: draft.resizable = false; break;
+  case 7: draft.vsync = true; break;
+  case 8: draft.vsync = false; break;
+  case 9: {
+    const std::array<Kotonoha::UpscaleBackend, 5> values{
+        Kotonoha::UpscaleBackend::None, Kotonoha::UpscaleBackend::Linear,
+        Kotonoha::UpscaleBackend::MPV, Kotonoha::UpscaleBackend::MetalFX,
+        Kotonoha::UpscaleBackend::Auto};
+    const auto it = std::find(values.begin(), values.end(), draft.upscaling.backend);
+    openPopup(DesktopDisplayPopup::Upscaler,
+              it == values.end() ? 4 : static_cast<int>(it - values.begin()));
+    break;
+  }
+  case 10: {
+    if (engine->GetUpscaler().resolve(draft.upscaling.backend) !=
+        Kotonoha::UpscaleBackend::MPV) {
+      setStatus("Shader presets require the MPV/OpenGL upscaler");
+      return;
+    }
+    const auto &presets = Kotonoha::UpscalePresets();
+    const auto it = std::find(presets.begin(), presets.end(), draft.upscaling.preset);
+    openPopup(DesktopDisplayPopup::Shader,
+              it == presets.end() ? 0 : static_cast<int>(it - presets.begin()));
+    break;
+  }
+  case 11:
+  case 12:
+    if (engine->GetUpscaler().resolve(draft.upscaling.backend) !=
+        Kotonoha::UpscaleBackend::MPV) {
+      setStatus("Custom GLSL requires the MPV/OpenGL upscaler");
+      return;
+    }
+    // BROWSE deliberately opens the keyboard/paste path editor. There is no
+    // native file picker in this game-owned runtime, and no global SettingsMenu.
+    desktopDisplayPathEdit = draft.upscaling.shaderFiles;
+    desktopDisplayPopup = DesktopDisplayPopup::GlslPath;
+    desktopDisplayPopupHover = -1;
+    SDL_StartTextInput(&engine->GetWindow());
+    if (control == 12) setStatus("BROWSE: paste a GLSL file path and press Enter");
+    break;
+  case 13: case 14: case 15: case 16:
+  case 17: case 18: case 19:
+    draft.upscaling.factor = 1.0f + (control - 13) * 0.5f;
+    break;
+  case 20:
+    // Defaults affect only this page. Never reset the player's General
+    // WINDOW/FULL state, aspect policy, monitor, audio or save preferences.
+    if (const SDL_DisplayID display = DisplayIdForIndex(draft.display)) {
+      if (const SDL_DisplayMode *native = SDL_GetDesktopDisplayMode(display)) {
+        // Native monitor resolution is the safe fallback in both modes.
+        // Preserve WindowMode itself: only General may change WINDOW/FULL.
+        draft.width = native->w;
+        draft.height = native->h;
+        draft.fullscreenWidth = native->w;
+        draft.fullscreenHeight = native->h;
+        draft.refreshRate = native->refresh_rate;
+      }
+    }
+    draft.resizable = true;
+    draft.vsync = true;
+    draft.upscaling.backend =
+        engine->GetUpscaler().supports(Kotonoha::UpscaleBackend::Auto)
+            ? Kotonoha::UpscaleBackend::Auto
+            : Kotonoha::UpscaleBackend::None;
+    draft.upscaling.preset = Kotonoha::UpscalePreset::Anime4K;
+    draft.upscaling.shaderFiles.clear();
+    draft.upscaling.factor = 1.0f;
+    break;
+  case 21:
+    try {
+      // An explicit non-desktop resolution while Borderless is selected must
+      // become Exclusive: Borderless cannot change the monitor's desktop
+      // mode. Both are FULL in the native General page, so this preserves its
+      // Window/Full choice while making the selected pixels/Hz real.
+      draft.display = engine->GetSettings().display;
+#if defined(_WIN32)
+      // General WINDOW intentionally maximizes the decorated desktop client.
+      // A subsequent explicit Windowed resolution choice must first restore
+      // that window, or SDL_SetWindowSize changes the hidden restore geometry
+      // while the visible client stays maximized at the desktop resolution.
+      const auto &live = engine->GetSettings();
+      const char *driver = SDL_GetCurrentVideoDriver();
+      const bool restoreForSize =
+          draft.mode == Kotonoha::WindowMode::Windowed &&
+          (draft.width != live.width || draft.height != live.height) &&
+          driver && SDL_strcmp(driver, "windows") == 0 &&
+          (SDL_GetWindowFlags(&engine->GetWindow()) & SDL_WINDOW_MAXIMIZED) != 0;
+      if (restoreForSize && !SDL_RestoreWindow(&engine->GetWindow()))
+        throw std::runtime_error(std::string("Restore window: ") + SDL_GetError());
+#endif
+      try {
+        engine->applySettings(draft); // validates, applies, and persists settings
+      } catch (...) {
+#if defined(_WIN32)
+        if (restoreForSize) SDL_MaximizeWindow(&engine->GetWindow());
+#endif
+        throw;
+      }
+      const int actualWindowMode =
+          engine->GetSettings().mode == Kotonoha::WindowMode::Windowed ? 0 : 1;
+      if (displayBackend.windowMode != actualWindowMode) {
+        displayBackend.windowMode = actualWindowMode;
+        refreshDisplayProjection();
+        std::string failure;
+        Check(configStorage.CacheWindowMode(actualWindowMode, &failure),
+              failure, "School Days WindowMode cache update failed");
+      }
+      std::string shaderError;
+      const bool shaderPathsSaved = physicalSettingsPath.empty() ||
+          SchoolDays::Launcher::persistShaderPaths(
+              physicalSettingsPath, draft.upscaling.shaderFiles, &shaderError);
+      resetDesktopDisplayDraft();
+      if (shaderPathsSaved)
+        setStatus("Display Options applied and saved");
+      else
+        setStatus("Display applied but external GLSL path was not saved: " +
+                  shaderError);
+    } catch (const std::exception &error) {
+      setStatus(std::string("Display Options APPLY failed: ") + error.what());
+    }
+    break;
+  default: return;
+  }
+  // Controls with an unambiguous final value are live settings. Persist them
+  // at the moment the player chooses them, rather than losing a VSync/factor/
+  // resizable/defaults choice when switching tab or closing Config. The APPLY
+  // button remains available for compatibility with the supplied Display art.
+  if ((control >= 5 && control <= 8) ||
+      (control >= 13 && control <= 20)) {
+    activateDesktopDisplayControl(21);
+    return;
+  }
+  // Apply (21) resets the draft from the now-live engine settings.  Updating
+  // the native CHIP presenter only for controls != 21 left every direct
+  // Resizable/VSync/factor/default click visibly stale until switching tabs.
+  // Refresh even after Apply and after a failed Apply (the draft remains live
+  // for correction), so the selected chip always reflects the shown value.
+  desktopDisplayPopupHover = std::max(-1, desktopDisplayPopupHover);
+  systemUi.SetConfigVisualState(configVisualState());
+}
+
+void Runtime::renderDesktopDisplayPanel(Kotonoha::RendererRef renderer) {
+  if (!displayPanelOpen() || !desktopDisplayDraftActive) return;
+  auto &ui = engine->GetUI();
+  const auto canvas = DesktopCanvas(
+      systemUi.ConfigMenu().CurrentVariant(), engine->screenSize(),
+      narrativePresentationHeightScale() < 0.999f);
+  const SDL_Color ink{30, 43, 66, 255};
+  const auto draw = [&](const std::string &value, float x, float y, float width) {
+    const auto rect = canvas.map(x, y, width, 24.0f);
+    // The user's accepted Display skin centers variable values inside its
+    // silver controls. These texts are deliberately absent from the base PNG
+    // so the live value can be drawn here without a baked-in placeholder.
+    const auto measured = ui.textSize(value, rect.w);
+    const float left = rect.x + std::max(0.0f, (rect.w - measured.x) * 0.5f);
+    ui.text(renderer, value, left, rect.y, rect.w, ink);
+  };
+  const auto &draft = desktopDisplayDraft;
+  const SDL_DisplayID display = DisplayIdForIndex(draft.display);
+  const auto *native = display ? SDL_GetDesktopDisplayMode(display) : nullptr;
+  if (draft.mode == Kotonoha::WindowMode::Borderless && native) {
+    // Borderless always uses the monitor's actual desktop mode, independently
+    // of the fullscreen tuple left from a prior WINDOW or Exclusive session.
+    draw(Kotonoha::DisplayModeCatalog::Label(
+             {native->w, native->h, native->refresh_rate}) + " (current)",
+         254.0f, 113.0f, 488.0f);
+  } else {
+    const int width = draft.mode == Kotonoha::WindowMode::Windowed
+                          ? draft.width : (draft.fullscreenWidth > 0
+                                               ? draft.fullscreenWidth : draft.width);
+    const int height = draft.mode == Kotonoha::WindowMode::Windowed
+                           ? draft.height : (draft.fullscreenHeight > 0
+                                                 ? draft.fullscreenHeight : draft.height);
+    const float shownRefresh =
+        draft.mode == Kotonoha::WindowMode::Windowed && native
+            ? native->refresh_rate : draft.refreshRate;
+    draw(Kotonoha::DisplayModeCatalog::Label({width, height, shownRefresh}) +
+             (draft.mode == Kotonoha::WindowMode::Windowed ? " (window)" : ""),
+         254.0f, 113.0f, 488.0f);
+  }
+  draw(Kotonoha::UpscaleBackendName(draft.upscaling.backend),
+       254.0f, 215.0f, 488.0f);
+  draw(draft.upscaling.shaderFiles.empty()
+           ? Kotonoha::UpscalePresetName(draft.upscaling.preset)
+           : "Custom GLSL",
+       254.0f, 248.0f, 488.0f);
+  draw(draft.upscaling.shaderFiles.empty()
+           ? "(none)" : DisplayClipText(draft.upscaling.shaderFiles, 48),
+       254.0f, 281.0f, 371.0f);
+
+  if (desktopDisplayPopup == DesktopDisplayPopup::None) return;
+  const auto outer = canvas.map(kDesktopPopupX, kDesktopPopupY,
+                                kDesktopPopupWidth, 330.0f);
+  ui.panel(renderer, outer, {17, 27, 43, 248});
+  const SDL_Color light{247, 248, 253, 255};
+  const auto popupText = [&](const std::string &value, float x, float y,
+                             float width) {
+    const auto rect = canvas.map(x, y, width, 23.0f);
+    ui.text(renderer, value, rect.x, rect.y, rect.w, light);
+  };
+  if (desktopDisplayPopup == DesktopDisplayPopup::GlslPath) {
+    popupText("CUSTOM GLSL FILE - Enter to accept / Esc to cancel",
+              kDesktopPopupX + 13, kDesktopPopupY + 13, kDesktopPopupWidth - 26);
+    const auto field = canvas.map(kDesktopPopupX + 12, kDesktopPopupY + 61,
+                                  kDesktopPopupWidth - 24, 52);
+    ui.panel(renderer, field, {231, 235, 243, 255});
+    const auto line = canvas.map(kDesktopPopupX + 19, kDesktopPopupY + 73,
+                                 kDesktopPopupWidth - 38, 28);
+    ui.text(renderer, DisplayClipText(desktopDisplayPathEdit + "|", 58),
+            line.x, line.y, line.w, ink);
+    popupText("Paste full path to an existing .glsl / .hook / .frag file",
+              kDesktopPopupX + 13, kDesktopPopupY + 131, kDesktopPopupWidth - 26);
+    popupText("Empty input clears the custom shader override.",
+              kDesktopPopupX + 13, kDesktopPopupY + 159, kDesktopPopupWidth - 26);
+    const auto ok = canvas.map(kDesktopPopupX + 40, kDesktopPopupY + 248, 185, 45);
+    const auto cancel = canvas.map(kDesktopPopupX + 283, kDesktopPopupY + 248, 185, 45);
+    ui.button(renderer, ok, "OK (ENTER)", desktopDisplayPopupHover == 0);
+    ui.button(renderer, cancel, "CANCEL (ESC)", desktopDisplayPopupHover == 1);
+    return;
+  }
+
+  std::vector<std::string> names;
+  std::string title;
+  if (desktopDisplayPopup == DesktopDisplayPopup::Resolution) {
+    title = "RESOLUTION / REFRESH - WHEEL / UP / DOWN";
+    names.reserve(desktopDisplayModes.size());
+    for (const auto &mode : desktopDisplayModes)
+      names.push_back(Kotonoha::DisplayModeCatalog::Label(mode));
+  } else if (desktopDisplayPopup == DesktopDisplayPopup::Upscaler) {
+    title = "UPSCALER BACKEND";
+    const std::array<Kotonoha::UpscaleBackend, 5> backends{
+        Kotonoha::UpscaleBackend::None, Kotonoha::UpscaleBackend::Linear,
+        Kotonoha::UpscaleBackend::MPV, Kotonoha::UpscaleBackend::MetalFX,
+        Kotonoha::UpscaleBackend::Auto};
+    for (const auto backend : backends) {
+      names.push_back(std::string(Kotonoha::UpscaleBackendName(backend)) +
+                      (engine->GetUpscaler().supports(backend) ? "" : " (unavailable)"));
+    }
+  } else {
+    title = "SHADER PRESET - 15 MPV GLSL PROFILES";
+    for (const auto preset : Kotonoha::UpscalePresets())
+      names.push_back(Kotonoha::UpscalePresetName(preset));
+  }
+  const int maxScroll = std::max(0, static_cast<int>(names.size()) - kDesktopPopupRows);
+  desktopDisplayPopupScroll = std::clamp(desktopDisplayPopupScroll, 0, maxScroll);
+  popupText(title, kDesktopPopupX + 12, kDesktopPopupY + 11,
+            kDesktopPopupWidth - 24);
+  for (int row = 0; row < kDesktopPopupRows; ++row) {
+    const int index = desktopDisplayPopupScroll + row;
+    if (index >= static_cast<int>(names.size())) break;
+    const auto rect = canvas.map(
+        kDesktopPopupX + 12, kDesktopPopupY + 39 + row * kDesktopPopupRow,
+        kDesktopPopupWidth - 24, kDesktopPopupRow - 2);
+    ui.button(renderer, rect, names[static_cast<size_t>(index)],
+              desktopDisplayPopupHover == index);
+  }
+  if (maxScroll > 0) {
+    char page[64];
+    SDL_snprintf(page, sizeof(page), "%d-%d / %d",
+                 desktopDisplayPopupScroll + 1,
+                 std::min(static_cast<int>(names.size()),
+                          desktopDisplayPopupScroll + kDesktopPopupRows),
+                 static_cast<int>(names.size()));
+    popupText(page, kDesktopPopupX + 355, kDesktopPopupY + 309, 140);
+  }
+}
+
+bool Runtime::handleDesktopDisplayPanel(Kotonoha::EventRef event) {
+  if (!displayPanelOpen() || !desktopDisplayDraftActive ||
+      desktopDisplayPopup == DesktopDisplayPopup::None) return false;
+  auto popup = desktopDisplayPopup;
+  const bool editingPath = popup == DesktopDisplayPopup::GlslPath;
+  const auto finishPopup = [&] {
+    if (editingPath) SDL_StopTextInput(&engine->GetWindow());
+    desktopDisplayPopup = DesktopDisplayPopup::None;
+    desktopDisplayPopupHover = -1;
+    desktopDisplayPopupScroll = 0;
+  };
+  const int count = popup == DesktopDisplayPopup::Resolution
+                        ? static_cast<int>(desktopDisplayModes.size())
+                    : popup == DesktopDisplayPopup::Upscaler ? 5
+                    : popup == DesktopDisplayPopup::Shader ? 15 : 2;
+  const int maxScroll = std::max(0, count - kDesktopPopupRows);
+  const auto choose = [&](int choice) {
+    if (editingPath) {
+      if (choice == 1) {
+        finishPopup();
+        playSound(Ui::UiSfxCue::Cancel);
+        return;
+      }
+      if (!desktopDisplayPathEdit.empty()) {
+        try {
+          const std::filesystem::path path =
+              std::filesystem::u8path(desktopDisplayPathEdit);
+          std::error_code ec;
+          std::string extension = path.extension().string();
+          std::transform(extension.begin(), extension.end(), extension.begin(),
+                         [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+          const bool suffix = extension == ".glsl" || extension == ".hook" ||
+                              extension == ".frag";
+          if (!suffix || !std::filesystem::is_regular_file(path, ec)) {
+            setStatus("GLSL path must point to an existing .glsl, .hook or .frag file");
+            return;
+          }
+        } catch (const std::exception &) {
+          setStatus("GLSL path contains invalid characters");
+          return;
+        }
+      }
+      desktopDisplayDraft.upscaling.shaderFiles = desktopDisplayPathEdit;
+      finishPopup();
+      // GLSL editor confirmation must behave like every other Display choice:
+      // apply and persist immediately, including the external-path sidecar.
+      // Previously it only changed the draft and could be lost on tab switch.
+      activateDesktopDisplayControl(21);
+      playSound(Ui::UiSfxCue::Click);
+      return;
+    }
+    if (choice < 0 || choice >= count) return;
+    if (popup == DesktopDisplayPopup::Resolution) {
+      const auto &chosen = desktopDisplayModes[static_cast<size_t>(choice)];
+      const SDL_DisplayID display = DisplayIdForIndex(desktopDisplayDraft.display);
+      const auto *native = display ? SDL_GetDesktopDisplayMode(display) : nullptr;
+      if (!Kotonoha::SchoolDaysDesktopStartupProfile::SelectResolution(
+              desktopDisplayDraft, chosen.width, chosen.height,
+              chosen.refreshRate, native ? native->w : 0,
+              native ? native->h : 0,
+              native ? native->refresh_rate : 0.0f)) {
+        setStatus("Selected resolution is invalid");
+        return;
+      }
+      if (desktopDisplayDraft.mode == Kotonoha::WindowMode::Windowed && native) {
+        // A decorated window may resize its client but cannot change the
+        // monitor refresh rate. Never persist a fictitious 144/240 Hz switch.
+        desktopDisplayDraft.refreshRate = native->refresh_rate;
+      }
+    } else if (popup == DesktopDisplayPopup::Upscaler) {
+      constexpr std::array<Kotonoha::UpscaleBackend, 5> backends{
+          Kotonoha::UpscaleBackend::None, Kotonoha::UpscaleBackend::Linear,
+          Kotonoha::UpscaleBackend::MPV, Kotonoha::UpscaleBackend::MetalFX,
+          Kotonoha::UpscaleBackend::Auto};
+      const auto backend = backends[static_cast<size_t>(choice)];
+      if (!engine->GetUpscaler().supports(backend)) {
+        setStatus("This upscaler is unavailable on the active renderer");
+        return;
+      }
+      desktopDisplayDraft.upscaling.backend = backend;
+    } else if (popup == DesktopDisplayPopup::Shader) {
+      desktopDisplayDraft.upscaling.preset =
+          Kotonoha::UpscalePresets()[static_cast<size_t>(choice)];
+      desktopDisplayDraft.upscaling.shaderFiles.clear();
+    }
+    finishPopup();
+    // Resolution, backend, shader and GLSL selections are also immediate.
+    // Persisting here keeps the displayed value, actual SDL mode and the next
+    // launcher session in sync; APPLY is no longer an easy-to-miss second step.
+    activateDesktopDisplayControl(21);
+    playSound(Ui::UiSfxCue::Click);
+    systemUi.SetConfigVisualState(configVisualState());
+  };
+  if (event.type == SDL_EVENT_TEXT_INPUT && editingPath) {
+    if (event.text.text) {
+      for (const char *p = event.text.text; *p && desktopDisplayPathEdit.size() < 1024; ++p)
+        if (*p != '\n' && *p != '\r') desktopDisplayPathEdit.push_back(*p);
+    }
+    return true;
+  }
+  if (event.type == SDL_EVENT_KEY_DOWN) {
+    if (event.key.repeat) return true;
+    if (event.key.key == SDLK_ESCAPE) {
+      finishPopup();
+      playSound(Ui::UiSfxCue::Cancel);
+      return true;
+    }
+    if (editingPath) {
+      if (event.key.key == SDLK_BACKSPACE && !desktopDisplayPathEdit.empty()) {
+        do { desktopDisplayPathEdit.pop_back(); }
+        while (!desktopDisplayPathEdit.empty() &&
+               (static_cast<unsigned char>(desktopDisplayPathEdit.back()) & 0xc0u) == 0x80u);
+      } else if (event.key.key == SDLK_V && (SDL_GetModState() & SDL_KMOD_CTRL)) {
+        if (char *clipboard = SDL_GetClipboardText()) {
+          for (const char *p = clipboard; *p && desktopDisplayPathEdit.size() < 1024; ++p)
+            if (*p != '\n' && *p != '\r') desktopDisplayPathEdit.push_back(*p);
+          SDL_free(clipboard);
+        }
+      } else if (event.key.key == SDLK_RETURN || event.key.key == SDLK_KP_ENTER) {
+        choose(0);
+      }
+      return true;
+    }
+    if (event.key.key == SDLK_RETURN || event.key.key == SDLK_KP_ENTER) {
+      choose(desktopDisplayPopupHover >= 0 ? desktopDisplayPopupHover
+                                          : desktopDisplayPopupScroll);
+      return true;
+    }
+    const int step = event.key.key == SDLK_UP ? -1 :
+                     event.key.key == SDLK_DOWN ? 1 :
+                     event.key.key == SDLK_PAGEUP ? -kDesktopPopupRows :
+                     event.key.key == SDLK_PAGEDOWN ? kDesktopPopupRows : 0;
+    if (step != 0) {
+      desktopDisplayPopupHover =
+          std::clamp(desktopDisplayPopupHover + step, 0, count - 1);
+    } else if (event.key.key == SDLK_HOME) desktopDisplayPopupHover = 0;
+    else if (event.key.key == SDLK_END) desktopDisplayPopupHover = count - 1;
+    else return true;
+    desktopDisplayPopupScroll = std::clamp(
+        desktopDisplayPopupScroll,
+        desktopDisplayPopupHover - kDesktopPopupRows + 1,
+        std::max(desktopDisplayPopupHover, 0));
+    desktopDisplayPopupScroll = std::clamp(desktopDisplayPopupScroll, 0, maxScroll);
+    return true;
+  }
+  if (event.type == SDL_EVENT_MOUSE_WHEEL) {
+    if (!editingPath) {
+      desktopDisplayPopupScroll = std::clamp(
+          desktopDisplayPopupScroll - static_cast<int>(std::round(event.wheel.y)),
+          0, maxScroll);
+      // Keyboard Enter must select a row still visible after wheel scrolling,
+      // not the previous offscreen highlight.
+      desktopDisplayPopupHover = std::min(count - 1, desktopDisplayPopupScroll);
+    }
+    return true;
+  }
+  if (event.type == SDL_EVENT_MOUSE_MOTION ||
+      (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+       event.button.button == SDL_BUTTON_LEFT)) {
+    const float x = event.type == SDL_EVENT_MOUSE_MOTION
+                        ? event.motion.x : event.button.x;
+    const float y = event.type == SDL_EVENT_MOUSE_MOTION
+                        ? event.motion.y : event.button.y;
+    const auto canvas = DesktopCanvas(
+        systemUi.ConfigMenu().CurrentVariant(), engine->screenSize(),
+        narrativePresentationHeightScale() < 0.999f);
+    const auto popupRect = canvas.map(
+        kDesktopPopupX, kDesktopPopupY, kDesktopPopupWidth, 330.0f);
+    int hovered = -1;
+    if (PointIn(x, y, popupRect)) {
+      if (editingPath) {
+        if (PointIn(x, y, canvas.map(
+                kDesktopPopupX + 40, kDesktopPopupY + 248, 185, 45)))
+          hovered = 0;
+        else if (PointIn(x, y, canvas.map(
+                     kDesktopPopupX + 283, kDesktopPopupY + 248, 185, 45)))
+          hovered = 1;
+      } else {
+        for (int visible = 0; visible < kDesktopPopupRows; ++visible) {
+          const int index = desktopDisplayPopupScroll + visible;
+          if (index >= count) break;
+          if (PointIn(x, y, canvas.map(
+                  kDesktopPopupX + 12,
+                  kDesktopPopupY + 39 + visible * kDesktopPopupRow,
+                  kDesktopPopupWidth - 24, kDesktopPopupRow - 2))) {
+            hovered = index;
+            break;
+          }
+        }
+      }
+    }
+    if (event.type == SDL_EVENT_MOUSE_MOTION) {
+      desktopDisplayPopupHover = hovered;
+    } else {
+      if (hovered >= 0) choose(hovered);
+      else {
+        finishPopup(); // No click-through to underlying Config CMAP.
+        playSound(Ui::UiSfxCue::Cancel);
+      }
+    }
+    return true;
+  }
+  // Popup is modal: no underlying tab/close or system controls can activate.
+  return true;
+}
+#else
+void Runtime::discardDesktopDisplayDraft() {}
+void Runtime::resetDesktopDisplayDraft() {}
+void Runtime::activateDesktopDisplayControl(int) {}
+void Runtime::renderDesktopDisplayPanel(Kotonoha::RendererRef) {}
+bool Runtime::handleDesktopDisplayPanel(Kotonoha::EventRef) { return false; }
+#endif
 
 bool Runtime::displayPanelOpen() const {
   return engine && systemUi.IsConfigOpen() &&
@@ -3251,6 +4375,10 @@ bool Runtime::applyDisplayAspectPreference() {
 
 void Runtime::renderDisplayPanel(Kotonoha::RendererRef renderer) {
   if (!engine || !systemUi.IsConfigOpen()) return;
+#if !defined(__ANDROID__) && !defined(ANDROID)
+  renderDesktopDisplayPanel(renderer);
+  return;
+#endif
   const SDL_FPoint screen = engine->screenSize();
   const auto geometry = DisplayGeometry(systemUi.ConfigMenu().CurrentVariant(),
                                         screen.x, screen.y);
@@ -3377,9 +4505,9 @@ void Runtime::renderDisplayPanel(Kotonoha::RendererRef renderer) {
 
   const auto &settings = engine->GetSettings();
   const auto resolutions = DisplayResolutions(settings.display);
-  if (displayPanelSelectedResolution < 0 ||
-      displayPanelSelectedResolution >= static_cast<int>(resolutions.size()))
-    displayPanelSelectedResolution = SelectedDisplayResolution(resolutions, settings);
+  // Refresh selection from the current physical settings, including changes
+  // made via General Window/Full or a previously chosen Windowed resolution.
+  displayPanelSelectedResolution = SelectedDisplayResolution(resolutions, settings);
 
   constexpr const char *aspectLabels[]{"Auto", "4:3", "16:9"};
   char aspect[96], mode[96], resolution[128], monitor[96], upscaling[160], vsync[64];
@@ -3413,7 +4541,13 @@ void Runtime::renderDisplayPanel(Kotonoha::RendererRef renderer) {
     displayPanelResolutionScroll =
         std::clamp(displayPanelResolutionScroll, 0, maxScroll);
     ui.panel(renderer, popup.rect, {8, 11, 18, 252});
-    ui.text(renderer, "RESOLUTIONS - WHEEL TO SCROLL", popup.rect.x + 12.0f,
+    char header[128];
+    const int first = displayPanelResolutionScroll + 1;
+    const int last = std::min(static_cast<int>(resolutions.size()),
+                              displayPanelResolutionScroll + popup.visibleRows);
+    SDL_snprintf(header, sizeof(header), "RESOLUTIONS %d-%d / %d - WHEEL/PGUP/PGDN",
+                 first, last, static_cast<int>(resolutions.size()));
+    ui.text(renderer, header, popup.rect.x + 12.0f,
             popup.rect.y + 7.0f, popup.rect.w - 24.0f, {240, 240, 245, 255});
     for (int visible = 0; visible < popup.visibleRows; ++visible) {
       const int index = displayPanelResolutionScroll + visible;
@@ -3429,6 +4563,26 @@ void Runtime::renderDisplayPanel(Kotonoha::RendererRef renderer) {
       SDL_snprintf(itemText, sizeof(itemText), "%s %s",
                    index == displayPanelSelectedResolution ? ">" : " ", modeText);
       ui.button(renderer, item, itemText, displayPanelHoverResolution == index);
+    }
+    // Always expose the catalog's actual length and current position. Before
+    // this, opening the popup in its middle looked like a short, incomplete
+    // list even though many modes were reachable by the wheel.
+    if (maxScroll > 0) {
+      const float trackHeight = popup.rect.h - popup.headerHeight - 14.0f;
+      const float knobHeight = std::max(
+          12.0f, trackHeight * static_cast<float>(popup.visibleRows) /
+                     static_cast<float>(resolutions.size()));
+      const float knobY = popup.rect.y + popup.headerHeight + 7.0f +
+          (trackHeight - knobHeight) *
+              (static_cast<float>(displayPanelResolutionScroll) /
+               static_cast<float>(maxScroll));
+      ui.panel(renderer,
+               {popup.rect.x + popup.rect.w - 7.0f,
+                popup.rect.y + popup.headerHeight + 7.0f, 3.0f, trackHeight},
+               {90, 100, 115, 200});
+      ui.panel(renderer,
+               {popup.rect.x + popup.rect.w - 9.0f, knobY, 7.0f, knobHeight},
+               {180, 201, 240, 255});
     }
   }
 
@@ -3450,6 +4604,9 @@ void Runtime::renderDisplayPanel(Kotonoha::RendererRef renderer) {
 
 bool Runtime::handleDisplayPanel(Kotonoha::EventRef event) {
   if (!displayPanelOpen()) return false;
+#if !defined(__ANDROID__) && !defined(ANDROID)
+  return handleDesktopDisplayPanel(event);
+#endif
 #if defined(__ANDROID__) || defined(ANDROID)
   const auto modes = AndroidDisplayModesUnique();
   if (event.type == SDL_EVENT_MOUSE_WHEEL) {
@@ -3683,14 +4840,22 @@ bool Runtime::handleDisplayPanel(Kotonoha::EventRef event) {
   if (displayPanelResolutionOpen && hoveredResolution >= 0) {
     const auto &selected = resolutions[static_cast<size_t>(hoveredResolution)];
     displayPanelSelectedResolution = hoveredResolution;
-    if (settings.mode == Kotonoha::WindowMode::Windowed) {
-      settings.width = selected.width;
-      settings.height = selected.height;
-    }
-    settings.fullscreenWidth = selected.width;
-    settings.fullscreenHeight = selected.height;
-    settings.refreshRate = selected.refreshRate;
+    const SDL_DisplayID display = DisplayIdForIndex(settings.display);
+    const auto *desktop = display ? SDL_GetDesktopDisplayMode(display) : nullptr;
+    if (!Kotonoha::SchoolDaysDesktopStartupProfile::SelectResolution(
+            settings, selected.width, selected.height, selected.refreshRate,
+            desktop ? desktop->w : 0, desktop ? desktop->h : 0,
+            desktop ? desktop->refresh_rate : 0.0f))
+      return true;
     engine->applySettings(settings);
+    // A resolution change may promote Borderless to Exclusive. Keep General's
+    // Window/Full selection synchronized with the actually applied host mode.
+    displayBackend.windowMode =
+        settings.mode == Kotonoha::WindowMode::Windowed ? 0 : 1;
+    refreshDisplayProjection();
+    std::string failure;
+    Check(configStorage.CacheWindowMode(displayBackend.windowMode, &failure),
+          failure, "School Days WindowMode cache update failed");
     displayPanelResolutionOpen = false;
     displayPanelHoverResolution = -1;
     playSound(Ui::UiSfxCue::Click);
@@ -3735,6 +4900,11 @@ bool Runtime::handleDisplayPanel(Kotonoha::EventRef event) {
       return true;
     }
     SaveRemasterAspectPreference(documents, displayAspectPreference);
+    std::string failure;
+    Check(configStorage.CacheDisplayType(displayBackend.baseDisplayType, &failure),
+          failure, "School Days DisplayType cache update failed");
+    Check(configStorage.CacheTypeMiniNote(displayBackend.typeMiniNote, &failure),
+          failure, "School Days TypeMiniNote cache update failed");
     if (uiVariant != beforeVariant) openConfig(Kotonoha::SchoolDaysConfigMenuModel::Page::Display, false);
   } else if (hoveredRow == 2) {
     displayPanelResolutionOpen = false;
@@ -3758,6 +4928,10 @@ bool Runtime::handleDisplayPanel(Kotonoha::EventRef event) {
     displayBackend.windowMode =
         settings.mode == Kotonoha::WindowMode::Windowed ? 0 : 1;
     refreshDisplayProjection();
+    std::string failure;
+    Check(configStorage.CacheWindowMode(displayBackend.windowMode, &failure),
+          failure, "School Days WindowMode cache update failed");
+    displayPanelSelectedResolution = -1;
     if (uiVariant != beforeVariant)
       openConfig(Kotonoha::SchoolDaysConfigMenuModel::Page::Display, false);
   } else if (hoveredRow == 3) {
@@ -3839,6 +5013,13 @@ bool Runtime::onScreenEvent(Kotonoha::EventRef event) {
     }
   }
   if (!engine) return false;
+  if (lxhFade.InputLocked() && FrontendInputEvent(event.type)) return true;
+#if !defined(__ANDROID__) && !defined(ANDROID)
+  if (displayPanelOpen() && desktopDisplayPopup != DesktopDisplayPopup::None &&
+      handleDesktopDisplayPanel(event))
+    return true;
+#endif
+  if (transportFade.InputLocked()) return true;
   if (exitTransition.InputLocked()) return true;
   if (systemPanelTransition.InputLocked()) return true;
   if (!systemUi.IsOpen()) {
@@ -3846,6 +5027,29 @@ bool Runtime::onScreenEvent(Kotonoha::EventRef event) {
            !panelOpen() &&
            !frontendTransition.Active(SDL_GetTicks()) &&
            gameScene->handleMenuBarEvent(event);
+  }
+  if (displayPanelOpen() && displayPanelResolutionOpen &&
+      event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) {
+#if defined(_WIN32) && !defined(__ANDROID__)
+    const auto modes = DisplayResolutions(engine->GetSettings().display);
+    const SDL_FPoint screen = engine->screenSize();
+    const auto popup = DisplayResolutionPopup(DisplayGeometry(
+        systemUi.ConfigMenu().CurrentVariant(), screen.x, screen.y));
+    const int maxScroll = std::max(0, static_cast<int>(modes.size()) - popup.visibleRows);
+    const int page = std::max(1, popup.visibleRows - 1);
+    switch (event.key.key) {
+    case SDLK_UP: --displayPanelResolutionScroll; break;
+    case SDLK_DOWN: ++displayPanelResolutionScroll; break;
+    case SDLK_PAGEUP: displayPanelResolutionScroll -= page; break;
+    case SDLK_PAGEDOWN: displayPanelResolutionScroll += page; break;
+    case SDLK_HOME: displayPanelResolutionScroll = 0; break;
+    case SDLK_END: displayPanelResolutionScroll = maxScroll; break;
+    default: return false;
+    }
+    displayPanelResolutionScroll = std::clamp(displayPanelResolutionScroll, 0, maxScroll);
+    displayPanelHoverResolution = -1;
+    return true;
+#endif
   }
   const bool pointer = event.type == SDL_EVENT_MOUSE_MOTION ||
                        event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
@@ -3860,6 +5064,8 @@ bool Runtime::onScreenEvent(Kotonoha::EventRef event) {
   const SDL_FPoint screen = engine->screenSize();
   systemUi.SetArea({std::max(1, static_cast<int>(std::lround(screen.x))),
                     std::max(1, static_cast<int>(std::lround(screen.y)))});
+  systemUi.SetConfigStandardFullscreenStretch(
+      systemUi.IsConfigOpen() && narrativePresentationHeightScale() < 0.999f);
   try {
 #if defined(__ANDROID__) || defined(ANDROID)
     // SDL emits a synthetic mouse click for the same finger activation. The
@@ -3902,10 +5108,20 @@ bool Runtime::onEvent(Kotonoha::EventRef eventInput) {
   if (currentState == Kotonoha::GameState::Splash) {
     return Kotonoha::Runtime::onEvent(event);
   }
+  if (lxhFade.InputLocked() && FrontendInputEvent(event.type)) return true;
   if (exitTransition.InputLocked() && FrontendInputEvent(event.type)) return true;
+  if (transportFade.InputLocked() && FrontendInputEvent(event.type)) return true;
+  if (loadTransition.InputLocked() && FrontendInputEvent(event.type)) return true;
   if (systemPanelTransition.InputLocked() && FrontendInputEvent(event.type)) return true;
   if (frontendTransition.Active(SDL_GetTicks()) && FrontendInputEvent(event.type))
     return true;
+#if !defined(__ANDROID__) && !defined(ANDROID)
+  // Screen events route pointer clicks separately. Key/text input for a modal
+  // resolution/shader/GLSL editor must be consumed before the retail ESC close.
+  if (displayPanelOpen() && desktopDisplayPopup != DesktopDisplayPopup::None &&
+      handleDesktopDisplayPanel(event))
+    return true;
+#endif
   const bool escape = event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
                       event.key.key == SDLK_ESCAPE;
   if (saveMenu->isOpen()) {
@@ -4105,6 +5321,10 @@ void Runtime::updateMenuBar(Kotonoha::SchoolDaysMenuBarPresenter &presenter,
                             config.superSkip, projection.speedControlsEnabled,
                             projection.transportLocked, projection.actionInhibit,
                             projection.fullBarSuppressed);
+  // Native choice-result tail removes transport/system controls while the
+  // KOTONOHA/SEKAI feelings meter remains visible at full opacity. Normal
+  // MenuBar ownership resumes when the next scene is bound.
+  presenter.SetMeterOnly(!temporary && choicePresentation.exitActive);
   presenter.SetReplayIndicatorState(projection.replayIndicator);
 
   int64_t feeling001 = 0;
@@ -4125,6 +5345,35 @@ void Runtime::updateMenuBar(Kotonoha::SchoolDaysMenuBarPresenter &presenter,
   }
   presenter.Update(nowMs, static_cast<int>(feeling001),
                    static_cast<int>(feeling002));
+  // Retail menu-bar feeling animation calls host sound code 3=SeUp or
+  // 4=SeDown exactly when its first changed feeling is detected. SeSelect
+  // remains the immediate choice click; the ~4s directional musical effect
+  // belongs to the later animated meter, not to every choice unconditionally.
+  const int feelingSfx = presenter.ConsumeFeelingDirectionCode();
+  if (feelingSfx == 3)
+    playSound(Ui::UiSfxCue::Up);
+  else if (feelingSfx == 4)
+    playSound(Ui::UiSfxCue::Down);
+}
+
+void Runtime::applyEffectivePlaybackRate(double rate) {
+  speed = rate;
+  for (auto &item : playing) item.player->setPlaybackRate(rate);
+  if (!engine) return;
+  // EXE 0x4433D0 compares effective rate >4.0; gain-based silencing keeps
+  // FFmpeg/video decoding and the 24-fps logical clock alive. These four
+  // channels are School Days' native story audio and authored video sound.
+  const bool mute = Kotonoha::SchoolDaysPlaybackPolicy::SuppressesNarrativeAudioAtRate(rate);
+  for (const char *channel : {"BGM", "Voice", "SE", "Movie"})
+    engine->GetAudio().channel(channel)->setMuted(mute);
+}
+
+void Runtime::setPlaybackSpeedIndex(int index) {
+  double rate = 1.0;
+  if (!Kotonoha::SchoolDaysPlaybackPolicy::RateForIndex(index, &rate))
+    throw std::runtime_error("School Days MenuBar playback speed index is invalid");
+  speedIndex = index;
+  if (!choiceSpeedOverrideActive) applyEffectivePlaybackRate(rate);
 }
 
 void Runtime::activateMenuAction(
@@ -4145,22 +5394,16 @@ void Runtime::activateMenuAction(
     paused = !paused;
     return;
   case Kind::BackOrRestartScene:
-    back();
+    beginTransportFade(Kotonoha::SchoolDaysTransportFade::Operation::Rewind);
     return;
   case Kind::SkipToEnd:
-    if (auto target = timeline.ComputeSkipToEndTarget(tick)) seek(*target);
+    beginTransportFade(Kotonoha::SchoolDaysTransportFade::Operation::SkipToEnd);
     return;
   case Kind::SkipToNextChoice:
     if (!temporary) skipToNextChoice();
     return;
   case Kind::SetPlaybackSpeed: {
-    double rate = 1.0;
-    if (!Kotonoha::SchoolDaysPlaybackPolicy::RateForIndex(action.value, &rate))
-      throw std::runtime_error("School Days MenuBar playback speed index is invalid");
-    speedIndex = action.value;
-    speed = rate;
-    for (auto &item : playing)
-      item.player->setPlaybackRate(rate);
+    setPlaybackSpeedIndex(action.value);
     return;
   }
   case Kind::SetReplayIndicatorOpacity:
@@ -4253,6 +5496,49 @@ void Runtime::refreshSaveMetadata() {
   saveLoadPage = page;
 }
 
+bool Runtime::withinDocuments(const std::filesystem::path& savePath) const {
+  if (documents.empty() || savePath.empty()) return false;
+  const auto root = std::filesystem::absolute(documents).lexically_normal();
+  const auto path = std::filesystem::absolute(savePath).lexically_normal();
+  const auto relative = path.lexically_relative(root);
+  if (relative.empty() || relative == ".") return false;
+  for (const auto& component : relative)
+    if (component == "..") return false;
+  return true;
+}
+
+Kotonoha::SchoolDaysSaveProvenance::Origin Runtime::saveProvenanceOrigin(
+    const std::vector<uint8_t>& saveBytes) const {
+  using Provenance = Kotonoha::SchoolDaysSaveProvenance;
+  if (Provenance::SaveSceneKey(saveBytes) != scene.sceneKey ||
+      !assets || temporaryPlaybackActive() ||
+      bridge.HasPendingHandoff()) return {};
+  const auto phase = lxhFade.CurrentPhase();
+  const bool actualEpilogue =
+      phase == Kotonoha::SchoolDaysLxhFade::Phase::EntryIn ||
+      phase == Kotonoha::SchoolDaysLxhFade::Phase::Epilogue;
+  bool movieDispatched = false;
+  for (const auto& entry : movieStates) {
+    const auto* movie = entry.first;
+    if (!movie || movie->command != PLAY_MOVIE ||
+        !movie->data.play_movie || !movie->data.play_movie->path ||
+        !movie->eventTouched) continue;
+    std::string path = movie->data.play_movie->path;
+    std::transform(path.begin(), path.end(), path.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (path.find("lxh/media/") != std::string::npos) {
+      movieDispatched = true;
+      break;
+    }
+  }
+  // Integrated LxH has no availability toggle. Real origin still requires a
+  // recognized epilogue, the correct fade and an actually dispatched movie.
+  return Provenance::Capture(scene.sceneKey, script, tick,
+                             temporaryPlaybackActive(),
+                             bridge.HasPendingHandoff(), pendingSceneAdvance,
+                             actualEpilogue && movieDispatched);
+}
+
 void Runtime::saveSlot(int slot, const std::u16string &comment) {
   if (currentState != Kotonoha::GameState::Gameplay) throw std::runtime_error("No game to save");
   const bool privatePlayData = saveLoadOwner == SaveLoadOwner::PlayData;
@@ -4281,7 +5567,15 @@ void Runtime::saveSlot(int slot, const std::u16string &comment) {
         false, &plan.saveFileBytes, &error), error);
   }
   std::string failure;
+  std::filesystem::path slotPath;
+  Check(storage.SaveFilePath(slot, &slotPath, &failure), failure,
+        "School Days slot path failed");
+  Check(Kotonoha::SchoolDaysSaveProvenance::Invalidate(slotPath, &failure),
+        failure, "School Days save sidecar invalidation failed");
   Check(storage.WriteSaveFile(plan, &failure), failure, "School Days save write failed");
+  const auto origin = privatePlayData
+                          ? Kotonoha::SchoolDaysSaveProvenance::Origin{}
+                          : saveProvenanceOrigin(plan.saveFileBytes);
   Check(Kotonoha::SchoolDaysSaveService::Commit(plan, &session.Persistence(), &error), error);
   Check(storage.WriteGlobalFlag(plan, &failure), failure, "School Days GlobalFlag write failed");
   if (privatePlayData) {
@@ -4289,6 +5583,12 @@ void Runtime::saveSlot(int slot, const std::u16string &comment) {
     // history and SLog isolated, and publish only the committed global image.
     Check(bridge.Session().LoadGlobalFlag(plan.globalFlagBytes, &error), error);
   }
+  // Do not let an optional sidecar failure prevent the native persistence
+  // commit/GlobalFlag writer. After both succeed, attest the exact disk bytes.
+  // A crash before this rename leaves the slot UNTRUSTED, not falsely LxH.
+  Check(Kotonoha::SchoolDaysSaveProvenance::Publish(
+            slotPath, slot, plan.saveFileBytes, origin, &failure),
+        failure, "School Days save sidecar publish failed");
 }
 
 void Runtime::loadSlot(int slot) {
@@ -4335,6 +5635,7 @@ void Runtime::loadSlot(int slot) {
   backlogIndex = 0;
   backlogScene.clear();
   openScene(result.scene);
+  if (gameScene) gameScene->restoreMenuBarFeelingState();
 }
 
 Kotonoha::SchoolDaysConfigMenuRenderPlan::VisualState Runtime::configVisualState() const {
@@ -4349,20 +5650,52 @@ Kotonoha::SchoolDaysConfigMenuRenderPlan::VisualState Runtime::configVisualState
   state.soundLevels = {Policy::Level(config, Policy::NativeAudioBank::Bgm),
                        Policy::Level(config, Policy::NativeAudioBank::Se),
                        Policy::Level(config, Policy::NativeAudioBank::Voice)};
+#if !defined(__ANDROID__) && !defined(ANDROID)
+  if (engine) {
+    const auto &display = desktopDisplayDraftActive
+                              ? desktopDisplayDraft : engine->GetSettings();
+    state.displayResizable = display.resizable ? 5 : 6;
+    state.displayVsync = display.vsync ? 7 : 8;
+    state.displayFactor = 13 + std::clamp(
+        static_cast<int>(std::lround((display.upscaling.factor - 1.0f) * 2.0f)),
+        0, 6);
+  }
+#endif
   return state;
 }
 
 void Runtime::openConfig(Kotonoha::SchoolDaysConfigMenuModel::Page page, bool playView) {
+  if (engine) {
+    // The shared SettingsMenu may have changed the host's physical window
+    // mode while the School Days native panel was closed. Reflect it in the
+    // next General WINDOW/FULL chip without clobbering any saved Config.DAT
+    // field simply by opening the panel.
+    const int physicalWindowMode =
+        engine->GetSettings().mode == Kotonoha::WindowMode::Windowed ? 0 : 1;
+    if (displayBackend.windowMode != physicalWindowMode) {
+      displayBackend.windowMode = physicalWindowMode;
+      refreshDisplayProjection();
+    }
+  }
   closePanels();
   std::string failure;
   if (systemUi.OpenConfig(&engine->GetRenderer(), assets->root().string(),
                           ConfigVariant(uiVariant), page,
                           configVisualState(), &failure)) {
+#if !defined(__ANDROID__) && !defined(ANDROID)
+    if (page == Kotonoha::SchoolDaysConfigMenuModel::Page::Display) {
+      resetDesktopDisplayDraft();
+      systemUi.SetConfigVisualState(configVisualState());
+    }
+#endif
     if (playView) playSound(Ui::UiSfxCue::View);
     return;
   }
   SDL_LogWarn(Kotonoha::LogUI, "School Days ConfigMenu: %s", failure.c_str());
-  engine->openSettings();
+  // School Days no longer opens the engine-wide SettingsMenu, including when
+  // a required authored texture/CMAP cannot be resolved. Fail visibly rather
+  // than silently replacing the native three-tab menu with a global UI.
+  setStatus("School Days ConfigMenu unavailable: " + failure);
 }
 
 void Runtime::handleConfig(const Kotonoha::SchoolDaysConfigMenuModel::Action &action) {
@@ -4382,8 +5715,20 @@ void Runtime::handleConfig(const Kotonoha::SchoolDaysConfigMenuModel::Action &ac
     return;
   case Kind::SelectPage:
     if (action.page == Kotonoha::SchoolDaysConfigMenuModel::Page::Display) {
-      closePanels();
-      engine->openSettings();
+#if defined(__ANDROID__) || defined(ANDROID)
+      // The mobile-specific render-scale/frame-rate panel remains available;
+      // mobile modes have a different platform presentation contract.
+      openConfig(Kotonoha::SchoolDaysConfigMenuModel::Page::Display, false);
+#else
+      // User-selected third tab now owns its retail-style Display base/CHIP.
+      // Its initial draft is a copy of the engine's persisted settings.
+      openConfig(Kotonoha::SchoolDaysConfigMenuModel::Page::Display, false);
+#endif
+      displayPanelResolutionOpen = false;
+      displayPanelPresetOpen = false;
+      displayPanelHoverRow = -1;
+      displayPanelHoverResolution = -1;
+      displayPanelHoverPreset = -1;
       return;
     }
     openConfig(action.page, false);
@@ -4393,17 +5738,17 @@ void Runtime::handleConfig(const Kotonoha::SchoolDaysConfigMenuModel::Action &ac
     displayPanelHoverResolution = -1;
     displayPanelHoverPreset = -1;
     return;
+#if !defined(__ANDROID__) && !defined(ANDROID)
+  case Kind::DisplayControl:
+    if (currentPage == Kotonoha::SchoolDaysConfigMenuModel::Page::Display)
+      activateDesktopDisplayControl(action.value);
+    return;
+#endif
   case Kind::SetMenVoice: config.menVoice = action.value != 0; break;
   case Kind::SetSkip: {
     const bool requestedSkip = action.value != 0;
     if (!requestedSkip) {
-      double rate = 1.0;
-      if (!Kotonoha::SchoolDaysPlaybackPolicy::RateForIndex(0, &rate))
-        throw std::runtime_error("School Days Skip-off speed reset failed");
-      speedIndex = 0;
-      speed = rate;
-      for (auto &item : playing)
-        item.player->setPlaybackRate(rate);
+      setPlaybackSpeedIndex(0);
     }
     config.skip = requestedSkip;
     break;
@@ -4429,31 +5774,69 @@ void Runtime::handleConfig(const Kotonoha::SchoolDaysConfigMenuModel::Action &ac
       Check(configStorage.CacheDisplayType(displayBackend.baseDisplayType, &failure),
             failure, "School Days DisplayType cache update failed");
     }
+    // A click on an already-selected WIDE/STANDARD chip is inert for retail
+    // B/D, but must still turn Display's "Auto" aspect into the explicit
+    // player selection. Both tabs represent one remaster preference.
+    if (displayState.effectiveDisplayType == (action.value != 0 ? 1 : 0)) {
+      const int requested = action.value != 0 ? 2 : 1;
+      if (displayAspectPreference != requested) {
+        displayAspectPreference = requested;
+        SaveRemasterAspectPreference(documents, requested);
+      }
+    }
     break;
   }
   case Kind::RequestFull: {
-    const auto previousDisplay = displayBackend;
+    // General WINDOW/FULL must also change the real Windows presentation.
+    // Preserve the retail W/skin transition and use the same physical mode
+    // state as Display Options; previously this was a no-op for the user.
+#if defined(_WIN32) && !defined(__ANDROID__)
+    {
+      auto settings = engine->GetSettings();
+      const SDL_DisplayID display = DisplayIdForIndex(settings.display);
+      const SDL_DisplayMode *desktop =
+          display ? SDL_GetDesktopDisplayMode(display) : nullptr;
+      if (Kotonoha::SchoolDaysDesktopStartupProfile::SelectGeneralWindowSize(
+              settings, action.value == 0, desktop ? desktop->w : 0,
+              desktop ? desktop->h : 0,
+              desktop ? desktop->refresh_rate : 0.0f)) {
+        engine->applySettings(settings);
+        displayPanelSelectedResolution = -1;
+      }
+      // A normal decorated SDL window is required when WINDOW is selected.
+      // Explicitly restore native borders after leaving fullscreen to avoid
+      // preserving a borderless Windows style across mode changes. A desktop-
+      // sized *client* rectangle plus the caption extends above/below the
+      // display if merely centered (observed HWND y=-22 on 1366x768). Native
+      // maximization keeps the title bar and Min/Max/Close visible, while the
+      // client fills the monitor's usable work area instead of clipping it.
+      // SDL dummy/offscreen test backends have no actual Win32 caption or
+      // taskbar to maximize into. Only dispatch OS window-style requests when
+      // the active SDL video backend is really Windows; the EngineSettings
+      // transition itself is still exercised in headless regression tests.
+      const char *videoDriver = SDL_GetCurrentVideoDriver();
+      if (action.value == 1 && videoDriver &&
+          SDL_strcmp(videoDriver, "windows") == 0) {
+        if (!SDL_SetWindowBordered(&engine->GetWindow(), true))
+          throw std::runtime_error(std::string("Restore Windows title bar: ") +
+                                   SDL_GetError());
+        if (!SDL_MaximizeWindow(&engine->GetWindow()))
+          throw std::runtime_error(std::string("Maximize desktop window: ") +
+                                   SDL_GetError());
+      }
+    }
+#endif
     displayAccepted = DisplayPolicy::ApplyRetailConfigRequest(
         DisplayPolicy::RetailConfigRequest::Full, action.value, {0, 1, 1},
         &displayBackend);
     if (displayAccepted) {
-      // The retail W bit selects the authored WINDOW/FULL family, while the
-      // commercial remaster also projected it onto the physical host mode.
-      // Keep Config.DAT untouched: physical mode persistence belongs to the v3
-      // EngineSettings store, exactly as Kotonoha.ini did in the commercial build.
-      auto settings = engine->GetSettings();
-      settings.mode = displayBackend.windowMode == 0
-                          ? Kotonoha::WindowMode::Windowed
-                          : Kotonoha::WindowMode::Borderless;
-      try {
-        engine->applySettings(settings);
-      } catch (...) {
-        displayBackend = previousDisplay;
-        refreshDisplayProjection();
-        throw;
-      }
       refreshDisplayProjection();
     }
+    // The v1.02 Config.DAT reader understands W but no writer was authenticated.
+    // The remaster adds this explicit persistence only on the user's choice.
+    std::string failure;
+    Check(configStorage.CacheWindowMode(displayBackend.windowMode, &failure),
+          failure, "School Days WindowMode cache update failed");
     break;
   }
   default:
@@ -4531,10 +5914,10 @@ void Runtime::loadConfig() {
   if (loaded.display.hasTypeMiniNote)
     displayBackend.typeMiniNote = loaded.display.typeMiniNote;
 
-  // Commercial Kotonoha persisted the physical host mode separately from the
-  // retail Config.DAT W field. At startup the actual host mode was authoritative
-  // for the WINDOW/FULL projection, but it was never written back to Config.DAT.
-  if (engine)
+  // Once a physical mode is saved, it is the effective Window/Full selection
+  // shared by General and Display. A legacy Config.DAT W still seeds a clean
+  // profile without a saved physical preference.
+  if (engine && (engine->HasStoredSettings() || !loaded.display.hasWindowMode))
     displayBackend.windowMode =
         engine->GetSettings().mode == Kotonoha::WindowMode::Windowed ? 0 : 1;
   refreshDisplayProjection();
@@ -4549,6 +5932,20 @@ void Runtime::loadConfig() {
 void Runtime::refreshDisplayProjection() {
   displayState = DisplayPolicy::ProjectRetailState(displayBackend);
   uiVariant = DisplayPolicy::SelectRetailVariant(displayState);
+}
+
+float Runtime::narrativePresentationHeightScale() const {
+#if defined(_WIN32) && !defined(__ANDROID__)
+  // In the supplied 800x600 Standard screenshot, the 800x450 picture is
+  // centered with 75px bars above and below; WIDE restores full height. Keep
+  // the actual Windows fullscreen resolution unchanged and scale the complete
+  // game-authored Novel frame, never crop media or subtitle glyphs.
+  return engine && engine->GetSettings().mode != Kotonoha::WindowMode::Windowed &&
+                 uiVariant == DisplayPolicy::Variant::Standard
+             ? 0.75f : 1.0f;
+#else
+  return 1.0f;
+#endif
 }
 
 void Runtime::cacheConfigState() {
@@ -4630,6 +6027,18 @@ void Runtime::openExit() {
   closePanels();
   exitTransition.Begin(Kotonoha::SchoolDaysExitTransition::Target::Quit,
                        SDL_GetTicks());
+}
+
+bool Runtime::handleNativeQuitRequest() {
+  if (exitConfirmedByPlayer) return false;
+  // The title/gameplay host owns EXIT; during a pre-title splash its state
+  // machine is not ticking yet. Do not swallow WM_CLOSE and strand the window.
+  if (currentState == Kotonoha::GameState::Splash || !engine) return false;
+  // Duplicate WM_CLOSE/SDL_QUIT events must not reset the fade or bypass the
+  // YES/NO question once it is visible.
+  if (exitTransition.Active() || systemUi.IsExitOpen()) return true;
+  openExit();
+  return true;
 }
 
 void Runtime::openMainMenuConfirm() {
@@ -4743,11 +6152,12 @@ void Runtime::handlePanel(const Ui::Output &output) {
     } else if (action.kind == Kind::SceneCheckRequested) {
       (void)refreshReplayAvailability();
     } else if (action.kind == Kind::HSceneRequested) {
-      startReplayPlayback(action.index);
+      beginReplayHScene(action.index);
     } else if (action.kind == Kind::SceneCheckAccepted) {
-      startReplayPlayback(action.index, action.choice);
+      beginReplayHScene(action.index, action.choice);
     } else if (action.kind == Kind::PlayDataRequested) {
-      startPlayDataPlayback(action.index);
+      if (!loadTransition.BeginReplayData(action.index, SDL_GetTicks()))
+        setStatus("School Days Replay Data loading is already in progress");
     }
   }
   if (output.hasExitActivation) {
@@ -4774,9 +6184,16 @@ void Runtime::handlePanel(const Ui::Output &output) {
       // SAVE opens RouteMap as a viewer. Selecting a checkpoint must not
       // replace the narrative owner (or a pending SaveFeel handoff).
       if (routeMapReturnSave.value_or(false)) return;
-      routeMapReturnSave.reset();
-      closePanels();
-      loadCheckpoint(output.routeMapAction.selector);
+      try {
+        // A globally unlocked SP does not guarantee that the current SLog
+        // contains the native tag3 checkpoint needed to resume it. Keep the
+        // Route Map usable if this session lacks that snapshot.
+        loadCheckpoint(output.routeMapAction.selector);
+        routeMapReturnSave.reset();
+        closePanels();
+      } catch (const std::exception &error) {
+        setStatus(error.what());
+      }
     }
   }
   if (output.hasSaveLoadOutput) {
@@ -4801,7 +6218,18 @@ void Runtime::handlePanel(const Ui::Output &output) {
       break;
     case Action::LoadSlotRequested:
       try {
-        loadSlot(result.slot);
+        if (saveLoadOwner == SaveLoadOwner::PlayData) {
+          // A private Replay Data LOAD does not take ownership of the main
+          // narrative presentation or its retail loading transition.
+          loadSlot(result.slot);
+        } else if (saveLoadOwner == SaveLoadOwner::Narrative &&
+                   !loadTransition.Begin(result.slot, SDL_GetTicks())) {
+          setStatus("School Days LOAD is already in progress");
+        } else if (saveLoadOwner == SaveLoadOwner::None) {
+          // Preserve the old direct path for callers without a native
+          // SaveLoad owner (test/debug and engine fallback paths).
+          loadSlot(result.slot);
+        }
       } catch (const std::exception &error) { setStatus(error.what()); }
       break;
     case Action::SaveSlotRequested:
@@ -4846,8 +6274,12 @@ void Runtime::playSound(Ui::UiSfxCue cue) {
 }
 
 void Runtime::loadCheckpoint(int selector) {
-  retireSceneEventPointers();
   Kotonoha_KtrfError error{};
+  // Validate the tag3 SLog checkpoint before retiring any pointers to the
+  // currently presented scene. GlobalFlag SP flags alone are not resumable.
+  Kotonoha::SchoolDaysKtrfSession::RouteMapCheckpointPlan plan;
+  Check(bridge.Session().PlanRouteMapCheckpoint(selector, &plan, &error), error);
+  retireSceneEventPointers();
   Kotonoha::SchoolDaysKtrfGameplayBridge::StepResult result;
   Check(bridge.LoadRouteMapSelector(selector, &result, &error), error);
   frontendChild = FrontendChild::None;
@@ -4856,6 +6288,7 @@ void Runtime::loadCheckpoint(int selector) {
   backlogIndex = 0;
   backlogScene.clear();
   openScene(result.scene);
+  if (gameScene) gameScene->restoreMenuBarFeelingState();
 }
 
 void Runtime::flushGlobal() {
@@ -4880,18 +6313,27 @@ void Runtime::saveGame(const std::string &path) {
   std::vector<uint8_t> bytes;
   Check(session.Persistence().SerializeSaveLogWithLiveChoiceCommitMarker(
       !bridge.HasPendingHandoff() && committed, &bytes, &error), error);
+  const bool companion = withinDocuments(path);
+  std::string failure;
+  if (companion)
+    Check(Kotonoha::SchoolDaysSaveProvenance::Invalidate(path, &failure),
+          failure, "School Days quicksave provenance invalidation failed");
   WriteBytes(path, bytes);
   flushGlobal();
+  if (companion)
+    Check(Kotonoha::SchoolDaysSaveProvenance::Publish(
+              path, -1, bytes, saveProvenanceOrigin(bytes), &failure),
+          failure, "School Days quicksave provenance publish failed");
 }
 
 void Runtime::loadGame(const std::string &path) {
   if (temporaryPlaybackActive())
     throw std::runtime_error("School Days load is unavailable during Replay playback");
+  const auto saveBytes = assets->read(path);
   prepareCarryFrame();
   playing.clear();
   Kotonoha_KtrfError error{};
   Kotonoha::SchoolDaysKtrfGameplayBridge::StepResult result;
-  const auto saveBytes = assets->read(path);
   retireSceneEventPointers();
   Check(bridge.LoadSave(saveBytes, &result, &error), error);
   closePanels();
@@ -4900,6 +6342,51 @@ void Runtime::loadGame(const std::string &path) {
   backlogIndex = 0;
   backlogScene.clear();
   openScene(result.scene);
+  if (gameScene) gameScene->restoreMenuBarFeelingState();
+}
+
+int Runtime::translationRoute() const {
+  const auto index = temporaryPlaybackActive()
+                         ? scene.nodeIndex : bridge.CurrentScene().nodeIndex;
+  return index == KOTONOHA_KTRF_NULL_INDEX ? -1 : static_cast<int>(index);
+}
+
+Kotonoha::Translation::SourceTexts Runtime::translationSources() const {
+  Kotonoha::Translation::SourceTexts sources;
+  const auto *document = bridge.Session().Adapter()->document;
+  if (!document) return sources;
+  const auto *nodes = Kotonoha_KtrfFindSection(document, "NODE");
+  if (!nodes) return sources;
+  Kotonoha_KtrfError error{};
+  for (uint32_t index = 0; index < nodes->item_count; ++index) {
+    Kotonoha::SchoolDaysKtrfScene resolved;
+    if (!bridge.Session().ResolveSceneNode(index, &resolved, &error) ||
+        resolved.orsPath.empty()) continue;
+    try {
+      const auto bytes = assets->read(resolved.orsPath);
+      Kotonoha::OrsDocument ors(
+          Kotonoha_OrsParserBytes(bytes.data(), bytes.size()));
+      std::vector<std::string> nodeTexts;
+      for (auto *event = ors.get().data; event; event = event->next) {
+        if (event->command == PRINT_TEXT && event->data.print_text) {
+          const auto *text = event->data.print_text;
+          if (text->text && *text->text) nodeTexts.emplace_back(text->text);
+          // Speech attribution is deliberately NOT localizable. The retail
+          // speaker name selects the per-character ASS color.
+        } else if (event->command == SetSELECT && event->data.set_select) {
+          const auto *choice = event->data.set_select;
+          for (Uint64 slot = 0; slot < choice->size; ++slot)
+            if (choice->options[slot] && *choice->options[slot])
+              nodeTexts.emplace_back(choice->options[slot]);
+        }
+      }
+      if (!nodeTexts.empty())
+        sources[static_cast<int>(index)] = std::move(nodeTexts);
+    } catch (const std::exception &) {
+      // An absent optional script does not invalidate other exportable nodes.
+    }
+  }
+  return sources;
 }
 
 std::string Runtime::debugNode() const {
@@ -4947,6 +6434,7 @@ void Runtime::debugJumpToNode(const std::string &id) {
   Kotonoha::SchoolDaysKtrfGameplayBridge::StepResult result;
   Check(bridge.DebugJumpToNode(index, &result, &error), error);
   openScene(result.scene);
+  if (gameScene) gameScene->restoreMenuBarFeelingState();
 }
 
 void Runtime::loadKtrf(const std::string &path) {
@@ -4967,6 +6455,7 @@ void Runtime::loadKtrf(const std::string &path) {
   if (hasGlobal) Check(bridge.Session().LoadGlobalFlag(global, &error), error);
   routePath = path;
   openScene(bridge.CurrentScene());
+  if (gameScene) gameScene->restoreMenuBarFeelingState();
 }
 
 void Runtime::dumpKtrf(const std::string &path) const {

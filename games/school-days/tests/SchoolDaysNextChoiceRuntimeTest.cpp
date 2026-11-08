@@ -1,6 +1,8 @@
 #include "SchoolDaysAssets.hpp"
 #include "SchoolDaysRuntime.hpp"
 #include <Kotonoha/core/Engine.hpp>
+#include <Kotonoha/routing/SchoolDaysPlaybackPolicy.hpp>
+#include <Kotonoha/routing/SchoolDaysMenuBarPresenter.hpp>
 #include <Kotonoha/routing/SchoolDaysConfigStorage.hpp>
 
 #include <filesystem>
@@ -187,6 +189,41 @@ public:
     return runtime.timeline.ReadyToEnd(runtime.tick) &&
            runtime.choicePresentationComplete();
   }
+  static void SetSpeed(Runtime &runtime, int index) {
+    runtime.setPlaybackSpeedIndex(index);
+  }
+  static void AdvanceWithLongFrame(Runtime &runtime, uint64_t deltaMs) {
+    runtime.lastClock = SDL_GetTicks() - deltaMs;
+    runtime.update();
+  }
+  static Kotonoha_SceneTick CurrentTick(const Runtime &runtime) {
+    return runtime.tick;
+  }
+  static double EffectiveSpeed(const Runtime &runtime) { return runtime.speed; }
+  static int SelectedSpeed(const Runtime &runtime) { return runtime.speedIndex; }
+  static bool ChoiceSpeedOverride(const Runtime &runtime) {
+    return runtime.choiceSpeedOverrideActive;
+  }
+  static bool NarrativeMuted(Runtime &runtime) {
+    return runtime.engine->GetAudio().channel("BGM")->isMuted() &&
+           runtime.engine->GetAudio().channel("Voice")->isMuted() &&
+           runtime.engine->GetAudio().channel("SE")->isMuted() &&
+           runtime.engine->GetAudio().channel("Movie")->isMuted();
+  }
+  static void ClickTransport(Runtime &runtime, bool rewind) {
+    Kotonoha::SchoolDaysMenuBarPresenter::Action action{};
+    action.kind = rewind
+                      ? Kotonoha::SchoolDaysMenuBarPresenter::ActionKind::BackOrRestartScene
+                      : Kotonoha::SchoolDaysMenuBarPresenter::ActionKind::SkipToEnd;
+    runtime.activateMenuAction(action);
+  }
+  static void PumpTransport(Runtime &runtime, uint64_t nowMs) {
+    runtime.updateTransportFade(nowMs);
+  }
+  static Kotonoha::SchoolDaysTransportFade::Phase TransportPhase(const Runtime &runtime) {
+    return runtime.transportFade.CurrentPhase();
+  }
+  static bool SeekPending(const Runtime &runtime) { return runtime.pendingSeek.has_value(); }
 };
 
 } // namespace SchoolDays
@@ -309,6 +346,108 @@ void TestRetailChoiceTimeoutTail(const char *route, const fs::path &root) {
           "timeout alpha-zero final frame was not recorded as rendered");
 }
 
+void TestTurboStopsAtChoiceAndRestores(const char *route, const fs::path &root) {
+  const auto documents = root / "documents-turbo-choice";
+  fs::create_directories(documents);
+  auto assets = std::make_shared<SchoolDays::Assets>(root);
+  Application app(assets, route, documents);
+  using Access = SchoolDays::RuntimeChoiceTestAccess;
+
+  app.runtime.debugJumpToNode("00/00-00-A03");
+  Access::SetSpeed(app.runtime, 4); // UI x32 maps to internal 24x.
+  Require(Access::SelectedSpeed(app.runtime) == 4 &&
+              Access::EffectiveSpeed(app.runtime) == 24.0 &&
+              Access::NarrativeMuted(app.runtime),
+          "turbo did not initially mute high-speed narrative audio");
+  Access::Seek(app.runtime, 48);
+  Require(Access::Pending(app.runtime) &&
+              Access::SelectedSpeed(app.runtime) == 4 &&
+              Access::ChoiceSpeedOverride(app.runtime) &&
+              Access::EffectiveSpeed(app.runtime) == 1.0 &&
+              !Access::NarrativeMuted(app.runtime),
+          "choice did not restore effective 1x/audio while retaining selected turbo chip");
+  Require(Access::Handle(app.runtime, MouseMotion(640.0f, 540.0f)) &&
+              Access::Handle(app.runtime, LeftDown(640.0f, 540.0f)) &&
+              Access::Committed(app.runtime) && Access::EffectiveSpeed(app.runtime) == 1.0,
+          "choice selection did not keep 1x through the original 48-tick exit tail");
+  // Simulate the original scene-swap boundary without resetting the user's
+  // selected multiplier: a rewind to a new scene still restores that state.
+  Access::Seek(app.runtime, 0);
+  Require(!Access::ChoiceSpeedOverride(app.runtime) &&
+              Access::SelectedSpeed(app.runtime) == 4 &&
+              Access::EffectiveSpeed(app.runtime) == 24.0 &&
+              Access::NarrativeMuted(app.runtime),
+          "choice exit did not restore the originally selected fast-forward speed/audio");
+}
+
+void TestTurboCannotCrossChoiceWithLongFrame(const char *route, const fs::path &root) {
+  const auto documents = root / "documents-turbo-longframe";
+  fs::create_directories(documents);
+  auto assets = std::make_shared<SchoolDays::Assets>(root);
+  Application app(assets, route, documents);
+  using Access = SchoolDays::RuntimeChoiceTestAccess;
+  app.runtime.debugJumpToNode("00/00-00-A03");
+  Access::SetSpeed(app.runtime, 4);
+  // An oversized update used to seek straight across the entire 48..72
+  // SetSELECT. Its clamped boundary must be 48, not the authored timeout.
+  Access::AdvanceWithLongFrame(app.runtime, 2000u);
+  Require(Access::Pending(app.runtime) &&
+              Access::CurrentTick(app.runtime) == 48 &&
+              Access::EffectiveSpeed(app.runtime) == 1.0 &&
+              Access::SelectedSpeed(app.runtime) == 4,
+          "high speed or a long frame skipped over the first pending choice");
+}
+
+void TestTransportFadeBeforeSeek(const char *route, const fs::path &root) {
+  const auto documents = root / "documents-transport-fades";
+  fs::create_directories(documents);
+  auto assets = std::make_shared<SchoolDays::Assets>(root);
+  Application app(assets, route, documents);
+  using Access = SchoolDays::RuntimeChoiceTestAccess;
+  using Fade = Kotonoha::SchoolDaysTransportFade;
+  app.runtime.debugJumpToNode("00/00-00-A03");
+
+  const uint64_t skipAt = SDL_GetTicks();
+  Access::ClickTransport(app.runtime, false);
+  Require(Access::TransportPhase(app.runtime) == Fade::Phase::FadeOut &&
+              !Access::SeekPending(app.runtime),
+          "SkipToEnd jumped abruptly instead of starting the retail black fade");
+  Access::PumpTransport(app.runtime, skipAt + 250u);
+  Require(Access::TransportPhase(app.runtime) == Fade::Phase::FadeOut &&
+              Access::CurrentTick(app.runtime) == 0 &&
+              !Access::SeekPending(app.runtime),
+          "SkipToEnd moved before the 500ms outgoing fade finished");
+  Access::PumpTransport(app.runtime, skipAt + 550u);
+  Require(Access::TransportPhase(app.runtime) == Fade::Phase::AwaitReady &&
+              Access::SeekPending(app.runtime),
+          "SkipToEnd did not seek behind its opaque black frame");
+  app.runtime.update();
+  Require(Access::TransportPhase(app.runtime) == Fade::Phase::FadeIn &&
+              !Access::SeekPending(app.runtime) &&
+              Access::CurrentTick(app.runtime) >= 24,
+          "SkipToEnd did not reveal its fully resolved destination");
+  Access::PumpTransport(app.runtime, SDL_GetTicks() + 1500u);
+  Require(Access::TransportPhase(app.runtime) == Fade::Phase::Idle,
+          "SkipToEnd fade did not unlock the following transport action");
+
+  // Rewind uses the same state4 fade but targets the current scene start.
+  app.runtime.debugJumpToNode("00/00-00-A03");
+  Access::Seek(app.runtime, 24);
+  const uint64_t rewindAt = SDL_GetTicks();
+  Access::ClickTransport(app.runtime, true);
+  Require(Access::TransportPhase(app.runtime) == Fade::Phase::FadeOut &&
+              Access::CurrentTick(app.runtime) == 24,
+          "Rewind jumped to tick 0 before beginning its fade");
+  Access::PumpTransport(app.runtime, rewindAt + 550u);
+  Require(Access::TransportPhase(app.runtime) == Fade::Phase::AwaitReady &&
+              Access::SeekPending(app.runtime),
+          "Rewind did not navigate under the black frame");
+  app.runtime.update();
+  Require(Access::TransportPhase(app.runtime) == Fade::Phase::FadeIn &&
+              Access::CurrentTick(app.runtime) == 0,
+          "Rewind did not reveal the scene start after its seek settled");
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -321,6 +460,9 @@ int main(int argc, char **argv) {
     TestUnreadStopSkipOff(argv[1], temporary.path);
     TestRetailChoiceSelectedTail(argv[1], temporary.path);
     TestRetailChoiceTimeoutTail(argv[1], temporary.path);
+    TestTurboStopsAtChoiceAndRestores(argv[1], temporary.path);
+    TestTurboCannotCrossChoiceWithLongFrame(argv[1], temporary.path);
+    TestTransportFadeBeforeSeek(argv[1], temporary.path);
     std::cout << "SchoolDaysNextChoiceRuntimeTest PASS\n";
     return 0;
   } catch (const std::exception &error) {

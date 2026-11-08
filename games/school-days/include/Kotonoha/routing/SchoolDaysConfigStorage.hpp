@@ -40,10 +40,12 @@ public:
                     std::string* error = nullptr);
 
     // DisplayType and TypeMiniNote have authenticated native config writers.
-    // WindowMode is deliberately absent: static v1.02 evidence has a reader but
-    // no writer for that key, so Full remains session-only at this boundary.
+    // v1.02 has a WindowMode reader but no authenticated writer. The remaster
+    // explicitly writes W only when the user changes Window Size/physical
+    // mode, so that the two controls stay synchronized across launches.
     bool CacheDisplayType(int value, std::string* error = nullptr);
     bool CacheTypeMiniNote(int value, std::string* error = nullptr);
+    bool CacheWindowMode(int value, std::string* error = nullptr);
 
     // Writes DFLT + zlib only when the cache is dirty.  Unknown/malformed lines
     // from a loaded document are preserved in order.

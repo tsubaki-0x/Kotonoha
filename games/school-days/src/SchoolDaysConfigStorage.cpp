@@ -360,6 +360,13 @@ bool SchoolDaysConfigStorage::CacheTypeMiniNote(int value,
     return SetKeyValue("TypeMiniNote", std::to_string(value), error);
 }
 
+bool SchoolDaysConfigStorage::CacheWindowMode(int value, std::string* error) {
+    if (error != nullptr) error->clear();
+    if (value != 0 && value != 1)
+        return Fail(error, "Config.DAT WindowMode must be 0 or 1");
+    return SetKeyValue("WindowMode", std::to_string(value), error);
+}
+
 bool SchoolDaysConfigStorage::SerializeLogical(std::string* out,
                                                std::string* error) const {
     if (out == nullptr || !loaded_) return Fail(error, "Config.DAT cache is not loaded");

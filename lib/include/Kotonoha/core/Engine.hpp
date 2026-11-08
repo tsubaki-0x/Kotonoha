@@ -39,6 +39,8 @@ struct EngineOptions {
   std::string assetOverlayDirectory() const;
   bool enableMCP = false;
   std::string mcpFileRoot = ".";
+  // Zero selects stdio; a nonzero port enables loopback TCP MCP instead.
+  unsigned short mcpPort = 0;
   EngineSettings settings;
   std::string settingsPath;
   bool persistSettings = false;

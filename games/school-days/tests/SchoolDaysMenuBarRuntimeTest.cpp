@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -55,6 +56,113 @@ struct Application {
   ~Application() { runtime.shutdown(); }
 };
 
+void CheckMeterSfxHostCodes(Application &app, const fs::path &scratchRoot) {
+  // The meter presenter only loads the two PNG textures on Open; synthetic
+  // tiny, valid RGBA PNGs suffice to test the actual update/consume boundary
+  // without retail packs, GUI clicks or write access to user profiles.
+  constexpr unsigned char kTwoPixelPng[] = {
+      0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,0x00,0x00,0x00,0x0d,
+      0x49,0x48,0x44,0x52,0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x02,
+      0x08,0x06,0x00,0x00,0x00,0x72,0xb6,0x0d,0x24,0x00,0x00,0x00,
+      0x15,0x49,0x44,0x41,0x54,0x78,0x9c,0x63,0xfc,0xff,0xff,0xff,
+      0x7f,0x06,0x06,0x06,0x06,0x26,0x06,0x28,0x00,0x00,0x3d,0xf8,
+      0x04,0x00,0xda,0x3b,0x2a,0x9c,0x00,0x00,0x00,0x00,0x49,0x45,
+      0x4e,0x44,0xae,0x42,0x60,0x82};
+  const fs::path pictureRoot = scratchRoot / "meter-sfx";
+  const fs::path pictureDir = pictureRoot / "System" / "MenuBar";
+  fs::create_directories(pictureDir);
+  // The extracted-assets provider requires a Script/English root even when
+  // this small test only exercises the MenuBar art. No scripts are executed.
+  fs::create_directories(pictureRoot / "Script" / "English");
+  for (const char *name : {"MenuBar.png", "MenuBar_Chip.png"}) {
+    std::ofstream out(pictureDir / name, std::ios::binary);
+    out.write(reinterpret_cast<const char *>(kTwoPixelPng), sizeof(kTwoPixelPng));
+    Check(static_cast<bool>(out), "could not create isolated meter PNG fixture");
+  }
+  auto sprites = std::make_shared<SchoolDays::Assets>(pictureRoot);
+  Kotonoha::SchoolDaysMenuBarPresenter meter;
+  std::string error;
+  using Variant = Kotonoha::SchoolDaysMenuBarPresenter::Variant;
+  const auto open = [&](int one, int two) {
+    error.clear();
+    Check(meter.Open(&app.engine.GetRenderer(), sprites.get(),
+                     pictureRoot.string(), Variant::WideFull, one, two,
+                     &error), "meter fixture failed to open: " + error);
+    Check(meter.ConsumeFeelingDirectionCode() == 0,
+          "opening meter synthesized a post-choice musical cue");
+  };
+
+  open(10, 20);
+  meter.RequestFeelingRefresh();
+  meter.Update(100, 11, 20); // capture does not yet produce a sound
+  Check(meter.ConsumeFeelingDirectionCode() == 0,
+        "meter played the post-choice cue before detection");
+  meter.Update(101, 11, 20); // first changed value 001 increased
+  Check(meter.ConsumeFeelingDirectionCode() == 3 &&
+            meter.ConsumeFeelingDirectionCode() == 0,
+        "increased feeling did not produce exactly one SeUp host code");
+  meter.Update(102, 11, 20);
+  Check(meter.ConsumeFeelingDirectionCode() == 0,
+        "interpolation repeated the SeUp cue without a new detection");
+
+  open(11, 20);
+  meter.RequestFeelingRefresh();
+  meter.Update(200, 11, 19);
+  meter.Update(201, 11, 19);
+  Check(meter.ConsumeFeelingDirectionCode() == 4 &&
+            meter.ConsumeFeelingDirectionCode() == 0,
+        "decreased 002 feeling did not dispatch SeDown once");
+
+  open(5, 10);
+  meter.RequestFeelingRefresh();
+  meter.Update(300, 6, 9);
+  meter.Update(301, 6, 9);
+  Check(meter.ConsumeFeelingDirectionCode() == 3,
+        "simultaneous opposite-sign changes did not prefer 001 for SeUp");
+
+  open(20, 20);
+  meter.RequestFeelingRefresh();
+  meter.Update(400, 20, 20);
+  meter.Update(401, 20, 20);
+  Check(meter.ConsumeFeelingDirectionCode() == 0,
+        "unchanged feelings incorrectly triggered the musical cue");
+
+  // A late-game save may validly saturate the green bar. Loading another
+  // (neutral) save without exiting must replace its visual presentation even
+  // though no normal KTRF writer notification is raised by SaveFile restore.
+  open(-200, 200);
+  Check(meter.Meter().CurrentVisual().primary == -1000.0f &&
+            meter.Meter().CurrentVisual().opposite == 1000.0f,
+        "saturated ending save fixture did not initialize the original meter");
+  meter.RequestFeelingRefresh();
+  meter.Update(500, -199, 200);
+  meter.Update(501, -199, 200);
+  Check(meter.ConsumeFeelingDirectionCode() == 3,
+        "meter fixture could not enter changed feeling state");
+  meter.RequestFeelingRefresh();
+  meter.Update(502, -198, 200);
+  meter.RestoreFeelingState(20, 20);
+  Check(meter.IsOpen() && meter.Meter().CurrentVisual().primary == 0.0f &&
+            meter.Meter().CurrentVisual().opposite == 0.0f &&
+            meter.Meter().CurrentPhase() ==
+                Kotonoha::SchoolDaysTopMeterModel::Phase::Capture &&
+            !meter.FeelingLatch() && meter.ConsumeFeelingDirectionCode() == 0,
+        "LOAD inherited the previous ending's saturated bar or pending cue");
+  meter.Update(503, 20, 20);
+  Check(meter.Meter().CurrentVisual().primary == 0.0f &&
+            meter.ConsumeFeelingDirectionCode() == 0,
+        "LOAD's next frame re-applied stale ending feelings");
+  meter.RestoreFeelingState(120, 0);
+  Check(meter.Meter().CurrentVisual().primary == 300.0f &&
+            meter.Meter().CurrentVisual().opposite == -300.0f,
+        "loading another valid high-feeling save improperly normalized values");
+  meter.RestoreFeelingState(0, 0);
+  Check(meter.Meter().CurrentVisual().primary == 0.0f &&
+            meter.ConsumeFeelingDirectionCode() == 0,
+        "starting normal gameplay after a final inherited stale meter state");
+  meter.Close();
+}
+
 } // namespace
 
 namespace SchoolDays {
@@ -73,6 +181,18 @@ public:
 
   static double Speed(const Runtime &runtime) { return runtime.speed; }
   static int SpeedIndex(const Runtime &runtime) { return runtime.speedIndex; }
+  static bool StoryAudioSuppressed(Runtime &runtime) {
+    if (!runtime.engine) return false;
+    for (const char *channel : {"BGM", "Voice", "SE", "Movie"})
+      if (!runtime.engine->GetAudio().channel(channel)->isMuted()) return false;
+    return true;
+  }
+  static bool StoryAudioEnabled(Runtime &runtime) {
+    if (!runtime.engine) return false;
+    for (const char *channel : {"BGM", "Voice", "SE", "Movie"})
+      if (runtime.engine->GetAudio().channel(channel)->isMuted()) return false;
+    return true;
+  }
   static bool Paused(const Runtime &runtime) { return runtime.paused; }
   static bool ConfigDirty(const Runtime &runtime) {
     return runtime.configStorage.IsDirty();
@@ -143,6 +263,8 @@ int main(int argc, char **argv) {
       Check(!app.runtime.retailConfig().autoMode,
             "default AutoMode is unexpectedly enabled");
 
+      CheckMeterSfxHostCodes(app, temporary.path);
+
       Access::Apply(app.runtime, Kind::ToggleAutoMode);
       Check(app.runtime.retailConfig().autoMode,
             "MenuBar Auto did not update retail config state");
@@ -160,6 +282,9 @@ int main(int argc, char **argv) {
         Check(Access::SpeedIndex(app.runtime) == index &&
                   Near(Access::Speed(app.runtime), expected[index]),
               "MenuBar playback-speed mapping drifted");
+        Check(index <= 2 ? Access::StoryAudioEnabled(app.runtime)
+                         : Access::StoryAudioSuppressed(app.runtime),
+              "Narrative audio must mute above internal rate 4 while maintaining media clock");
       }
 
       const double before = Access::Speed(app.runtime);

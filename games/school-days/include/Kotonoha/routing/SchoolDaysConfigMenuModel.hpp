@@ -37,6 +37,9 @@ public:
         SetMenVoice,
         SetMute,
         SetSoundLevel,
+        // Custom Display Options CHIP controls 4..21. The host applies the
+        // requested setting; the CMAP model only reports the control ID.
+        DisplayControl,
     };
 
     struct Action {

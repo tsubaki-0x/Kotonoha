@@ -1,6 +1,7 @@
 #include <Kotonoha/SchoolDaysAssetMount.hpp>
 #include <Kotonoha/SchoolDaysImageAssetResolver.hpp>
 #include <Kotonoha/core/AssetProvider.hpp>
+#include <Kotonoha/routing/SchoolDaysLxhContent.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -19,6 +20,7 @@ namespace {
 
 std::mutex gMountMutex;
 std::shared_ptr<const SchoolDaysGpkAssetStore> gMount;
+std::shared_ptr<const SchoolDaysGpkArchive> gIntegratedLxh;
 std::shared_ptr<const AssetOverlay> gOverlay;
 
 std::shared_ptr<const SchoolDaysGpkAssetStore> CurrentMount() {
@@ -26,8 +28,13 @@ std::shared_ptr<const SchoolDaysGpkAssetStore> CurrentMount() {
   return gMount;
 }
 
+std::shared_ptr<const SchoolDaysGpkArchive> CurrentIntegratedLxh() {
+  std::lock_guard<std::mutex> guard(gMountMutex);
+  return gIntegratedLxh;
+}
+
 class MountedRawAssetStream final : public AssetStream {
-    std::shared_ptr<const SchoolDaysGpkAssetStore> mount_;
+    std::shared_ptr<const void> mount_;
     std::ifstream file_;
     std::vector<uint8_t> prefix_;
     uint64_t bodyOffset_ = 0u;
@@ -35,7 +42,7 @@ class MountedRawAssetStream final : public AssetStream {
     uint64_t position_ = 0u;
 
 public:
-    MountedRawAssetStream(std::shared_ptr<const SchoolDaysGpkAssetStore> mount,
+    MountedRawAssetStream(std::shared_ptr<const void> mount,
                           const std::filesystem::path& path,
                           std::vector<uint8_t> prefix, uint64_t bodyOffset,
                           uint64_t logicalSize)
@@ -127,10 +134,29 @@ bool Fail(std::string *error, const char *text) {
   return false;
 }
 
+bool Fail(std::string *error, const std::string &text) {
+  if (error != nullptr) *error = text;
+  return false;
+}
+
 SchoolDaysAssetResolutionStatus
 MountedResolverLookup(const std::string &logicalPath, std::string *reference) {
   if (reference != nullptr)
     reference->clear();
+  // These authored paths belong exclusively to Packs/LxH.GPK; never a
+  // leftover loose overlay or an original commercial archive.
+  if (SchoolDaysLxhContent::IsPackResource(logicalPath)) {
+    const auto status = LookupMountedSchoolDaysAsset(logicalPath);
+    if (status == SchoolDaysGpkLookupStatus::Present && reference != nullptr)
+      *reference = MakeSchoolDaysGpkUri(CanonicalGpkLogical(logicalPath));
+    return status == SchoolDaysGpkLookupStatus::Present
+               ? SchoolDaysAssetResolutionStatus::Present
+               : status == SchoolDaysGpkLookupStatus::Collision
+                     ? SchoolDaysAssetResolutionStatus::Collision
+                     : status == SchoolDaysGpkLookupStatus::Invalid
+                           ? SchoolDaysAssetResolutionStatus::Invalid
+                           : SchoolDaysAssetResolutionStatus::Missing;
+  }
   std::string physical;
   if (ResolveSchoolDaysOverlayFile(logicalPath, &physical)) {
     if (reference != nullptr)
@@ -175,11 +201,20 @@ bool MountedResolverListDirectory(const std::string &directoryReference,
   if (!SchoolDaysLogicalFromGpkUri(directoryReference, &logical))
     return Fail(error, "School Days GPK directory reference is invalid");
   const auto mount = CurrentMount();
-  if (mount == nullptr)
-    return Fail(error, "School Days retail GPKs are not mounted");
+  const auto integrated = CurrentIntegratedLxh();
+  if (mount == nullptr || integrated == nullptr)
+    return Fail(error, "School Days integrated GPK set is not mounted");
   std::vector<std::string> logicalChildren;
   const auto status = mount->ListDirectory(logical, &logicalChildren);
-  if (status != SchoolDaysGpkLookupStatus::Present) {
+  std::vector<std::string> integratedChildren;
+  const auto integratedStatus = integrated->ListDirectory(logical, &integratedChildren);
+  if (status == SchoolDaysGpkLookupStatus::Collision ||
+      status == SchoolDaysGpkLookupStatus::Invalid ||
+      integratedStatus == SchoolDaysGpkLookupStatus::Collision ||
+      integratedStatus == SchoolDaysGpkLookupStatus::Invalid)
+    return Fail(error, "School Days GPK directory path is invalid or ambiguous");
+  if (status != SchoolDaysGpkLookupStatus::Present &&
+      integratedStatus != SchoolDaysGpkLookupStatus::Present) {
     if (error != nullptr) {
       switch (status) {
       case SchoolDaysGpkLookupStatus::Missing:
@@ -194,6 +229,13 @@ bool MountedResolverListDirectory(const std::string &directoryReference,
       }
     }
     return false;
+  }
+  if (integratedStatus == SchoolDaysGpkLookupStatus::Present) {
+    logicalChildren.insert(logicalChildren.end(), integratedChildren.begin(),
+                           integratedChildren.end());
+    std::sort(logicalChildren.begin(), logicalChildren.end());
+    logicalChildren.erase(std::unique(logicalChildren.begin(), logicalChildren.end()),
+                          logicalChildren.end());
   }
   children->reserve(logicalChildren.size());
   for (const auto &child : logicalChildren)
@@ -248,9 +290,28 @@ bool MountSchoolDaysRetailGpks(const std::filesystem::path &gameOrPacksRoot,
   auto candidate = std::make_shared<SchoolDaysGpkAssetStore>();
   if (!candidate->OpenRetailDirectory(packs, error))
     return false;
+  auto integrated = std::make_shared<SchoolDaysGpkArchive>();
+  std::string integratedError;
+  if (!integrated->Open(packs / "LxH.GPK", &integratedError))
+    return Fail(error, std::string("Mandatory integrated LxH.GPK missing or invalid: ") +
+                           integratedError);
+  const auto expected = SchoolDaysLxhContent::PackEntries();
+  if (integrated->EntryCount() != expected.size())
+    return Fail(error, "Integrated LxH.GPK must contain exactly 28 files");
+  for (const auto& logical : expected) {
+    size_t entryIndex = 0;
+    if (integrated->Lookup(logical, &entryIndex) != SchoolDaysGpkLookupStatus::Present ||
+        entryIndex >= integrated->Index().Entries().size())
+      return Fail(error, "Integrated LxH.GPK missing or ambiguous file: " + logical);
+    const auto& entry = integrated->Index().Entries()[entryIndex];
+    if (!entry.IsRaw() || entry.uncompressedLength != entry.storedLength ||
+        entry.storedLength == 0u)
+      return Fail(error, "Integrated LxH.GPK must use non-empty seekable raw entry: " + logical);
+  }
   {
     std::lock_guard<std::mutex> guard(gMountMutex);
     gMount = std::move(candidate);
+    gIntegratedLxh = std::move(integrated);
   }
   return true;
 }
@@ -272,6 +333,12 @@ bool SchoolDaysAssetOverlaySet() {
 }
 bool ResolveSchoolDaysOverlayFile(std::string_view logical,
                                   std::string *physical) {
+  // Keep all integrated epilogues in the extra GPK, even when a historical
+  // display-options overlay still contains loose copies of those 28 files.
+  // Only the packaged installation is authoritative. Extracted developer
+  // fixtures can still supply synthetic grafts through a loose overlay.
+  if (CurrentIntegratedLxh() && SchoolDaysLxhContent::IsPackResource(logical))
+    return false;
   auto overlay = CurrentOverlay();
   if (!overlay)
     return false;
@@ -307,6 +374,7 @@ bool ResolveSchoolDaysOverlayFile(std::string_view logical,
 void UnmountSchoolDaysRetailGpks() {
   std::lock_guard<std::mutex> guard(gMountMutex);
   gMount.reset();
+  gIntegratedLxh.reset();
 }
 
 void InstallMountedSchoolDaysAssetResolver() {
@@ -325,16 +393,25 @@ void UninstallMountedSchoolDaysAssetResolver() {
 
 bool SchoolDaysRetailGpksMounted() {
   const auto mount = CurrentMount();
-  return mount != nullptr && mount->IsOpen();
+  const auto integrated = CurrentIntegratedLxh();
+  return mount != nullptr && mount->IsOpen() && integrated != nullptr &&
+         integrated->IsOpen();
 }
 
 size_t MountedSchoolDaysGpkEntryCount() {
   const auto mount = CurrentMount();
-  return mount != nullptr ? mount->EntryCount() : 0u;
+  const auto integrated = CurrentIntegratedLxh();
+  return mount != nullptr && integrated != nullptr
+             ? mount->EntryCount() + integrated->EntryCount() : 0u;
 }
 
 SchoolDaysGpkLookupStatus
 LookupMountedSchoolDaysAsset(std::string_view logicalPath) {
+  if (SchoolDaysLxhContent::IsPackResource(logicalPath)) {
+    const auto integrated = CurrentIntegratedLxh();
+    return integrated ? integrated->Lookup(CanonicalGpkLogical(logicalPath))
+                      : SchoolDaysGpkLookupStatus::Missing;
+  }
   if (ResolveSchoolDaysOverlayFile(logicalPath, nullptr))
     return SchoolDaysGpkLookupStatus::Present;
   const auto mount = CurrentMount();
@@ -344,6 +421,11 @@ LookupMountedSchoolDaysAsset(std::string_view logicalPath) {
 
 bool ReadMountedSchoolDaysAsset(std::string_view logicalPath,
                                 std::vector<uint8_t> *out, std::string *error) {
+  if (SchoolDaysLxhContent::IsPackResource(logicalPath)) {
+    const auto integrated = CurrentIntegratedLxh();
+    return integrated ? integrated->Read(CanonicalGpkLogical(logicalPath), out, error)
+                      : Fail(error, "Mandatory integrated LxH.GPK not mounted");
+  }
   std::string physical;
   if (ResolveSchoolDaysOverlayFile(logicalPath, &physical))
     return ReadFilesystem(physical, out, error);
@@ -355,6 +437,22 @@ bool ReadMountedSchoolDaysAsset(std::string_view logicalPath,
 
 std::unique_ptr<AssetStream> OpenMountedSchoolDaysAssetStream(
     std::string_view logicalPath) {
+    if (SchoolDaysLxhContent::IsPackResource(logicalPath)) {
+      const auto integrated = CurrentIntegratedLxh();
+      if (integrated == nullptr) return {};
+      size_t idx = 0;
+      if (integrated->Lookup(CanonicalGpkLogical(logicalPath), &idx) !=
+              SchoolDaysGpkLookupStatus::Present ||
+          idx >= integrated->Index().Entries().size()) return {};
+      const auto& entry = integrated->Index().Entries()[idx];
+      if (!entry.IsRaw() || static_cast<uint64_t>(entry.offset) +
+              entry.PhysicalBodyLength() > integrated->PidxOffset()) return {};
+      try {
+        return std::make_unique<MountedRawAssetStream>(
+            integrated, integrated->Path(), entry.inlinePrefix, entry.offset,
+            static_cast<uint64_t>(entry.storedLength));
+      } catch (...) { return {}; }
+    }
     if (ResolveSchoolDaysOverlayFile(logicalPath, nullptr)) return {};
     const auto mount = CurrentMount();
     if (mount == nullptr) return {};

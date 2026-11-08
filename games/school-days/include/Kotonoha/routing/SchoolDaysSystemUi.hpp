@@ -156,6 +156,14 @@ public:
     bool Render(SDL_Renderer* renderer, std::string* error = nullptr);
     // Logical size events and rendering use (defaults to 1280x720).
     void SetArea(SDL_Point area) { area_ = area; }
+    // In FULL+STANDARD, stretch the 800x600 authored host canvas across the
+    // physical presentation: its opaque 800x450 image still occupies only the
+    // centered 75% height, leaving black bars like the original screenshot.
+    // This affects only Config, not the engine-wide SettingsMenu or other
+    // School Days panels; CMAP hit-testing uses the identical transform.
+    void SetConfigStandardFullscreenStretch(bool enabled) {
+        configStandardFullscreenStretch_ = enabled;
+    }
     void SetAssetProvider(const AssetProvider* assets) { assets_ = assets; }
     bool IsOpen() const {
         return saveFeel_.IsOpen() || saveLoad_.IsOpen() || configMenu_.IsOpen() ||
@@ -187,10 +195,13 @@ private:
         float x = 0.0f;
         float y = 0.0f;
         float scale = 1.0f;
+        float scaleY = 1.0f;
     };
 
     static Viewport ComputeViewport(int outputWidth, int outputHeight,
                                     int virtualWidth, int virtualHeight);
+    Viewport ComputeConfigViewport(int outputWidth, int outputHeight,
+                                   int virtualWidth, int virtualHeight) const;
     bool PointerToVirtual(SDL_Renderer* renderer, float x, float y,
                           int* virtualX, int* virtualY) const;
     static SDL_FRect TransformRect(const SDL_FRect& native,
@@ -222,6 +233,7 @@ private:
     SDL_Texture* chipTexture_ = nullptr;
     const AssetProvider* assets_ = nullptr;
     SDL_Point area_{1280, 720};
+    bool configStandardFullscreenStretch_ = false;
     SDL_Texture* saveLoadTextTexture_ = nullptr;
     SDL_Texture* saveLoadCommentTextTexture_ = nullptr;
     SDL_Texture* routeMapTextTexture_ = nullptr;

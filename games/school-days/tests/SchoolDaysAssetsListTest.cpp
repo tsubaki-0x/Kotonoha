@@ -52,9 +52,12 @@ bool fakeList(const std::string &reference, std::vector<std::string> *children,
 
 int main() {
   const fs::path root = fs::temp_directory_path() / "kotonoha-school-days-list-test";
+  const fs::path external =
+      fs::temp_directory_path() / "kotonoha-school-days-external-lxh-test";
   try {
     std::error_code ec;
     fs::remove_all(root, ec);
+    fs::remove_all(external, ec);
     put(root / "Script/English/00/00-00-A00.ENG.ORS");
     put(root / "Event00/Scene/face.png");
     put(root / "Event00/Scene/nested/mouth.png");
@@ -76,6 +79,17 @@ int main() {
                 fs::path(loose[1]) == root / "Event00" / "Scene" / "nested" / "mouth.png",
             "loose enumeration did not preserve readable physical references");
 
+    // LxH resources may live in a private overlay outside the licensed GPK
+    // folder. An absolute prefix must enumerate that folder, not the retail
+    // directory or one of its unrelated backups.
+    put(external / "LxH/Media/05-A2-F00-LXH.wmv");
+    const auto externalMedia = assets.listAsset(
+        (external / "LxH/Media/").string());
+    require(externalMedia.size() == 1u &&
+                fs::path(externalMedia.front()) ==
+                    external / "LxH/Media/05-A2-F00-LXH.wmv",
+            "absolute external LxH media enumeration did not use overlay root");
+
     Kotonoha::InstallSchoolDaysVirtualAssetIo(&fakeIsReference, &fakeRead, &fakeList);
     const auto packed = assets.listAsset("sdgpk://Event00/Scene/");
     Kotonoha::InstallSchoolDaysVirtualAssetIo(nullptr, nullptr, nullptr);
@@ -84,13 +98,52 @@ int main() {
                           "sdgpk://Event00/Scene/nested/mouth.png"},
             "GPK directory-reference enumeration drifted");
 
+    // The user's revised General and Sound artwork has the exact four retail
+    // logical names, but must be read from the standalone display-options
+    // overlay instead of the original System.GPK (or loose retail copies).
+    // The original four CMAPs intentionally remain in their existing mount.
+    const fs::path optionOverlay = root / "external-display-options";
+    const std::vector<std::string> optionArtwork{
+        "Option_Def.png", "Option_Def_Chip.png",
+        "Option_Sound.png", "Option_Sound_Chip.png"};
+    for (const auto &name : optionArtwork) {
+      put(root / "System/Option" / name);
+      put(optionOverlay / "System/Option" / name);
+    }
+    std::string overlayError;
+    require(Kotonoha::SetSchoolDaysAssetOverlay(optionOverlay, &overlayError),
+            "external option overlay could not be mounted");
+    Kotonoha::InstallMountedSchoolDaysAssetResolver();
+    for (const auto &name : optionArtwork) {
+      const auto logical = "System/Option/" + name;
+      const auto replacement =
+          Kotonoha::ResolveSchoolDaysAssetPath(root.string().c_str(), logical);
+      require(replacement.present && !replacement.collision &&
+                  fs::path(replacement.physical) == optionOverlay / "System/Option" / name,
+              "General/Sound PNG did not resolve to the external override");
+    }
+    Kotonoha::UninstallMountedSchoolDaysAssetResolver();
+    require(Kotonoha::SetSchoolDaysAssetOverlay({}, &overlayError),
+            "option overlay could not be unmounted");
+    for (const auto &name : optionArtwork) {
+      const auto fallback = Kotonoha::ResolveSchoolDaysAssetPath(
+          root.string().c_str(), "System/Option/" + name);
+      require(fallback.present &&
+                  fs::path(fallback.physical) == root / "System/Option" / name,
+              "removing the overlay did not restore the original asset path");
+    }
+
     fs::remove_all(root, ec);
+    fs::remove_all(external, ec);
     std::cout << "SchoolDaysAssetsListTest PASS\n";
     return 0;
   } catch (const std::exception &error) {
     Kotonoha::InstallSchoolDaysVirtualAssetIo(nullptr, nullptr, nullptr);
+    Kotonoha::UninstallMountedSchoolDaysAssetResolver();
+    (void)Kotonoha::SetSchoolDaysAssetOverlay({});
     std::error_code ec;
     fs::remove_all(root, ec);
+    fs::remove_all(external, ec);
     std::cerr << "SchoolDaysAssetsListTest FAIL: " << error.what() << '\n';
     return 1;
   }

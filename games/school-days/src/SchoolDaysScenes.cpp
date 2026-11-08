@@ -1,4 +1,7 @@
 #include "SchoolDaysScenes.hpp"
+#include "SchoolDaysChineseFont.hpp"
+#include <Kotonoha/routing/SchoolDaysDisplayNarrativeMarkup.hpp>
+#include <Kotonoha/routing/SchoolDaysTranslationCoverage.hpp>
 #include "SchoolDaysRuntime.hpp"
 #include <Kotonoha/core/Engine.hpp>
 #include <Kotonoha/core/FileSystem.hpp>
@@ -119,17 +122,72 @@ std::string Subtitles::displayCueText(const std::string &text) const {
   return text;
 }
 
-void Subtitles::bind(const Kotonoha_orsData &script) {
-  std::vector<Kotonoha::SubtitleCue> cues;
-  for (auto *event = script.data; event; event = event->next)
+void Subtitles::bind(const Kotonoha_orsData &script, int nodeId,
+                     const Kotonoha::Translation *dlc,
+                     std::optional<std::size_t> lxhFirstEvent,
+                     std::string locale) {
+  nodeId_ = nodeId;
+  dlcDictionary_ = dlc;
+  lxhFirstEvent_ = lxhFirstEvent;
+  locale_ = std::move(locale);
+  originalCues_.clear();
+  cueOrdinals_.clear();
+  std::size_t ordinal = 0;
+  for (auto *event = script.data; event; event = event->next, ++ordinal)
     if (event->command == PRINT_TEXT && event->data.print_text &&
         event->data.print_text->text && event->endTick > event->startTick) {
       const auto &text = *event->data.print_text;
-      cues.push_back({event->startTick / 24.0, event->endTick / 24.0,
-          text.text, text.character ? text.character : "", true});
+      originalCues_.push_back({event->startTick / 24.0, event->endTick / 24.0,
+          text.text,
+          // Keep the canonical speaker tag. ASS colors are keyed by this
+          // exact identifier, independent of any language JSON selected.
+          text.character ? text.character : "", true});
+      cueOrdinals_.push_back(ordinal);
     }
-  setCues(cues, 46);
+  refreshLocalizedCues();
   setPosition(0);
+}
+
+std::vector<Kotonoha::SubtitleCue> Subtitles::TranslateCues(
+    const std::vector<Kotonoha::SubtitleCue> &original,
+    const std::vector<std::size_t> &ordinals, int nodeId,
+    const Kotonoha::Translation &dictionary,
+    const Kotonoha::Translation *dlc,
+    std::optional<std::size_t> lxhFirstEvent,
+    std::string_view locale) {
+  if (original.size() != ordinals.size())
+    throw std::invalid_argument("School Days subtitle event ordinals mismatch");
+  auto localized = original;
+  const Kotonoha::Translation empty;
+  for (std::size_t i = 0; i < localized.size(); ++i) {
+    auto &cue = localized[i];
+    const auto source = cue.text;
+    const bool epilogue = lxhFirstEvent && ordinals[i] >= *lxhFirstEvent;
+    cue.text = Kotonoha::SchoolDaysTranslationGate::TranslateLayered(
+        dictionary, dlc ? *dlc : empty, nodeId, ordinals[i], 0, cue.text,
+        epilogue);
+    if (epilogue && Kotonoha::SchoolDaysDisplayNarrativeMarkup::SuppressLxhCredit(
+                        source, cue.text, locale))
+      cue.text = "\xE2\x80\x8B";
+  }
+  return localized;
+}
+
+void Subtitles::refreshLocalizedCues() {
+  auto localized = TranslateCues(originalCues_, cueOrdinals_, nodeId_,
+                                engine.GetTranslation(), dlcDictionary_,
+                                lxhFirstEvent_, locale_);
+  for (auto &cue : localized)
+    cue.text = Kotonoha::SchoolDaysDisplayNarrativeMarkup::Project(cue.text);
+  // Do not pass speaker labels through Translation::text. A live JSON edit
+  // translating "Sekai" must never override the original ASS Sekai color.
+  setCues(localized, 46);
+}
+
+void Subtitles::translationChanged(const std::string &,
+                                   const std::string &,
+                                   const std::string &) {
+  if (!originalCues_.empty()) refreshLocalizedCues();
 }
 
 GameScene::GameScene(Kotonoha::Engine &engine, Runtime &runtime)
@@ -141,7 +199,10 @@ GameScene::GameScene(Kotonoha::Engine &engine, Runtime &runtime)
     choiceFont.reset(TTF_OpenFont(
         fontPath.string().c_str(),
         Kotonoha::SchoolDaysSubtitleTypography::PointSize));
-    if (!choiceFont)
+    if (choiceFont)
+      choiceChineseFallback =
+          Kotonoha::AttachSchoolDaysChineseFallback(choiceFont.get());
+    else
       SDL_LogWarn(Kotonoha::LogUI, "School Days choice font unavailable: %s",
                   SDL_GetError());
   } catch (const std::exception &error) {
@@ -187,11 +248,43 @@ bool GameScene::ensureMenuBar() {
   return true;
 }
 
+void GameScene::restoreMenuBarFeelingState() {
+  // A whole-session restore already supplies the final feeling values. An
+  // outstanding writer latch from the abandoned scene must not animate them
+  // again or emit a false SeUp/SeDown when the next MenuBar frame is updated.
+  (void)runtime.bridge.Session().ConsumeTopMeterRefreshRequest();
+  if (!menuBar.IsOpen()) {
+    // Even an earlier failed Open must be retryable in the new save context.
+    menuBarAttempted = false;
+    return;
+  }
+  int64_t feeling001 = 0;
+  int64_t feeling002 = 0;
+  Kotonoha_KtrfError stateError{};
+  if (!runtime.bridge.Session().State().ReadSessionInt("001", &feeling001, &stateError) ||
+      !runtime.bridge.Session().State().ReadSessionInt("002", &feeling002, &stateError) ||
+      feeling001 < std::numeric_limits<int>::min() ||
+      feeling001 > std::numeric_limits<int>::max() ||
+      feeling002 < std::numeric_limits<int>::min() ||
+      feeling002 > std::numeric_limits<int>::max()) {
+    SDL_LogWarn(Kotonoha::LogUI,
+                "School Days feeling state unavailable after LOAD: %s",
+                stateError.message);
+    menuBar.Close();
+    menuBarAttempted = false;
+    return;
+  }
+  menuBar.RestoreFeelingState(static_cast<int>(feeling001),
+                              static_cast<int>(feeling002));
+}
+
 void GameScene::syncChoice() {
   if (runtime.choice != lastChoice) {
     lastChoice = runtime.choice;
     choiceScratch.reset();
     choiceScratchEvent = nullptr;
+    choiceScratchSlots.clear();
+    choiceScratchTexts.clear();
   }
 }
 std::vector<int> GameScene::choices() const {
@@ -220,9 +313,28 @@ bool GameScene::normalizedPointer(float windowX, float windowY, float *x,
 
 bool GameScene::ensureChoiceScratch(Kotonoha::RendererRef renderer,
                                     const std::vector<int> &visible) {
-  if (choiceScratch && choiceScratchEvent == runtime.choice) return true;
+  if (!runtime.choice) return false;
+  std::vector<std::string> localizedTexts;
+  localizedTexts.reserve(visible.size());
+  const auto &translation = engine.GetTranslation();
+  const std::size_t ordinal = translation.getSections().empty() &&
+                              !runtime.lxhFirstTranslationEvent
+      ? 0 : Kotonoha::SchoolDaysTranslationGate::EventOrdinal(
+                runtime.script, runtime.choice);
+  for (const int index : visible) {
+    const char *original = runtime.choice->data.set_select->options[index];
+    localizedTexts.push_back(runtime.translateText(
+        ordinal, static_cast<std::size_t>(index), original ? original : ""));
+  }
+  // Rebuild the atlas when changing the JSON in the live editor or when
+  // visible choices change, even if the ORS event pointer stays the same.
+  if (choiceScratch && choiceScratchEvent == runtime.choice &&
+      choiceScratchSlots == visible && choiceScratchTexts == localizedTexts)
+    return true;
   choiceScratch.reset();
   choiceScratchEvent = nullptr;
+  choiceScratchSlots.clear();
+  choiceScratchTexts.clear();
   if (!choiceFont || runtime.choice == nullptr || visible.empty() ||
       visible.size() > 2u)
     return false;
@@ -233,14 +345,14 @@ bool GameScene::ensureChoiceScratch(Kotonoha::RendererRef renderer,
 
   using Plan = Kotonoha::SchoolDaysChoiceTextPlan;
   for (std::size_t slot = 0; slot < visible.size(); ++slot) {
-    const char *raw = runtime.choice->data.set_select->options[visible[slot]];
-    const auto lines = Plan::WrapRetailEnglish(Utf8ToUtf16(raw ? raw : ""));
+    const auto lines = Plan::WrapRetailEnglish(Utf8ToUtf16(localizedTexts[slot]));
     if (lines.size() > 5u) return false;
     for (std::size_t lineIndex = 0; lineIndex < lines.size(); ++lineIndex) {
       const std::string utf8 = Utf16ToUtf8(lines[lineIndex].text);
       if (utf8.empty()) continue;
       Kotonoha::SurfacePtr rendered{Kotonoha::SchoolDaysSubtitleTypography::Render(
-          choiceFont.get(), utf8.c_str(), utf8.size())};
+          choiceFont.get(), utf8.c_str(), utf8.size(),
+          choiceChineseFallback.get())};
       if (!rendered) return false;
       const int measuredWidth = std::max(1, Plan::Measure(lines[lineIndex].text));
       SDL_Rect destination{0,
@@ -260,6 +372,8 @@ bool GameScene::ensureChoiceScratch(Kotonoha::RendererRef renderer,
     return false;
   }
   choiceScratchEvent = runtime.choice;
+  choiceScratchSlots = visible;
+  choiceScratchTexts = std::move(localizedTexts);
   return true;
 }
 
@@ -272,9 +386,19 @@ void GameScene::renderChoices(Kotonoha::RendererRef renderer) {
     float mx = 0.0f, my = 0.0f, nx = 0.0f, ny = 0.0f;
     SDL_GetMouseState(&mx, &my);
     float renderX = 0.0f, renderY = 0.0f;
-    if (SDL_RenderCoordinatesFromWindow(&renderer, mx, my, &renderX, &renderY) &&
-        normalizedPointer(renderX, renderY, &nx, &ny))
-      runtime.choiceInteraction.SeedPointer(nx, ny, runtime.tick);
+    if (SDL_RenderCoordinatesFromWindow(&renderer, mx, my, &renderX, &renderY)) {
+      // The first-hover seed reads the physical cursor directly, bypassing
+      // Engine's normal mouse-event mapping. Apply the exact inverse of the
+      // Standard/FULL vertical presentation to keep the initial option hover
+      // aligned with later clicks and with the compressed choice artwork.
+      const float heightScale = runtime.narrativePresentationHeightScale();
+      const auto view = Kotonoha::UI::viewSize(renderer);
+      if (heightScale > 0.0f && heightScale < 1.0f)
+        renderY = (renderY - view.y * (1.0f - heightScale) * 0.5f) /
+                  heightScale;
+      if (normalizedPointer(renderX, renderY, &nx, &ny))
+        runtime.choiceInteraction.SeedPointer(nx, ny, runtime.tick);
+    }
   }
 
   const bool finalFrame = runtime.choiceNeedsFinalFrame();
@@ -322,8 +446,7 @@ void GameScene::renderChoices(Kotonoha::RendererRef renderer) {
                            static_cast<Uint8>(argb & 0xffu));
     SDL_SetTextureAlphaMod(choiceScratch.get(), alpha);
 
-    const char *raw = runtime.choice->data.set_select->options[originalIndex];
-    const auto lines = Plan::WrapRetailEnglish(Utf8ToUtf16(raw ? raw : ""));
+    const auto lines = Plan::WrapRetailEnglish(Utf8ToUtf16(choiceScratchTexts[slot]));
     for (std::size_t lineIndex = 0; lineIndex < lines.size(); ++lineIndex) {
       const auto source = Plan::SourceForLine(static_cast<int>(slot),
                                               static_cast<int>(lineIndex));

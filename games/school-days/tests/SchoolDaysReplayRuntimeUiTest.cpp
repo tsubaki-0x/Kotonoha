@@ -315,6 +315,22 @@ public:
     return runtime.playDataPlayback && runtime.playDataPlayback->IsOpen();
   }
 
+  static bool ReplayDataLoading(const Runtime &runtime) {
+    return runtime.loadTransition.Active() &&
+           runtime.loadTransition.Target() ==
+               Kotonoha::SchoolDaysLoadTransition::Destination::ReplayData;
+  }
+
+  static void CompleteReplayDataLoading(Runtime &runtime) {
+    // Simulate the original observed card phases without introducing a
+    // multi-second sleep into the UI regression test.
+    const uint64_t t = SDL_GetTicks();
+    runtime.updateLoadTransition(t + 1000u);
+    runtime.updateLoadTransition(t + 1900u);
+    runtime.updateLoadTransition(t + 2400u);
+    runtime.updateLoadTransition(t + 2900u);
+  }
+
   static bool PlayDataMenuBarProjectionExact(const Runtime &runtime) {
     const auto projection = runtime.menuBarProjection();
     return projection.speedControlsEnabled && !projection.transportLocked &&
@@ -441,6 +457,11 @@ int main(int argc, char **argv) {
   PanelClick(app.runtime, 200.0f, 200.0f);
   using Access = SchoolDays::RuntimeReplayUiTestAccess;
   using SaveAction = Kotonoha::SchoolDaysSaveLoadModel::Action;
+  Check(Access::ReplayDataLoading(app.runtime) &&
+            !Access::PlayDataOpen(app.runtime) &&
+            app.runtime.panels().IsReplayOpen(),
+        "Replay Data must show retail loading card before constructing PlayData");
+  Access::CompleteReplayDataLoading(app.runtime);
   Check(Access::PlayDataOpen(app.runtime) && !app.runtime.panels().IsReplayOpen(),
         "Replay Data row did not start isolated PlayData playback");
   Check(Access::PlayDataMenuBarProjectionExact(app.runtime),

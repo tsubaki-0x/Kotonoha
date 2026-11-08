@@ -15,8 +15,8 @@ class AssetStream;
 
 // Process-wide School Days retail resource mount.  KTRF has one outer game
 // session at a time, while media decoders may read concurrently; the
-// implementation publishes an immutable shared store only after all 29 retail
-// packs have validated successfully.
+// implementation publishes immutable stores only after all 29 retail packs
+// AND the mandatory integrated LxH.GPK have validated successfully.
 bool MountSchoolDaysRetailGpks(const std::filesystem::path& gameOrPacksRoot,
                               std::string* error = nullptr);
 // Shared engine overlay; IDs use their complete logical path for every pack.

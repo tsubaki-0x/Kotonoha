@@ -14,6 +14,7 @@ public:
         TitleToStart,
         TitleToChild,
         ChildToTitle,
+        ReplayToHScene,
     };
     enum class Phase : uint8_t { Idle, Outgoing, AwaitHandoff, Incoming };
 
@@ -32,6 +33,8 @@ public:
             return {500u, Color::White, 500u, Color::White};
         case Profile::ChildToTitle:
             return {500u, Color::White, 500u, Color::White};
+        case Profile::ReplayToHScene:
+            return {1000u, Color::Black, 1000u, Color::Black};
         }
         return {};
     }

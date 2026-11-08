@@ -699,6 +699,18 @@ games-assets/*
 /translation.json
 # Dumps/translations contain the games' script text
 /translations/
+# School Days HQ local retail assets / user-provided art are not source code.
+# Supply these separately to authorized testers rather than accidentally
+# publishing commercial packs, localization scripts or modified artwork.
+/games/school-days/Packs/
+/games/school-days/translations/
+/games/school-days/launcher-art/*.png
+/games/school-days/windows/*.ico
+/games/school-days/display-options/System/Option/*.png
+/games/school-days/display-options/System/Option/*.cmap
+# Temporary visual QA captures at repository root.
+/display-*.png
+/fresh-*.png
 /Android/.gradle/
 /Android/.deps/
 /Android/.cxx/

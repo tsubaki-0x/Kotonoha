@@ -1,9 +1,194 @@
 #include "SchoolDaysLauncher.hpp"
 #include "SchoolDaysAssets.hpp"
 
+#include <Kotonoha/core/FileSystem.hpp>
+#include <Kotonoha/core/DiscImage.hpp>
+#include <Kotonoha/localization/Translation.hpp>
+#include <Kotonoha/media/MediaDecoder.hpp>
+#include <Kotonoha/routing/SchoolDaysDesktopStartupProfile.hpp>
+#include <Kotonoha/routing/SchoolDaysDisplayPolicy.hpp>
 #include <Kotonoha/routing/SchoolDaysKtrfSession.hpp>
+#include <Kotonoha/routing/SchoolDaysLxhContent.hpp>
+#include <Kotonoha/routing/SchoolDaysRetailConfigPolicy.hpp>
+#include <Kotonoha/routing/SchoolDaysTranslationCoverage.hpp>
+
+#include <imgui.h>
+#include <imgui_stdlib.h>
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <limits>
+#include <stdexcept>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 namespace SchoolDays {
+namespace {
+namespace fs = std::filesystem;
+
+Kotonoha::EngineSettings defaultSchoolDaysLauncherSettings() {
+  Kotonoha::EngineSettings defaults;
+#if defined(_WIN32) && !defined(__ANDROID__)
+  // Keep the launcher startup policy identical to main.cpp's Windows default.
+  // Loaded settings.json still wins because the generic base loads it later.
+  defaults.renderer = "opengl";
+  defaults.mode = Kotonoha::WindowMode::Borderless;
+  defaults.vsync = true;
+  defaults.upscaling.backend = Kotonoha::UpscaleBackend::Auto;
+  defaults.upscaling.preset = Kotonoha::UpscalePreset::ArtCNN;
+  defaults.upscaling.factor = 1.5f;
+#endif
+  return defaults;
+}
+
+struct SavedLanguage {
+  std::string name, jsonPath, lxhJsonPath;
+};
+
+SavedLanguage readLanguagePreference(const fs::path &path) {
+  std::error_code ec;
+  if (path.empty() || !fs::is_regular_file(path, ec) ||
+      fs::file_size(path, ec) > 32768 || ec)
+    return {};
+  std::ifstream input(path);
+  SavedLanguage saved;
+  std::getline(input, saved.name);
+  std::getline(input, saved.jsonPath);
+  std::string thirdLine;
+  std::getline(input, thirdLine);
+  constexpr std::string_view key = "lxh-json=";
+  if (thirdLine.rfind(key.data(), 0) == 0)
+    saved.lxhJsonPath = thirdLine.substr(key.size());
+  return saved;
+}
+
+bool regularTranslationFile(const std::string &path) {
+  if (path.empty()) return false;
+  const auto resolved = Kotonoha::FileResolver::findAsset(path).value_or(path);
+  std::error_code ec;
+  return fs::is_regular_file(resolved, ec) && !ec;
+}
+
+// Runtime reads exactly this game-owned sidecar key, leaving settings.json
+// exclusively responsible for physical monitor/output settings.
+constexpr std::string_view kAspectKey = "ContentAspectPreference=";
+constexpr const char *kShaderSidecarHeader = "SchoolDaysShaderPaths.v1";
+
+std::filesystem::path shaderSidecarPath(const std::string &settingsPath) {
+  return fs::path(settingsPath).parent_path() / "shader-paths.txt";
+}
+
+int readAspectPreference(const fs::path &root) {
+  for (const auto &file : {root / "Kotonoha.ini", root / "RemasterDisplay.ini"}) {
+    std::error_code ec;
+    if (!fs::is_regular_file(file, ec) || ec) continue;
+    if (fs::file_size(file, ec) > 131072u || ec)
+      throw std::runtime_error("Oversized School Days aspect preference file");
+    std::ifstream input(file);
+    if (!input) throw std::runtime_error("Cannot read School Days aspect preference");
+    std::string line;
+    while (std::getline(input, line)) {
+      if (line.rfind(kAspectKey.data(), 0) != 0) continue;
+      try {
+        return std::clamp(std::stoi(line.substr(kAspectKey.size())), 0, 2);
+      } catch (const std::exception &) {
+        return 0;
+      }
+    }
+    // Match Runtime: fallback to RemasterDisplay.ini only if opening
+    // Kotonoha.ini failed. An existing Kotonoha.ini owns the preference.
+    return 0;
+  }
+  return 0;
+}
+
+void writeAspectPreference(const fs::path &root, int preference) {
+  const auto path = root / "Kotonoha.ini";
+  std::string contents;
+  std::error_code ec;
+  if (fs::is_regular_file(path, ec) && !ec) {
+    if (fs::file_size(path, ec) > 131072u || ec)
+      throw std::runtime_error("Oversized School Days aspect preference file");
+    std::ifstream input(path, std::ios::binary);
+    if (!input) throw std::runtime_error("Cannot reopen School Days aspect file");
+    contents.assign(std::istreambuf_iterator<char>(input), {});
+  }
+  const std::string replacement =
+      std::string(kAspectKey) + std::to_string(std::clamp(preference, 0, 2));
+  bool replaced = false;
+  std::size_t cursor = 0;
+  while (cursor < contents.size()) {
+    if (contents.compare(cursor, kAspectKey.size(), kAspectKey) == 0) {
+      const std::size_t end = contents.find_first_of("\r\n", cursor);
+      contents.replace(cursor, end == std::string::npos ? contents.size() - cursor
+                                                        : end - cursor, replacement);
+      replaced = true;
+      break;
+    }
+    const auto newline = contents.find('\n', cursor);
+    if (newline == std::string::npos) break;
+    cursor = newline + 1;
+  }
+  if (!replaced) {
+    if (!contents.empty() && contents.back() != '\n') contents.push_back('\n');
+    if (contents.empty()) contents = "[KotonohaConfig][Settings]\n";
+    contents += replacement + "\n";
+  }
+  Kotonoha::writeTextFileAtomically(path.string(), contents);
+}
+
+int nearestRetailVolume(const Kotonoha::SchoolDaysRetailConfigPolicy::State &state,
+                        Kotonoha::SchoolDaysRetailConfigPolicy::NativeAudioBank bank,
+                        float volume) {
+  using Policy = Kotonoha::SchoolDaysRetailConfigPolicy;
+  int nearest = Policy::Level(state, bank);
+  float error = std::numeric_limits<float>::max();
+  for (int level = 0; level <= 10; ++level) {
+    auto candidate = state;
+    Policy::SetLevel(&candidate, bank, level);
+    const float distance = std::abs(Policy::LinearGain(candidate, bank) - volume);
+    if (distance < error) {
+      nearest = level;
+      error = distance;
+    }
+  }
+  return nearest;
+}
+
+// The pack is permanent gameplay content, never a user preference. Retail GPK
+// installs must supply all 21 unique LxH media resources; extracted base-only
+// test fixtures remain valid without them. The seven ORS names also exist in
+// the original retail script, so they cannot identify an installed LxH pack.
+bool checkIntegratedLxhContent(const Assets &assets, bool *present,
+                               std::string &error) {
+  if (present == nullptr) return false;
+  std::size_t found = 0;
+  std::size_t expected = 0;
+  for (const auto &logical : Kotonoha::SchoolDaysLxhContent::PackEntries()) {
+    if (logical.compare(0, 4, "LxH/") != 0) continue;
+    ++expected;
+    try {
+      (void)assets.resolve(logical);
+      ++found;
+    } catch (const std::exception &) {
+      // Report incomplete media below instead of allowing partial epilogues.
+    }
+  }
+  if (found != expected && (found != 0 || assets.orsRoot() == assets.root())) {
+    error = "Incomplete integrated School Days epilogues: " +
+            std::to_string(found) + "/" + std::to_string(expected) +
+            " media resources found. Install the complete Packs/LxH.GPK.";
+    return false;
+  }
+  *present = found == expected;
+  return true;
+}
+} // namespace
 
 Launcher::Launcher(std::string settingsPath, std::string directory,
                    std::string route)
@@ -15,7 +200,8 @@ Launcher::Launcher(std::string settingsPath, std::string directory,
            "dir.txt",
            "Use your own School Days HQ retail data (29 GPKs), or an extracted "
            "directory with Script/English, or an ISO containing these files. "
-           "ISO data uses a temporary internal mount."}) {
+           "ISO data uses a temporary internal mount."},
+          defaultSchoolDaysLauncherSettings()) {
   setAudioChannels({"BGM", "Voice", "SE", "Movie"});
   loadPath(std::move(directory));
   route =
@@ -32,6 +218,383 @@ Launcher::Launcher(std::string settingsPath, std::string directory,
                     validateRoute, std::move(route));
   if (!optionPathValid(routeOption))
     setOptionPath(routeOption, {});
+
+  // EngineSettings serializes asset references by filename for portability.
+  // Resolve this game's JSON from the settings folder (or its translations/
+  // directory) on reopening, without modifying the generic FileResolver.
+  if (!getSettingsPath().empty() &&
+      !settings().translationPath.empty() &&
+      !regularTranslationFile(settings().translationPath)) {
+    const auto folder = fs::path(getSettingsPath()).parent_path();
+    const auto stored = fs::path(settings().translationPath);
+    for (const auto &candidate : {folder / stored,
+                                  folder / "translations" / stored}) {
+      if (regularTranslationFile(candidate.string())) {
+        settings().translationPath = fs::absolute(candidate).string();
+        break;
+      }
+    }
+  }
+
+  if (!getSettingsPath().empty()) {
+    languagePreferenceFile =
+        fs::path(getSettingsPath()).parent_path() / "language.txt";
+    const auto savedLanguage = readLanguagePreference(languagePreferenceFile);
+    if (savedLanguage.name == "spanish" || savedLanguage.name == "chinese" ||
+        savedLanguage.name == "custom") {
+      selectedLanguage = savedLanguage.name == "spanish" ? Language::Spanish
+          : savedLanguage.name == "chinese" ? Language::ChineseSimplified
+                                             : Language::CustomJson;
+      if (!savedLanguage.jsonPath.empty())
+        settings().translationPath = savedLanguage.jsonPath;
+      selectedLocaleBaseJsonPath = settings().translationPath;
+    } else if (!settings().translationPath.empty())
+      selectedLanguage = Language::CustomJson;
+    if (!savedLanguage.lxhJsonPath.empty()) {
+      selectedManualLxhJsonPath = savedLanguage.lxhJsonPath;
+      manualLxhBaseJsonPath = settings().translationPath;
+    }
+  } else if (!settings().translationPath.empty()) {
+    selectedLanguage = Language::CustomJson;
+  }
+
+  // The base launcher loads settings.json before video initialization. Do NOT
+  // replace a stored manual choice with the native desktop on each startup.
+  // A new/invalid profile is seeded once, after the SDL video driver is live.
+  std::error_code ec;
+  const bool savedFile = !getSettingsPath().empty() &&
+                         fs::is_regular_file(getSettingsPath(), ec) && !ec;
+  bool validSavedSettings = false;
+  if (savedFile) {
+    try {
+      (void)Kotonoha::EngineSettings::load(getSettingsPath());
+      validSavedSettings = true;
+    } catch (const std::exception &) {
+      // Base Launcher already reported the invalid JSON and chose defaults.
+    }
+  }
+  initialDisplayPending = !validSavedSettings;
+  initialDisplayBaseline = settings();
+  if (!getSettingsPath().empty() &&
+      !settings().upscaling.shaderFiles.empty())
+    settings().upscaling.shaderFiles = resolveStoredShaderPaths(
+        getSettingsPath(), settings().upscaling.shaderFiles);
+}
+
+bool Launcher::initializeFirstRunDisplay(Kotonoha::EngineSettings &target,
+                                         bool hasStoredSettings,
+                                         int desktopWidth, int desktopHeight,
+                                         float desktopHz) {
+  return Kotonoha::SchoolDaysDesktopStartupProfile::Apply(
+      target, hasStoredSettings, desktopWidth, desktopHeight, desktopHz);
+}
+
+bool Launcher::selectPhysicalResolution(
+    Kotonoha::EngineSettings &target,
+    const Kotonoha::DisplayModeChoice &choice,
+    const SDL_DisplayMode *desktop) {
+  if (!Kotonoha::DisplayModeCatalog::Select(target, choice, desktop)) return false;
+  // A decorated/windowed app cannot change the monitor refresh. Persist
+  // physical Hz only for fullscreen; do not promise a fictitious Hz switch.
+  if (target.mode == Kotonoha::WindowMode::Windowed && desktop)
+    target.refreshRate = desktop->refresh_rate;
+  return true;
+}
+
+void Launcher::seedFirstRunDisplayIfPossible() {
+  if (!initialDisplayPending || !SDL_WasInit(SDL_INIT_VIDEO)) return;
+  auto &draft = settings();
+  // Another explicit caller may have seeded video before the first frame.
+  // Never treat that as permission to overwrite their manual preference.
+  if (draft.width != initialDisplayBaseline.width ||
+      draft.height != initialDisplayBaseline.height ||
+      draft.mode != initialDisplayBaseline.mode ||
+      draft.display != initialDisplayBaseline.display ||
+      draft.fullscreenWidth != initialDisplayBaseline.fullscreenWidth ||
+      draft.fullscreenHeight != initialDisplayBaseline.fullscreenHeight ||
+      draft.refreshRate != initialDisplayBaseline.refreshRate) {
+    initialDisplayPending = false;
+    return;
+  }
+  int count = 0;
+  SDL_DisplayID *displays = SDL_GetDisplays(&count);
+  if (!displays || count <= 0) {
+    SDL_free(displays);
+    return;
+  }
+  const int index = std::clamp(draft.display, 0, count - 1);
+  const auto *desktop = SDL_GetDesktopDisplayMode(displays[index]);
+  if (desktop &&
+      initializeFirstRunDisplay(draft, false, desktop->w,
+                                desktop->h, desktop->refresh_rate))
+    initialDisplayPending = false;
+  SDL_free(displays);
+}
+
+SDL_AppResult Launcher::iterate() {
+  if (!isOpen()) open();
+  seedFirstRunDisplayIfPossible();
+  return GameLauncher::iterate();
+}
+
+void Launcher::setRetailConfigRoot(std::filesystem::path documentsRoot) {
+  if (documentsRoot.empty())
+    throw std::invalid_argument("Retail Config.DAT needs an explicit documents root");
+  if (retailConfigReady)
+    throw std::logic_error("Retail Config.DAT root cannot be changed mid-launch");
+  retailRoot = fs::absolute(documentsRoot).lexically_normal();
+  std::string error;
+  if (!retailStorage.Initialize(retailRoot, &error))
+    throw std::runtime_error("School Days Config.DAT init: " + error);
+  Kotonoha::SchoolDaysConfigStorage::LoadResult loaded;
+  if (!retailStorage.Load(&loaded, &error))
+    throw std::runtime_error("School Days Config.DAT load: " + error);
+  retailFileExisted = loaded.present;
+  if (retailFileExisted) {
+    std::error_code ec;
+    retailFileTimestamp = fs::last_write_time(retailStorage.Path(), ec);
+    if (ec) throw std::runtime_error("Cannot stat retail Config.DAT timestamp");
+    retailFileSize = fs::file_size(retailStorage.Path(), ec);
+    if (ec) throw std::runtime_error("Cannot stat retail Config.DAT size");
+  }
+  retailDraft = loaded.state;
+  aspectPreference = readAspectPreference(retailRoot);
+  loadedAspectPreference = aspectPreference;
+  retailConfigReady = true;
+  // Runtime's retail mixer curve is authoritative for BGM/SE/Voice, NOT the
+  // generic slider defaults in a previously saved settings.json. Movie and
+  // master volume remain independent generic EngineSettings values.
+  syncMixerFromRetail();
+}
+
+void Launcher::syncMixerFromRetail() {
+  using Policy = Kotonoha::SchoolDaysRetailConfigPolicy;
+  settings().masterMuted = retailDraft.mute;
+  settings().channelVolumes["BGM"] =
+      Policy::LinearGain(retailDraft, Policy::NativeAudioBank::Bgm);
+  settings().channelVolumes["SE"] =
+      Policy::LinearGain(retailDraft, Policy::NativeAudioBank::Se);
+  settings().channelVolumes["Voice"] =
+      Policy::LinearGain(retailDraft, Policy::NativeAudioBank::Voice);
+}
+
+void Launcher::syncRetailFromMixer() {
+  if (!retailConfigReady) return;
+  using Policy = Kotonoha::SchoolDaysRetailConfigPolicy;
+  auto &draft = settings();
+  // Generic Restore defaults resets the entire EngineSettings draft. Give
+  // retail General/Sound the corresponding fresh defaults too.
+  if (draft.channelVolumes.find("BGM") == draft.channelVolumes.end() &&
+      draft.channelVolumes.find("SE") == draft.channelVolumes.end() &&
+      draft.channelVolumes.find("Voice") == draft.channelVolumes.end()) {
+    retailDraft = Policy::Defaults();
+    syncMixerFromRetail();
+  }
+  for (const auto &[channel, bank] : {
+           std::pair<const char *, Policy::NativeAudioBank>{
+               "BGM", Policy::NativeAudioBank::Bgm},
+           {"SE", Policy::NativeAudioBank::Se},
+           {"Voice", Policy::NativeAudioBank::Voice}}) {
+    if (const auto it = draft.channelVolumes.find(channel);
+        it != draft.channelVolumes.end() && std::isfinite(it->second)) {
+      Policy::SetLevel(&retailDraft, bank,
+                       nearestRetailVolume(retailDraft, bank, it->second));
+    }
+  }
+  retailDraft.mute = draft.masterMuted;
+  // Write canonical retail gains to the same JSON that the Engine loads,
+  // avoiding a startup mixer discrepancy after quantizing generic sliders.
+  syncMixerFromRetail();
+}
+
+void Launcher::setRetailSettings(
+    const Kotonoha::SchoolDaysRetailConfigPolicy::State &value) {
+  if (!retailConfigReady)
+    throw std::logic_error("Set retail Config.DAT root before editing Sound");
+  if (!Kotonoha::SchoolDaysRetailConfigPolicy::Validate(value))
+    throw std::invalid_argument("Invalid retail General/Sound options");
+  retailDraft = value;
+  syncMixerFromRetail();
+}
+
+void Launcher::setContentAspectPreference(int value) {
+  if (!retailConfigReady)
+    throw std::logic_error("Set retail Config.DAT root before editing aspect");
+  if (value < 0 || value > 2)
+    throw std::invalid_argument("Content aspect must be Auto, 4:3 or 16:9");
+  aspectPreference = value;
+}
+
+void Launcher::checkRetailFileUnchanged() const {
+  if (!retailConfigReady) return;
+  const auto path = retailStorage.Path();
+  std::error_code ec;
+  const bool current = fs::exists(path, ec);
+  if (ec || current != retailFileExisted)
+    throw std::runtime_error(
+        "Config.DAT changed while launcher was open; close and reopen");
+  if (current) {
+    if (!fs::is_regular_file(path, ec) || ec)
+      throw std::runtime_error("Config.DAT is no longer a regular file");
+    const auto timestamp = fs::last_write_time(path, ec);
+    if (ec || !retailFileTimestamp || timestamp != *retailFileTimestamp)
+      throw std::runtime_error(
+          "Config.DAT was modified externally; refusing to overwrite");
+    const auto size = fs::file_size(path, ec);
+    if (ec || !retailFileSize || size != *retailFileSize)
+      throw std::runtime_error(
+          "Config.DAT size changed externally; refusing to overwrite");
+  }
+}
+
+void Launcher::saveAspectPreference() {
+  if (!retailConfigReady || aspectPreference == loadedAspectPreference) return;
+  // The same Kotonoha.ini key is read/written by in-game Display Options;
+  // never add a second aspect preference or place it in settings.json.
+  if (readAspectPreference(retailRoot) != loadedAspectPreference)
+    throw std::runtime_error(
+        "Narrative aspect changed in another session; close and reopen launcher");
+  writeAspectPreference(retailRoot, aspectPreference);
+  loadedAspectPreference = aspectPreference;
+}
+
+std::string Launcher::rememberedSpanishJsonPath(
+    const std::string &settingsPath) {
+  if (settingsPath.empty()) return {};
+  const auto file = fs::path(settingsPath).parent_path() / "language.txt";
+  const auto saved = readLanguagePreference(file);
+  return saved.name == "spanish" ? saved.jsonPath : std::string{};
+}
+
+std::string Launcher::rememberedLocaleJsonPath(
+    const std::string &settingsPath) {
+  if (settingsPath.empty()) return {};
+  const auto saved = readLanguagePreference(
+      fs::path(settingsPath).parent_path() / "language.txt");
+  return saved.name == "spanish" || saved.name == "chinese" ||
+                 saved.name == "custom"
+             ? saved.jsonPath : std::string{};
+}
+
+bool Launcher::nonNativeLanguagePreferenceSelected(
+    const std::string &settingsPath) {
+  if (settingsPath.empty()) return false;
+  const auto name = readLanguagePreference(
+      fs::path(settingsPath).parent_path() / "language.txt").name;
+  return name == "spanish" || name == "chinese" || name == "custom";
+}
+
+std::string Launcher::rememberedLxhJsonPath(
+    const std::string &settingsPath, const std::string &baseJsonPath) {
+  if (settingsPath.empty()) return {};
+  const auto saved = readLanguagePreference(
+      fs::path(settingsPath).parent_path() / "language.txt");
+  if (saved.lxhJsonPath.empty()) return {};
+  // A previously selected sidecar belongs only to its matching base JSON.
+  // Switching the command-line/base dictionary must never silently attach
+  // another language's epilogue. Empty base matches native English only.
+  if (saved.jsonPath.empty() || baseJsonPath.empty())
+    return saved.jsonPath.empty() && baseJsonPath.empty()
+               ? saved.lxhJsonPath : std::string{};
+  const auto oldBase = fs::path(saved.jsonPath).lexically_normal();
+  const auto chosen = fs::path(baseJsonPath).lexically_normal();
+  if (oldBase == chosen ||
+      (!chosen.is_absolute() && oldBase.filename() == chosen.filename()))
+    return saved.lxhJsonPath;
+  return {};
+}
+
+bool Launcher::spanishPreferenceSelected(const std::string &settingsPath) {
+  if (settingsPath.empty()) return false;
+  return readLanguagePreference(
+      fs::path(settingsPath).parent_path() / "language.txt").name == "spanish";
+}
+
+std::string Launcher::resolveStoredTranslation(
+    const std::string &settingsPath, const std::string &stored) {
+  if (stored.empty() || fs::path(stored).is_absolute()) return stored;
+  const auto remembered = rememberedLocaleJsonPath(settingsPath);
+  if (!remembered.empty() &&
+      fs::path(remembered).filename() == fs::path(stored).filename() &&
+      regularTranslationFile(remembered))
+    return remembered;
+  if (!settingsPath.empty()) {
+    const auto folder = fs::path(settingsPath).parent_path();
+    for (const auto &candidate : {folder / stored,
+                                  folder / "translations" / stored})
+      if (regularTranslationFile(candidate.string()))
+        return fs::absolute(candidate).string();
+  }
+  return stored;
+}
+
+bool Launcher::persistShaderPaths(const std::string &settingsPath,
+                                  const std::string &shaderFiles,
+                                  std::string *error) {
+  if (error) error->clear();
+  if (settingsPath.empty()) return true;
+  try {
+    std::string text = std::string(kShaderSidecarHeader) + "\n";
+    for (const auto &shader : Kotonoha::UpscaleShaderFiles(shaderFiles)) {
+      if (shader.empty() || shader.find('\r') != std::string::npos ||
+          shader.find('\n') != std::string::npos ||
+          shader.find('\0') != std::string::npos)
+        throw std::invalid_argument("Invalid custom GLSL path");
+      text += shader + "\n";
+      if (text.size() > 131072u)
+        throw std::invalid_argument("Too many custom GLSL paths");
+    }
+    Kotonoha::writeTextFileAtomically(shaderSidecarPath(settingsPath).string(),
+                                      text);
+    return true;
+  } catch (const std::exception &exception) {
+    if (error) *error = exception.what();
+    return false;
+  }
+}
+
+std::string Launcher::resolveStoredShaderPaths(
+    const std::string &settingsPath, const std::string &stored) {
+  if (settingsPath.empty() || stored.empty()) return stored;
+  const auto path = shaderSidecarPath(settingsPath);
+  const auto fallback = [&](const char *reason) {
+    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                "School Days custom GLSL sidecar ignored (%s); "
+                "retaining safe portable settings.json references",
+                reason);
+    return stored;
+  };
+  std::error_code ec;
+  if (!fs::is_regular_file(path, ec) || ec) return stored;
+  if (fs::file_size(path, ec) > 131072u || ec)
+    return fallback("oversized/unreadable");
+  std::ifstream input(path, std::ios::binary);
+  if (!input) return fallback("cannot read");
+  std::string header;
+  std::getline(input, header);
+  if (header != kShaderSidecarHeader)
+    return fallback("unknown version");
+  std::vector<std::string> originals;
+  std::string line;
+  while (std::getline(input, line)) {
+    if (line.empty() || line.find('\r') != std::string::npos)
+      return fallback("invalid path entry");
+    originals.push_back(line);
+  }
+  const auto portable = Kotonoha::UpscaleShaderFiles(stored);
+  if (originals.size() != portable.size())
+    return fallback("entry count does not match settings.json");
+  for (std::size_t index = 0; index < originals.size(); ++index) {
+    const auto filename = fs::path(originals[index]).filename().string();
+    if (filename != fs::path(portable[index]).filename().string())
+      return fallback("basename differs from settings.json");
+    // Do not replace a resolvable portable preset with a dead absolute path.
+    if (fs::path(originals[index]).is_absolute()) {
+      if (!fs::is_regular_file(originals[index], ec) || ec)
+        return fallback("external shader is unavailable");
+    }
+  }
+  return Kotonoha::UpscaleShaderFileList(originals);
 }
 
 bool Launcher::validateRoute(const std::string &file, std::string &info) {
@@ -61,6 +624,950 @@ bool Launcher::routeValid() const { return optionPathValid(routeOption); }
 
 const std::string &Launcher::routeInfo() const {
   return optionPathInfo(routeOption);
+}
+
+Launcher::Language Launcher::language() const {
+  const auto &path = currentSettings().translationPath;
+  if (selectedLanguage == Language::English && path.empty())
+    return Language::English;
+  if ((selectedLanguage == Language::Spanish ||
+       selectedLanguage == Language::ChineseSimplified) &&
+      path == selectedLocaleBaseJsonPath)
+    return selectedLanguage;
+  return Language::CustomJson;
+}
+
+void Launcher::setLanguage(Language selection) {
+  if (selection == language()) return;
+  // Manual LxH overrides must never leak from one base language to another.
+  selectedManualLxhJsonPath.clear();
+  manualLxhBaseJsonPath.clear();
+  if (selection == Language::English) {
+    // Clear only on an explicit native-English choice; manual JSON selection
+    // in the generic Translation tab otherwise remains untouched.
+    settings().translationPath.clear();
+  } else if (selection == Language::Spanish) {
+    // A custom JSON may be another language. Start Spanish from an explicitly
+    // discoverable Spanish file, never relabel the previous dictionary.
+    settings().translationPath = findSpanishJson();
+  } else if (selection == Language::ChineseSimplified) {
+    settings().translationPath = findChineseJson();
+  }
+  selectedLocaleBaseJsonPath = settings().translationPath;
+  selectedLanguage = selection;
+}
+
+void Launcher::setSpanishJsonPath(std::string path) {
+  setCustomJsonPath(std::move(path));
+  selectedLocaleBaseJsonPath = settings().translationPath;
+  selectedLanguage = Language::Spanish;
+}
+
+void Launcher::setChineseJsonPath(std::string path) {
+  setCustomJsonPath(std::move(path));
+  selectedLocaleBaseJsonPath = settings().translationPath;
+  selectedLanguage = Language::ChineseSimplified;
+}
+
+void Launcher::setCustomJsonPath(std::string path) {
+  if (settings().translationPath != path) {
+    selectedManualLxhJsonPath.clear();
+    manualLxhBaseJsonPath.clear();
+  }
+  settings().translationPath = std::move(path);
+  selectedLocaleBaseJsonPath = settings().translationPath;
+  selectedLanguage = Language::CustomJson;
+}
+
+void Launcher::setLxhJsonPath(std::string path) {
+  selectedManualLxhJsonPath = std::move(path);
+  manualLxhBaseJsonPath = settings().translationPath;
+}
+
+std::string Launcher::manualLxhJsonPath() const {
+  return manualLxhBaseJsonPath == currentSettings().translationPath
+             ? selectedManualLxhJsonPath : std::string{};
+}
+
+std::string Launcher::lxhJsonPath() const {
+  if (auto manual = manualLxhJsonPath(); !manual.empty()) return manual;
+  try {
+    const auto &base = translationPath();
+    return Kotonoha::SchoolDaysTranslationGate::DlcJsonPath(
+        Kotonoha::SchoolDaysTranslationGate::LocaleId(base), base);
+  } catch (const std::exception &) {
+    // Invalid base paths are explained by validate(), not an ImGui render.
+    return {};
+  }
+}
+
+const std::string &Launcher::translationPath() const {
+  return currentSettings().translationPath;
+}
+
+const Kotonoha::EngineSettings &Launcher::currentSettings() const {
+  return const_cast<Launcher *>(this)->settings();
+}
+
+void Launcher::setScriptOverlayPath(std::string path) {
+  scriptOverlayPath = std::move(path);
+}
+
+std::filesystem::path Launcher::effectiveOverlayRoot() const {
+  if (!scriptOverlayPath.empty()) return scriptOverlayPath;
+  if (!currentSettings().assetOverlayPath.empty())
+    return currentSettings().assetOverlayPath;
+#if defined(_WIN32) && !defined(__ANDROID__)
+  if (const char *base = SDL_GetBasePath(); base && *base) {
+    const auto root = fs::path(base) / "display-options";
+    std::error_code ec;
+    if (fs::is_regular_file(root / "System/Option/Option_Display.png", ec) &&
+        fs::is_regular_file(root / "System/Option/Option_Display.cmap", ec))
+      return root;
+  }
+#endif
+  return {};
+}
+
+std::string Launcher::findSpanishJson() const {
+  // Only installed JSON files are offered; no language is inferred from a GPK
+  // or from unrelated dictionaries the user selected in the generic tab.
+  constexpr std::array<const char *, 5> names{
+      "translations/es.json", "translations/es-ES.json",
+      "translations/spanish.json", "translations/school-days-es.json",
+      "translation/es.json"};
+  for (const char *name : names) {
+    if (auto path = Kotonoha::FileResolver::findGameAsset("school-days", name);
+        path && regularTranslationFile(path->string()))
+      return path->string();
+    if (!getSettingsPath().empty()) {
+      const auto local = fs::path(getSettingsPath()).parent_path() / name;
+      if (regularTranslationFile(local.string())) return local.string();
+    }
+  }
+  return {};
+}
+
+std::string Launcher::findChineseJson() const {
+  // Prefer Simplified Chinese. Preserve the installed file's real casing so
+  // non-Windows filesystems can resolve zh-CN.json / zh-CN-lxh.json as a pair.
+  constexpr std::array<const char *, 5> names{
+      "translations/zh-CN.json", "translations/zh-cn.json",
+      "translations/zh-Hans.json", "translations/chinese.json",
+      "translation/zh-CN.json"};
+  for (const char *name : names) {
+    if (auto path = Kotonoha::FileResolver::findGameAsset("school-days", name);
+        path && regularTranslationFile(path->string()))
+      return path->string();
+    if (!getSettingsPath().empty()) {
+      const auto local = fs::path(getSettingsPath()).parent_path() / name;
+      if (regularTranslationFile(local.string())) return local.string();
+    }
+  }
+  return {};
+}
+
+void Launcher::drawSharedDisplayOptions() {
+  drawPhysicalDisplayOptions();
+  drawGraphicsOptions();
+}
+
+void Launcher::drawPhysicalDisplayOptions() {
+  auto &draft = settings();
+  ImGui::Spacing();
+  ImGui::SeparatorText("Display Options (same settings as in-game)");
+  ImGui::TextDisabled(
+      "The selected monitor, mode, refresh, upscaler and renderer are saved "
+      "in settings.json and used by in-game Display Options.");
+
+  int selectedMode = static_cast<int>(draft.mode);
+  const char *windowModes[]{"Windowed", "Borderless fullscreen",
+                            "Exclusive fullscreen"};
+  if (ImGui::Combo("Window mode##sd", &selectedMode, windowModes, 3))
+    draft.mode = static_cast<Kotonoha::WindowMode>(selectedMode);
+
+  int count = 0;
+  SDL_DisplayID *displays = SDL_GetDisplays(&count);
+  const SDL_DisplayID currentDisplay =
+      displays && draft.display >= 0 && draft.display < count
+          ? displays[draft.display] : SDL_DisplayID{};
+  const SDL_DisplayMode *desktop =
+      currentDisplay ? SDL_GetDesktopDisplayMode(currentDisplay) : nullptr;
+  const char *monitorName =
+      currentDisplay ? SDL_GetDisplayName(currentDisplay) : nullptr;
+  const std::string currentMonitor =
+      "Display " + std::to_string(draft.display + 1) + ": " +
+      (monitorName ? monitorName : "Unavailable");
+  if (ImGui::BeginCombo("Monitor##sd", currentMonitor.c_str())) {
+    for (int index = 0; displays && index < count; ++index) {
+      const char *name = SDL_GetDisplayName(displays[index]);
+      const std::string label = std::to_string(index + 1) + ": " +
+                                (name ? name : "Monitor");
+      if (ImGui::Selectable(label.c_str(), index == draft.display)) {
+        draft.display = index;
+        // An explicit monitor switch selects *that monitor's* desktop
+        // baseline, never the stale dimensions of the previous monitor.
+        if (const auto *native = SDL_GetDesktopDisplayMode(displays[index])) {
+          if (draft.mode == Kotonoha::WindowMode::Windowed) {
+            draft.width = native->w;
+            draft.height = native->h;
+          }
+          draft.fullscreenWidth = native->w;
+          draft.fullscreenHeight = native->h;
+          draft.refreshRate = native->refresh_rate;
+        }
+      }
+    }
+    ImGui::EndCombo();
+  }
+  // Refresh after an explicit monitor change inside the same frame.
+  const SDL_DisplayID selectedDisplay =
+      displays && draft.display >= 0 && draft.display < count
+          ? displays[draft.display] : SDL_DisplayID{};
+  const auto *selectedDesktop =
+      selectedDisplay ? SDL_GetDesktopDisplayMode(selectedDisplay) : nullptr;
+  if (selectedDesktop && draft.mode == Kotonoha::WindowMode::Borderless &&
+      (draft.fullscreenWidth != selectedDesktop->w ||
+       draft.fullscreenHeight != selectedDesktop->h)) {
+    ImGui::TextDisabled(
+        "Borderless uses the current desktop mode; choosing a different "
+        "resolution below requests Exclusive fullscreen.");
+  }
+  int actualWidth = draft.width;
+  int actualHeight = draft.height;
+  float shownHz = draft.refreshRate;
+  if (draft.mode == Kotonoha::WindowMode::Borderless && selectedDesktop) {
+    actualWidth = selectedDesktop->w;
+    actualHeight = selectedDesktop->h;
+    shownHz = selectedDesktop->refresh_rate;
+  } else if (draft.mode != Kotonoha::WindowMode::Windowed) {
+    if (draft.fullscreenWidth > 0) actualWidth = draft.fullscreenWidth;
+    if (draft.fullscreenHeight > 0) actualHeight = draft.fullscreenHeight;
+  } else if (selectedDesktop) {
+    shownHz = selectedDesktop->refresh_rate;
+  }
+  const std::string currentResolution =
+      Kotonoha::DisplayModeCatalog::Label(
+          {actualWidth, actualHeight, shownHz}) +
+      (draft.mode == Kotonoha::WindowMode::Borderless ? " (desktop)"
+          : draft.mode == Kotonoha::WindowMode::Windowed ? " (window)" : "");
+  const auto catalog = Kotonoha::DisplayModeCatalog::Enumerate(selectedDisplay);
+  if (ImGui::BeginCombo("Resolution / refresh##sd",
+                        currentResolution.c_str())) {
+    for (const auto &choice : catalog) {
+      const bool selected = choice.width == actualWidth &&
+                            choice.height == actualHeight &&
+                            std::abs(choice.refreshRate - shownHz) < 0.02f;
+      const std::string label = Kotonoha::DisplayModeCatalog::Label(choice);
+      if (ImGui::Selectable(label.c_str(), selected))
+        (void)selectPhysicalResolution(draft, choice, selectedDesktop);
+    }
+    ImGui::EndCombo();
+  }
+  if (catalog.empty())
+    ImGui::TextDisabled("No display modes were returned for this monitor.");
+  if (draft.mode == Kotonoha::WindowMode::Windowed) {
+    int size[]{draft.width, draft.height};
+    if (ImGui::InputInt2("Custom window size##sd", size)) {
+      draft.width = std::clamp(size[0], 320, 16384);
+      draft.height = std::clamp(size[1], 240, 16384);
+    }
+  }
+  SDL_free(displays);
+
+  ImGui::Checkbox("VSync##sd", &draft.vsync);
+  if (draft.mode == Kotonoha::WindowMode::Windowed) {
+    ImGui::SameLine();
+    ImGui::Checkbox("Resizable window##sd", &draft.resizable);
+  }
+}
+
+void Launcher::drawGraphicsOptions() {
+  auto &draft = settings();
+  ImGui::Spacing();
+  ImGui::SeparatorText("Renderer and upscaling");
+  ImGui::SliderFloat("Render scale##sd", &draft.renderScale, 0.25f, 1.0f,
+                     "%.2fx");
+  const std::string renderer =
+      draft.renderer.empty() ? "Automatic" : draft.renderer;
+  if (ImGui::BeginCombo("Renderer##sd", renderer.c_str())) {
+    if (ImGui::Selectable("Automatic", draft.renderer.empty()))
+      draft.renderer.clear();
+    for (int index = 0; index < SDL_GetNumRenderDrivers(); ++index) {
+      const char *driver = SDL_GetRenderDriver(index);
+      if (driver && ImGui::Selectable(driver, draft.renderer == driver))
+        draft.renderer = driver;
+    }
+    ImGui::EndCombo();
+  }
+  if (ImGui::BeginCombo("Upscaler##sd",
+                        Kotonoha::UpscaleBackendName(draft.upscaling.backend))) {
+    for (const auto backend : {
+             Kotonoha::UpscaleBackend::Auto,
+             Kotonoha::UpscaleBackend::None,
+             Kotonoha::UpscaleBackend::Linear,
+             Kotonoha::UpscaleBackend::MPV,
+             Kotonoha::UpscaleBackend::MetalFX}) {
+#if !defined(__APPLE__)
+      if (backend == Kotonoha::UpscaleBackend::MetalFX) continue;
+#endif
+      if (ImGui::Selectable(Kotonoha::UpscaleBackendName(backend),
+                            draft.upscaling.backend == backend)) {
+        draft.upscaling.backend = backend;
+        if (backend == Kotonoha::UpscaleBackend::MPV)
+          draft.renderer = Kotonoha::isMobilePlatform() ? "opengles2" : "opengl";
+      }
+    }
+    ImGui::EndCombo();
+  }
+  ImGui::SliderFloat("Upscale factor##sd", &draft.upscaling.factor,
+                     1.0f, 4.0f, "%.2fx");
+  if (ImGui::BeginCombo("Shader preset##sd",
+                        Kotonoha::UpscalePresetName(draft.upscaling.preset))) {
+    for (const auto preset : Kotonoha::UpscalePresets())
+      if (ImGui::Selectable(Kotonoha::UpscalePresetName(preset),
+                            draft.upscaling.preset == preset)) {
+        draft.upscaling.preset = preset;
+        draft.upscaling.shaderFiles.clear();
+      }
+    ImGui::EndCombo();
+  }
+  ImGui::InputText("Custom GLSL paths##sd", &draft.upscaling.shaderFiles);
+}
+
+void Launcher::drawRetailGeneralSound() {
+  drawRetailAudioOptions();
+  drawRetailGeneralOptions();
+}
+
+void Launcher::drawRetailAudioOptions() {
+  ImGui::Spacing();
+  ImGui::SeparatorText("Audio (retail Config.DAT)");
+  if (!retailConfigReady) {
+    ImGui::TextDisabled(
+        "The game host has not provided a Config.DAT profile; retail options "
+        "are unavailable to avoid modifying another player's saves.");
+    return;
+  }
+  using Policy = Kotonoha::SchoolDaysRetailConfigPolicy;
+  // Both the Advanced tab and this retail page edit the same engine draft.
+  // Reproject changed generic sliders into the authenticated 0..10 levels.
+  const bool genericRestoredDefaults =
+      settings().channelVolumes.find("BGM") == settings().channelVolumes.end() &&
+      settings().channelVolumes.find("SE") == settings().channelVolumes.end() &&
+      settings().channelVolumes.find("Voice") == settings().channelVolumes.end();
+  syncRetailFromMixer();
+  if (genericRestoredDefaults) aspectPreference = 0;
+  const auto drawVolume = [&](const char *label, Policy::NativeAudioBank bank) {
+    int level = Policy::Level(retailDraft, bank);
+    if (ImGui::SliderInt(label, &level, 0, 10)) {
+      Policy::SetLevel(&retailDraft, bank, level);
+      syncMixerFromRetail();
+    }
+  };
+  drawVolume("BGM volume##sd", Policy::NativeAudioBank::Bgm);
+  drawVolume("SE volume##sd", Policy::NativeAudioBank::Se);
+  drawVolume("Voice volume##sd", Policy::NativeAudioBank::Voice);
+  ImGui::Checkbox("Male voices##sd", &retailDraft.menVoice);
+  if (ImGui::Checkbox("Mute game audio##sd", &retailDraft.mute))
+    syncMixerFromRetail();
+  ImGui::SliderFloat("Master volume##sd", &settings().masterVolume,
+                     0.0f, 1.0f, "%.2f");
+  auto [movie, inserted] =
+      settings().channelVolumes.try_emplace("Movie", 1.0f);
+  (void)inserted;
+  ImGui::SliderFloat("Movie volume##sd", &movie->second, 0.0f, 1.0f,
+                     "%.2f");
+  ImGui::TextDisabled(
+      "Retail MasterVolume is intentionally left untouched: its original "
+      "load-back semantics are not authenticated.");
+}
+
+void Launcher::drawRetailGeneralOptions() {
+  ImGui::Spacing();
+  ImGui::SeparatorText("General options");
+  if (!retailConfigReady) {
+    ImGui::TextDisabled("The retail Config.DAT profile is unavailable.");
+    return;
+  }
+  using Policy = Kotonoha::SchoolDaysRetailConfigPolicy;
+  ImGui::Checkbox("Show text##sd", &retailDraft.textView);
+  ImGui::Checkbox("Skip unread scenes##sd", &retailDraft.skip);
+  ImGui::Checkbox("SuperSkip / next choice##sd", &retailDraft.superSkip);
+  ImGui::Checkbox("Auto draw##sd", &retailDraft.autoDraw);
+  ImGui::Checkbox("Auto mode##sd", &retailDraft.autoMode);
+  ImGui::Checkbox("Swap controller A/B##sd", &settings().swapControllerAB);
+  ImGui::Checkbox("Forced subtitles##sd", &settings().enableForcedSubtitles);
+
+  constexpr const char *aspectLabels[]{"Automatic", "4:3", "16:9"};
+  int aspect = aspectPreference;
+  if (ImGui::Combo("Narrative aspect##sd", &aspect, aspectLabels, 3))
+    setContentAspectPreference(aspect);
+  ImGui::TextDisabled(
+      "Narrative aspect changes the authored story layout only; monitor "
+      "resolution remains in settings.json.");
+  if (ImGui::Button("Retail General/Sound defaults##sd")) {
+    retailDraft = Policy::Defaults();
+    syncMixerFromRetail();
+    aspectPreference = 0;
+  }
+}
+
+void Launcher::drawGameOptions() {
+  seedFirstRunDisplayIfPossible();
+  GameLauncher::drawGameOptions();
+  drawSharedDisplayOptions();
+  drawRetailGeneralSound();
+  drawLanguageOptions();
+}
+
+void Launcher::drawLanguageOptions() {
+  ImGui::Spacing();
+  ImGui::SeparatorText("School Days HQ language");
+  const auto beforeSelection = language();
+  const char *current = beforeSelection == Language::English
+                            ? "English (original)"
+                            : beforeSelection == Language::Spanish
+                                  ? "Spanish (JSON)"
+                            : beforeSelection == Language::ChineseSimplified
+                                  ? "Chinese - Simplified (JSON)"
+                                  : "Custom JSON (Translation tab)";
+  if (ImGui::BeginCombo("Language", current)) {
+    if (ImGui::Selectable("English (original)", beforeSelection == Language::English))
+      setLanguage(Language::English);
+    if (ImGui::Selectable("Spanish (JSON)", beforeSelection == Language::Spanish))
+      setLanguage(Language::Spanish);
+    if (ImGui::Selectable("Chinese - Simplified (JSON)",
+                          beforeSelection == Language::ChineseSimplified))
+      setLanguage(Language::ChineseSimplified);
+    if (ImGui::Selectable("Custom JSON", beforeSelection == Language::CustomJson))
+      setLanguage(Language::CustomJson);
+    ImGui::EndCombo();
+  }
+  const auto selected = language();
+  if (selected == Language::English) {
+    ImGui::TextDisabled("English uses the original School Days HQ dialogue.");
+  } else {
+    if (regularTranslationFile(settings().translationPath)) {
+      ImGui::TextWrapped("Base HQ JSON: %s",
+                         settings().translationPath.c_str());
+      ImGui::TextWrapped(
+          "Play checks dialogue, choices and reviewed source-identical "
+          "phrases. Missing entries do not fall back to English.");
+    } else {
+      ImGui::TextWrapped(
+          "Base language JSON missing. Choose the matching HQ JSON before Play.");
+    }
+    if (ImGui::Button("Choose base HQ JSON...")) {
+      const auto initial = settings().translationPath.empty()
+                               ? (getSettingsPath().empty() ? std::string{}
+                                    : (fs::path(getSettingsPath()).parent_path() /
+                                       "translations").string())
+                               : fs::path(settings().translationPath)
+                                     .parent_path().string();
+      browseFile({{"Translation JSON (*.json)", "json"},
+                  {"All files (*)", "*"}},
+                 initial, [this, selected](const std::string &path) {
+                   if (selected == Language::Spanish) setSpanishJsonPath(path);
+                   else if (selected == Language::ChineseSimplified)
+                     setChineseJsonPath(path);
+                   else setCustomJsonPath(path);
+                 });
+    }
+  }
+
+  ImGui::Spacing();
+  ImGui::SeparatorText("LxH epilogue translation (7 endings)");
+  const auto manual = manualLxhJsonPath();
+  const auto lxh = lxhJsonPath();
+  ImGui::TextWrapped("LxH JSON (%s): %s",
+                     manual.empty() ? "auto-matched to base" : "manual override",
+                     lxh.empty() ? "Not found" : lxh.c_str());
+  if (ImGui::Button("Choose LxH JSON...")) {
+    const auto initial = lxh.empty()
+        ? (getSettingsPath().empty() ? std::string{}
+             : (fs::path(getSettingsPath()).parent_path() / "translations").string())
+        : fs::path(lxh).parent_path().string();
+    browseFile({{"Translation JSON (*.json)", "json"}, {"All files (*)", "*"}},
+               initial, [this](const std::string &path) { setLxhJsonPath(path); });
+  }
+  if (!manual.empty()) {
+    ImGui::SameLine();
+    if (ImGui::Button("Use matching LxH automatically")) setLxhJsonPath({});
+  }
+  ImGui::TextWrapped(
+      "The LxH videos remain in Packs/LxH.GPK. Only subtitle JSON changes; "
+      "the base and LxH JSON are validated together before Play.");
+}
+
+bool Launcher::loadLauncherArtwork() {
+  if (artworkAttempted) return launcherArtwork != nullptr;
+  artworkAttempted = true;
+  // This is the user's School Days HQ artwork, not an external launcher
+  // mockup. The installed copy is deliberately kept separate from retail GPKs.
+  constexpr const char *filename = "SchoolDaysHQ-Launcher.png";
+  std::vector<fs::path> choices;
+  if (const char *base = SDL_GetBasePath(); base && *base) {
+    choices.emplace_back(fs::path(base) / "assets" / filename);
+    choices.emplace_back(fs::path(base) / "launcher-art" / filename);
+  }
+  if (const auto found = Kotonoha::FileResolver::findGameAsset(
+          "school-days", std::string("launcher-art/") + filename))
+    choices.push_back(*found);
+  choices.emplace_back(fs::path("games/school-days/launcher-art") / filename);
+  for (const auto &candidate : choices) {
+    std::error_code ec;
+    if (!fs::is_regular_file(candidate, ec) || ec) continue;
+    try {
+      const auto length = fs::file_size(candidate, ec);
+      if (ec || length == 0 || length > 16 * 1024 * 1024u)
+        throw std::runtime_error("invalid artwork size");
+      std::ifstream input(candidate, std::ios::binary);
+      if (!input) throw std::runtime_error("cannot read artwork");
+      std::vector<Uint8> bytes((std::istreambuf_iterator<char>(input)), {});
+      auto surface = Kotonoha::MediaDecoder::decodePicture(bytes);
+      if (!surface) throw std::runtime_error("cannot decode artwork");
+      launcherArtwork.reset(SDL_CreateTextureFromSurface(launcherRenderer(),
+                                                         surface.get()));
+      if (!launcherArtwork) throw std::runtime_error(SDL_GetError());
+      SDL_SetTextureScaleMode(launcherArtwork.get(), SDL_SCALEMODE_LINEAR);
+      return true;
+    } catch (const std::exception &error) {
+      SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                  "School Days launcher artwork %s: %s",
+                  candidate.string().c_str(), error.what());
+    }
+  }
+  SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+              "School Days HQ launcher artwork is missing; restore assets/%s",
+              filename);
+  return false;
+}
+
+void Launcher::openOptions() {
+  if (screen == Screen::Options) return;
+  optionSnapshot = OptionsSnapshot{settings(), retailDraft, selectedLanguage,
+                                   selectedLocaleBaseJsonPath,
+                                   selectedManualLxhJsonPath,
+                                   manualLxhBaseJsonPath, aspectPreference};
+  screen = Screen::Options;
+  if (launcherWindow()) SDL_SetWindowSize(launcherWindow(), 950, 700);
+}
+
+void Launcher::cancelOptions() {
+  if (optionSnapshot) {
+    settings() = optionSnapshot->settings;
+    retailDraft = optionSnapshot->retail;
+    selectedLanguage = optionSnapshot->language;
+    selectedLocaleBaseJsonPath = optionSnapshot->baseJson;
+    selectedManualLxhJsonPath = optionSnapshot->manualLxhJson;
+    manualLxhBaseJsonPath = optionSnapshot->manualLxhBase;
+    aspectPreference = optionSnapshot->aspect;
+  }
+  optionSnapshot.reset();
+  screen = Screen::Main;
+  if (launcherWindow()) SDL_SetWindowSize(launcherWindow(), 950, 600);
+}
+
+void Launcher::resetOptions() {
+  // Reset is a draft operation until OK is clicked, matching conventional
+  // Windows setup dialogs. Cancel can still restore the original snapshot.
+  resetEngineDefaults();
+  retailDraft = Kotonoha::SchoolDaysRetailConfigPolicy::Defaults();
+  syncMixerFromRetail();
+  aspectPreference = 0;
+  setLanguage(Language::English);
+  selectedManualLxhJsonPath.clear();
+  manualLxhBaseJsonPath.clear();
+  setStatus("Default options are staged. Select OK to save them.", false);
+}
+
+void Launcher::drawMainScreen() {
+  const ImVec2 start = ImGui::GetWindowPos();
+  const ImVec2 size = ImGui::GetWindowSize();
+  ImDrawList *draw = ImGui::GetWindowDrawList();
+  draw->AddRectFilled(start,
+                      {start.x + size.x, start.y + size.y},
+                      IM_COL32(229, 243, 247, 255));
+  if (loadLauncherArtwork()) {
+    draw->AddImage(ImTextureRef(launcherArtwork.get()), start,
+                   {start.x + size.x, start.y + size.y});
+  } else {
+    draw->AddText({start.x + 50.0f, start.y + 110.0f},
+                  IM_COL32(15, 48, 74, 255), "SCHOOL DAYS HQ");
+    draw->AddText({start.x + 50.0f, start.y + 140.0f},
+                  IM_COL32(150, 35, 41, 255),
+                  "Missing assets/SchoolDaysHQ-Launcher.png");
+  }
+
+  // The supplied artwork already contains its original School Days HQ logo.
+  // Place the three actions immediately above it, in the clear sky area.
+  const float buttonWidth = size.x * 0.253f;
+  const float buttonHeight = std::max(35.0f, size.y * 0.068f);
+  const float left = start.x + size.x * 0.642f;
+  const float firstY = start.y + size.y * 0.49f;
+  ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 2.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+  ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.04f, 0.19f, 0.33f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0));
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                         ImVec4(0.86f, 0.95f, 1.0f, 0.80f));
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+                         ImVec4(0.75f, 0.87f, 0.96f, 0.90f));
+  const auto button = [&](const char *label, int row) {
+    ImGui::SetCursorScreenPos(
+        {left, firstY + static_cast<float>(row) * (buttonHeight + 5.0f)});
+    ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.32f);
+    const bool clicked = ImGui::Button(label, {buttonWidth, buttonHeight});
+    ImGui::PopFont();
+    return clicked;
+  };
+  if (button("PLAY##school-days-main", 0)) (void)launch();
+  if (button("OPTIONS##school-days-main", 1)) openOptions();
+  if (button("QUIT##school-days-main", 2)) quit();
+  ImGui::PopStyleColor(4);
+  ImGui::PopStyleVar(2);
+
+  if (!getStatus().empty()) {
+    // Play failures must remain visible, rather than obscured by the artwork.
+    const ImVec2 a{start.x + size.x * 0.43f, start.y + size.y * 0.17f};
+    const ImVec2 b{start.x + size.x * 0.95f, start.y + size.y * 0.31f};
+    draw->AddRectFilled(a, b, IM_COL32(255, 255, 255, 225), 5.0f);
+    ImGui::SetCursorScreenPos({a.x + 12.0f, a.y + 9.0f});
+    ImGui::PushTextWrapPos(b.x - 12.0f);
+    ImGui::TextColored({0.62f, 0.12f, 0.14f, 1.0f}, "%s",
+                       getStatus().c_str());
+    ImGui::PopTextWrapPos();
+  }
+}
+
+void Launcher::drawOptionsScreen() {
+  const ImVec2 top = ImGui::GetWindowPos();
+  const ImVec2 size = ImGui::GetWindowSize();
+  ImDrawList *draw = ImGui::GetWindowDrawList();
+  const float bannerHeight = 175.0f;
+  draw->AddRectFilled(top, {top.x + size.x, top.y + size.y},
+                      IM_COL32(248, 249, 251, 255));
+  if (loadLauncherArtwork()) {
+    // Crop ONLY the user's Kotonoha/Sekai key visual: show their faces in the
+    // setup header without including the large logo twice.
+    draw->AddImage(ImTextureRef(launcherArtwork.get()), top,
+                   {top.x + size.x, top.y + bannerHeight},
+                   {0.0f, 0.065f}, {1.0f, 0.357f});
+  }
+  draw->AddRectFilledMultiColor(
+      {top.x + size.x * 0.56f, top.y},
+      {top.x + size.x, top.y + bannerHeight},
+      IM_COL32(255, 255, 255, 0), IM_COL32(247, 250, 253, 243),
+      IM_COL32(247, 250, 253, 243), IM_COL32(255, 255, 255, 0));
+  draw->AddRectFilled({top.x, top.y + bannerHeight - 2.0f},
+                      {top.x + size.x, top.y + bannerHeight},
+                      IM_COL32(24, 81, 126, 255));
+  ImGui::SetCursorScreenPos({top.x + size.x * 0.68f, top.y + 61.0f});
+  ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.04f, 0.19f, 0.33f, 1.0f));
+  ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.45f);
+  ImGui::TextUnformatted("School Days HQ");
+  ImGui::PopFont();
+  ImGui::SetCursorScreenPos({top.x + size.x * 0.68f, top.y + 98.0f});
+  ImGui::TextUnformatted("SETUP / OPTIONS");
+  ImGui::PopStyleColor();
+
+  // Win32-style setup treatment, rendered inside the already embedded ImGui
+  // backend. No second executable, UI process, GUI toolkit or background app.
+  ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 2.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+  ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.11f, 0.16f, 0.22f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_TextDisabled,
+                         ImVec4(0.39f, 0.45f, 0.51f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_ChildBg,
+                         ImVec4(0.974f, 0.978f, 0.982f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_FrameBg,
+                         ImVec4(0.99f, 0.995f, 1.0f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_FrameBgHovered,
+                         ImVec4(0.91f, 0.95f, 0.985f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_Button,
+                         ImVec4(0.91f, 0.93f, 0.95f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                         ImVec4(0.81f, 0.90f, 0.97f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+                         ImVec4(0.72f, 0.84f, 0.96f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_Header,
+                         ImVec4(0.82f, 0.90f, 0.96f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_HeaderHovered,
+                         ImVec4(0.73f, 0.86f, 0.95f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_Tab,
+                         ImVec4(0.90f, 0.93f, 0.96f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_TabHovered,
+                         ImVec4(0.81f, 0.90f, 0.97f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_TabSelected,
+                         ImVec4(0.98f, 0.99f, 1.0f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_Border,
+                         ImVec4(0.76f, 0.79f, 0.83f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_SliderGrab,
+                         ImVec4(0.11f, 0.39f, 0.62f, 1.0f));
+
+  ImGui::SetCursorScreenPos({top.x + 22.0f, top.y + bannerHeight + 14.0f});
+  ImGui::BeginChild("##school-days-options-body",
+                    {std::max(100.0f, size.x - 44.0f),
+                     std::max(130.0f, size.y - bannerHeight - 101.0f)},
+                    ImGuiChildFlags_Borders);
+  if (ImGui::BeginTabBar("##school-days-options-tabs")) {
+    if (ImGui::BeginTabItem("Display")) {
+      drawPhysicalDisplayOptions();
+      ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Graphics")) {
+      drawGraphicsOptions();
+      if (ImGui::CollapsingHeader("Additional engine upscaling settings"))
+        drawUpscaling();
+      ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Audio")) {
+      drawRetailAudioOptions();
+      ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("General")) {
+      drawRetailGeneralOptions();
+      ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Language")) {
+      drawLanguageOptions();
+      ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Advanced")) {
+      ImGui::SeparatorText("Data files and routing");
+      GameLauncher::drawGameOptions();
+      ImGui::SeparatorText("Asset overlay");
+      ImGui::InputText("Overlay folder##sd", &settings().assetOverlayPath);
+      if (ImGui::Button("Choose overlay folder..."))
+        browseFolder(settings().assetOverlayPath, [this](const std::string &value) {
+          settings().assetOverlayPath = value;
+        });
+      ImGui::SameLine();
+      if (ImGui::Button("Automatic overlay"))
+        settings().assetOverlayPath.clear();
+      if (ImGui::CollapsingHeader("Advanced translation and font paths"))
+        drawTranslation();
+      if (ImGui::CollapsingHeader("Advanced engine settings"))
+        drawAdvanced();
+      ImGui::EndTabItem();
+    }
+    ImGui::EndTabBar();
+  }
+  ImGui::EndChild();
+
+  const float footerY = top.y + size.y - 65.0f;
+  ImGui::SetCursorScreenPos({top.x + 25.0f, footerY});
+  if (ImGui::Button("Reset##school-days-options", {112.0f, 31.0f}))
+    resetOptions();
+  ImGui::SetCursorScreenPos({top.x + size.x - 261.0f, footerY});
+  if (ImGui::Button("OK##school-days-options", {112.0f, 31.0f})) {
+    if (apply()) {
+      optionSnapshot.reset();
+      screen = Screen::Main;
+      if (launcherWindow()) SDL_SetWindowSize(launcherWindow(), 950, 600);
+    }
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Cancel##school-days-options", {112.0f, 31.0f}))
+    cancelOptions();
+  if (ImGui::IsKeyPressed(ImGuiKey_Escape)) cancelOptions();
+  if (!getStatus().empty()) {
+    ImGui::SetCursorScreenPos({top.x + 25.0f, footerY + 37.0f});
+    ImGui::PushTextWrapPos(top.x + size.x - 30.0f);
+    ImGui::TextColored({0.50f, 0.21f, 0.20f, 1.0f}, "%s",
+                       getStatus().c_str());
+    ImGui::PopTextWrapPos();
+  }
+  ImGui::PopStyleColor(15);
+  ImGui::PopStyleVar(3);
+}
+
+bool Launcher::drawCustomContents() {
+  if (!launcherWindow() || !launcherRenderer()) return false;
+  if (screen == Screen::Main)
+    drawMainScreen();
+  else
+    drawOptionsScreen();
+  return true;
+}
+
+bool Launcher::validate(std::string &error) {
+  seedFirstRunDisplayIfPossible();
+  if (!GameLauncher::validate(error)) return false;
+  if (retailConfigReady) {
+    try {
+      checkRetailFileUnchanged();
+      if (aspectPreference != loadedAspectPreference &&
+          readAspectPreference(retailRoot) != loadedAspectPreference)
+        throw std::runtime_error(
+            "Narrative aspect changed in another session; close and reopen launcher");
+      syncRetailFromMixer();
+    } catch (const std::exception &exception) {
+      error = exception.what();
+      return false;
+    }
+    // Cache only: this path performs no disk I/O. The host writes Config.DAT
+    // after Play passes every locale gate, in save().
+    std::string failure;
+    if (!retailStorage.CacheState(retailDraft, &failure)) {
+      error = "Cannot stage retail General/Sound settings: " + failure;
+      return false;
+    }
+    if (!retailStorage.CacheWindowMode(
+            settings().mode == Kotonoha::WindowMode::Windowed ? 0 : 1,
+            &failure)) {
+      error = "Cannot stage retail WindowMode: " + failure;
+      return false;
+    }
+    if (aspectPreference != loadedAspectPreference && aspectPreference != 0) {
+      const auto authored = Kotonoha::SchoolDaysDisplayPolicy::
+          CanonicalRetailStateForVariant(
+              aspectPreference == 1
+                  ? Kotonoha::SchoolDaysDisplayPolicy::Variant::Standard
+                  : Kotonoha::SchoolDaysDisplayPolicy::Variant::WideFull);
+      if (!retailStorage.CacheDisplayType(authored.effectiveDisplayType,
+                                          &failure) ||
+          !retailStorage.CacheTypeMiniNote(authored.typeMiniNote, &failure)) {
+        error = "Cannot stage authored aspect in Config.DAT: " + failure;
+        return false;
+      }
+    }
+  }
+  const auto &translationFile = settings().translationPath;
+  if (language() != Language::English &&
+      !regularTranslationFile(translationFile)) {
+    error = "Selected non-English locale has no valid base JSON. Choose a "
+            "translation file in School Days HQ language before Play.";
+    return false;
+  }
+  if (!manualLxhJsonPath().empty() &&
+      !regularTranslationFile(manualLxhJsonPath())) {
+    error = "Manually selected LxH JSON is missing. Choose a valid file or "
+            "restore automatic matching.";
+    return false;
+  }
+  // This must match Application's strict locale gate before Play closes the
+  // launcher. The asset provider owns mandatory Packs/LxH.GPK mounting; the
+  // launcher does not offer a separate LxH enable/disable selection.
+  try {
+    SchoolDays::Assets sourceAssets(
+        Kotonoha::gameDataDirectory(path()), effectiveOverlayRoot().string());
+    const bool nativeHq = translationFile.empty();
+    bool epiloguesPresent = false;
+    if (!checkIntegratedLxhContent(sourceAssets, &epiloguesPresent, error))
+      return false;
+    // Some extracted synthetic fixtures contain only HQ scripts. Production
+    // packed installs always require the complete additional LxH.GPK.
+    if (nativeHq && !epiloguesPresent) return true;
+
+    Kotonoha::Translation dictionary, reviewed, dlc, reviewedDlc;
+    if (!nativeHq) {
+      dictionary.load(translationFile);
+      reviewed = Kotonoha::SchoolDaysTranslationGate::LoadReviewedIdentities(
+          translationFile);
+      if (language() == Language::Spanish ||
+          language() == Language::ChineseSimplified) {
+        bool hasTranslation = false;
+        for (const auto &[node, entries] : dictionary.getSections()) {
+          for (const auto &[original, translated] : entries)
+            if (!translated.empty() && translated != original) {
+              hasTranslation = true;
+              break;
+            }
+          if (hasTranslation) break;
+        }
+        if (!hasTranslation) {
+          error = "Selected language JSON contains no translated entries.";
+          return false;
+        }
+      }
+    }
+
+    const auto locale = Kotonoha::SchoolDaysTranslationGate::LocaleId(
+        translationFile);
+    std::string dlcFile;
+    if (epiloguesPresent) {
+      dlcFile = lxhJsonPath();
+      // Native English and new non-native locales need an independent epilogue
+      // dictionary. The installed Spanish V4b is the sole legacy exception:
+      // its HQ JSON already contains the 273 reviewed LxH occurrences.
+      // Checking only layered coverage would allow a custom HQ JSON to
+      // masquerade as the required per-locale LxH sidecar.
+      if (dlcFile.empty() && locale != "es") {
+        error = "Selected School Days locale INCOMPLETE: LxH requires " +
+                locale + "-lxh.json before Play (no epilogue JSON installed).";
+        return false;
+      }
+      if (!dlcFile.empty()) {
+        dlc.load(dlcFile);
+        reviewedDlc =
+            Kotonoha::SchoolDaysTranslationGate::LoadReviewedIdentities(dlcFile);
+      }
+    }
+    const auto sources = Kotonoha::SchoolDaysTranslationGate::CollectDetailed(
+        sourceAssets, routePath());
+    const auto audit = Kotonoha::SchoolDaysTranslationGate::CheckLayered(
+        sources, dictionary, reviewed, dlc, reviewedDlc, nativeHq);
+    if (locale == "es" && audit.overriddenBaseSlots != 0) {
+      error = "Spanish LxH JSON conflicts with the installed HQ V4b (" +
+              std::to_string(audit.overriddenBaseSlots) +
+              " changed dialogue(s)). Preserve the already reviewed Spanish lines.";
+      return false;
+    }
+    if (!audit.certifiedForNonNativeDisplay()) {
+      error = "Selected School Days locale INCOMPLETE: " + audit.summary() +
+              (epiloguesPresent
+                   ? ". LxH requires complete dialogue for locale " + locale +
+                         (dlcFile.empty() ? " (epilogue JSON missing)." :
+                                            " (epilogue JSON: " + dlcFile + ").")
+                   : ". English fallback is forbidden. Review missing and "
+                     "source-identical dialogue/choices before Play.");
+      return false;
+    }
+  } catch (const std::exception &exception) {
+    error = std::string("School Days locale validation failed: ") +
+            exception.what();
+    return false;
+  }
+  return true;
+}
+
+void Launcher::save() {
+  if (retailConfigReady) {
+    checkRetailFileUnchanged();
+    std::error_code ec;
+    fs::create_directories(retailRoot, ec);
+    if (ec)
+      throw std::runtime_error("Cannot create retail profile: " + ec.message());
+    std::string failure;
+    if (!retailStorage.Flush(&failure))
+      throw std::runtime_error("Cannot save retail Config.DAT: " + failure);
+    saveAspectPreference();
+  }
+  GameLauncher::save();
+  if (!getSettingsPath().empty()) {
+    std::string error;
+    if (!persistShaderPaths(getSettingsPath(),
+                            settings().upscaling.shaderFiles, &error))
+      throw std::runtime_error("Cannot persist custom GLSL paths: " + error);
+  }
+  if (getSettingsPath().empty()) return;
+  if (!languagePreferenceFile.empty()) {
+    const char *value = language() == Language::Spanish ? "spanish"
+                        : language() == Language::ChineseSimplified ? "chinese"
+                        : language() == Language::English ? "english" : "custom";
+    std::string payload = std::string(value) + "\n";
+    if (language() != Language::English)
+      payload += settings().translationPath + "\n";
+    if (!manualLxhJsonPath().empty()) {
+      if (language() == Language::English) payload += "\n";
+      payload += "lxh-json=" + manualLxhJsonPath() + "\n";
+    }
+    Kotonoha::writeTextFileAtomically(languagePreferenceFile.string(),
+                                      payload);
+  }
 }
 
 } // namespace SchoolDays

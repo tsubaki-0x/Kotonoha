@@ -8,9 +8,11 @@
 #include <Kotonoha/core/DiscImage.hpp>
 #include <Kotonoha/core/Engine.hpp>
 #include <Kotonoha/core/CommandLine.hpp>
+#include <Kotonoha/routing/SchoolDaysTranslationCoverage.hpp>
 #include <Kotonoha/core/FileSystem.hpp>
 #include <cstdlib>
 #include <cstdio>
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -50,11 +52,79 @@ Kotonoha::EngineOptions WithAssets(Kotonoha::EngineOptions options,
 }
 
 struct Application {
+  std::string requestedTranslation;
   SchoolDays::Runtime runtime;
   Kotonoha::Engine engine;
   Application(std::shared_ptr<SchoolDays::Assets> assets, const std::string &route,
-              Kotonoha::EngineOptions options, const std::string &documents)
-      : runtime(assets, route, documents), engine(runtime, WithAssets(std::move(options), assets)) {}
+              Kotonoha::EngineOptions options, const std::string &documents,
+              const std::string &lxhJsonOverride = {})
+      : requestedTranslation(options.translationPath),
+        runtime(assets, route, documents, options.settingsPath),
+        engine(runtime, WithAssets(std::move(options), assets)) {
+    const auto &dictionary = engine.GetTranslation();
+    const char *environmentTranslation = std::getenv("KOTONOHA_TRANSLATION");
+    const bool nonNativeSelected = !requestedTranslation.empty() ||
+        !engine.GetSettings().translationPath.empty() ||
+        !dictionary.getSections().empty() ||
+        (environmentTranslation && *environmentTranslation);
+    const auto translationFile = !requestedTranslation.empty()
+        ? requestedTranslation
+        : !engine.GetSettings().translationPath.empty()
+              ? engine.GetSettings().translationPath
+              : environmentTranslation && *environmentTranslation
+                  ? std::string(environmentTranslation) : std::string{};
+    Kotonoha::Translation dlc;
+    Kotonoha::Translation reviewedDlc;
+    std::string dlcFile;
+    const auto locale = Kotonoha::SchoolDaysTranslationGate::LocaleId(
+        translationFile);
+    // Packaged installs are permanently LxH-integrated and were validated
+    // at mount. Only extracted loose developer fixtures may contain base HQ
+    // ORS without the seven grafts; this is not a user-selectable DLC mode.
+    const auto sources =
+        Kotonoha::SchoolDaysTranslationGate::CollectDetailed(*assets, route);
+    const bool integratedContent = assets->usesPackedResources() ||
+        std::any_of(sources.begin(), sources.end(),
+                    [](const auto &slot) { return slot.lxh; });
+    if (integratedContent) {
+      dlcFile = lxhJsonOverride.empty()
+          ? Kotonoha::SchoolDaysTranslationGate::DlcJsonPath(locale, translationFile)
+          : lxhJsonOverride;
+      Kotonoha::SchoolDaysTranslationGate::RequireLxhSidecar(locale, dlcFile);
+      if (!dlcFile.empty()) {
+        dlc.load(dlcFile);
+        reviewedDlc =
+            Kotonoha::SchoolDaysTranslationGate::LoadReviewedIdentities(dlcFile);
+      }
+    }
+    if (nonNativeSelected || integratedContent) {
+      const auto reviewed = nonNativeSelected
+          ? Kotonoha::SchoolDaysTranslationGate::LoadReviewedIdentities(
+                translationFile)
+          : Kotonoha::Translation{};
+      const auto audit = Kotonoha::SchoolDaysTranslationGate::CheckLayered(
+          sources, dictionary, reviewed, dlc, reviewedDlc, !nonNativeSelected);
+      // The installed V4b Spanish dictionary already has all 273 LxH slots,
+      // including nine independently corrected translations. A sidecar may
+      // supply new missing slots, but must never silently replace these.
+      if (locale == "es" && audit.overriddenBaseSlots != 0)
+        throw std::runtime_error(
+            "Spanish LxH JSON conflicts with the installed HQ V4b " +
+            std::to_string(audit.overriddenBaseSlots) +
+            " time(s). Preserve the already reviewed Spanish lines.");
+      if (!audit.certifiedForNonNativeDisplay())
+        throw std::runtime_error(
+            "Selected School Days translation is INCOMPLETE: " + audit.summary() +
+            (integratedContent
+                 ? ". The integrated LxH pack requires complete dialogue "
+                   "for the selected locale and forbids silent English fallback " +
+                       (dlcFile.empty() ? "(LxH JSON missing)." :
+                                          "(LxH JSON: " + dlcFile + ").")
+                 : ". English fallback is forbidden in non-native language "
+                   "even for an extracted developer fixture."));
+    }
+    runtime.setLxhTranslation(std::move(dlc), locale);
+  }
   ~Application() { runtime.shutdown(); }
 };
 
@@ -62,15 +132,74 @@ struct App {
   std::unique_ptr<SchoolDays::Launcher> launcher;
   std::unique_ptr<Application> application;
   Kotonoha::EngineOptions options;
-  std::string scripts, route, startNode, dump, documents;
+  std::string scripts, route, startNode, dump, documents, lxhJsonOverride;
   long frames = -1;
   void start(const std::string &directory) {
     DevStartupLog("assets-open", directory);
+    // The generic engine serializes custom GLSL references as portable names.
+    // School Days also retains the player's original, explicitly selected
+    // external shader paths in its local launcher sidecar. Reapply only paths
+    // that still match the persisted shader names and exist on this computer.
+    std::string resolvedShaderPaths;
+    // Ruaneri's generic settings serializer stores portable basenames. The
+    // School Days launcher keeps full paths for community translations and
+    // optional custom display artwork. Restore those paths on
+    // ordinary no-launcher restarts too, without touching generic engine code.
+    // Explicit --translation, --asset-overlay and --no-asset-overlay win.
+    if (options.persistSettings && !options.settingsPath.empty() &&
+        std::filesystem::is_regular_file(options.settingsPath)) {
+      try {
+        const auto saved = Kotonoha::EngineSettings::load(options.settingsPath);
+        resolvedShaderPaths = SchoolDays::Launcher::resolveStoredShaderPaths(
+            options.settingsPath, saved.upscaling.shaderFiles);
+        if (options.translationPath.empty() && !saved.translationPath.empty())
+          options.translationPath = SchoolDays::Launcher::resolveStoredTranslation(
+              options.settingsPath, saved.translationPath);
+        if (!options.assetOverlaySpecified && options.assetOverlayPath.empty() &&
+            !saved.assetOverlayPath.empty()) {
+          options.assetOverlayPath = saved.assetOverlayPath;
+          options.settings.assetOverlayPath = options.assetOverlayPath;
+        }
+      } catch (const std::exception &) {
+        // Engine owns validation/reporting for invalid user settings.
+      }
+    }
+    if (options.persistSettings && !options.settingsPath.empty() &&
+        SchoolDays::Launcher::nonNativeLanguagePreferenceSelected(
+            options.settingsPath)) {
+      // A relocated/nonstandard settings.json may have lost the JSON's full
+      // path (or the generic basename entirely), but the dedicated launcher
+      // still remembers the selected Spanish/Chinese/custom locale. Do not
+      // silently return to English while a non-native language is selected.
+      if (options.translationPath.empty())
+        options.translationPath =
+            SchoolDays::Launcher::rememberedLocaleJsonPath(options.settingsPath);
+      if (options.translationPath.empty())
+        throw std::runtime_error(
+            "Non-English language is selected but its HQ JSON is missing; "
+            "refusing English fallback. Select a valid base translation.");
+    }
+    if (lxhJsonOverride.empty() && options.persistSettings &&
+        !options.settingsPath.empty())
+      lxhJsonOverride = SchoolDays::Launcher::rememberedLxhJsonPath(
+          options.settingsPath, options.translationPath);
     auto assets = std::make_shared<SchoolDays::Assets>(
         Kotonoha::gameDataDirectory(directory),
         scripts.empty() ? options.assetOverlayDirectory() : scripts);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "School Days LxH integrated: mandatory Packs/LxH.GPK (7 original endings)");
     DevStartupLog("assets-ready");
-    application = std::make_unique<Application>(std::move(assets), route, options, documents);
+    application = std::make_unique<Application>(std::move(assets), route, options,
+                                                documents, lxhJsonOverride);
+    if (!resolvedShaderPaths.empty() &&
+        application->engine.GetSettings().upscaling.shaderFiles != resolvedShaderPaths) {
+      auto live = application->engine.GetSettings();
+      live.upscaling.shaderFiles = resolvedShaderPaths;
+      // Engine's constructor has already read the portable settings.json.
+      // This happens before the first frame; persist=false avoids replacing
+      // the portable basename with an unusable absolute-only reference.
+      application->engine.applySettings(live, false);
+    }
     DevStartupLog("engine-ready");
     if (!startNode.empty()) {
       application->runtime.SetState(Kotonoha::GameState::Gameplay);
@@ -90,16 +219,23 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     auto app = std::make_unique<App>();
     std::string directory;
     app->options.persistSettings = true;
-    // The retail profile starts the game directly. CommandLine already owns
-    // --launcher/--no-launcher and writes this EngineOptions field.
+    // On Windows this is a single-executable game: an ordinary double-click
+    // always opens the embedded launcher. --no-launcher remains available for
+    // automated/headless and developer runs. Android behavior is unchanged.
+#if defined(_WIN32) && !defined(__ANDROID__)
+    app->options.launcher = true;
+#else
     app->options.launcher = false;
+#endif
 #if defined(_WIN32) && !defined(__ANDROID__)
     // The School Days commercial-test profile exposed Anime4K/ArtCNN to the
     // player.  In v3 the MPV-compatible upscaler is hosted by SDL's OpenGL
     // renderer, so prefer that renderer for a fresh/default Windows launch.
-    // Command-line renderer selection is parsed below and can still override
-    // this profile when explicitly requested.
-    app->options.rendererOverride = "opengl";
+    // This is a FIRST-RUN default, not a forced rendererOverride: the latter
+    // would silently defeat an explicit renderer chosen in the launcher and
+    // saved in settings.json on every subsequent Windows launch. A genuine
+    // command-line --renderer remains authoritative via rendererOverride.
+    app->options.settings.renderer = "opengl";
     app->options.settings.mode = Kotonoha::WindowMode::Borderless;
     app->options.settings.vsync = true;
     app->options.settings.upscaling.backend = Kotonoha::UpscaleBackend::Auto;
@@ -129,6 +265,10 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     arguments.option("--node", "ID", "Start at an index or scene key", app->startNode);
     arguments.option("--dump-ktrf", "FILE", "Export the active routing graph", app->dump);
     arguments.parse(argc, argv);
+    // Analysis/QA commands are not a user double-click. Preserve their
+    // non-interactive behavior even when no window server is available.
+    if (!app->dump.empty() || !app->startNode.empty() || arguments.frames > 0)
+      app->options.launcher = false;
     DevStartupLog("arguments-parsed");
     if (arguments.wantsHelp()) { std::fputs(arguments.help().c_str(), stdout); return SDL_APP_SUCCESS; }
     app->frames = arguments.frames;
@@ -172,11 +312,23 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     // remembered custom route impossible to reuse on the next launch.
     const auto rememberedValidRoute = [](const std::string &settingsPath) {
       if (settingsPath.empty()) return std::string{};
-      const auto path = Kotonoha::GameLauncher::rememberedPath(
+      const auto saved = Kotonoha::GameLauncher::rememberedPath(
           settingsPath, SchoolDays::Launcher::RouteRememberFile);
+      // A clean local install keeps route.txt portable. Resolve its relative
+      // path beside settings.json, never against a random process CWD.
+      const auto route = std::filesystem::path(saved);
       std::string info;
-      return !path.empty() && SchoolDays::Launcher::validateRoute(path, info)
-                 ? path : std::string{};
+      if (saved.empty()) return std::string{};
+      const auto root = std::filesystem::path(settingsPath).parent_path();
+      const auto candidates = route.is_absolute()
+          ? std::vector<std::filesystem::path>{route}
+          : std::vector<std::filesystem::path>{root / route,
+                                                root / "game-assets" / route};
+      for (const auto &candidate : candidates) {
+        const auto path = candidate.lexically_normal().string();
+        if (SchoolDays::Launcher::validateRoute(path, info)) return path;
+      }
+      return std::string{};
     };
     if (app->route.empty()) app->route = rememberedValidRoute(settings);
     if (app->route.empty() && !legacySettings.empty() &&
@@ -189,19 +341,51 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
       if (const char *env = std::getenv("SCHOOL_DAYS_DIR")) directory = env;
     const auto rememberedValidDirectory = [](const std::string &settingsPath) {
       if (settingsPath.empty()) return std::string{};
-      const auto path = Kotonoha::GameLauncher::rememberedPath(settingsPath, "dir.txt");
+      const auto saved = Kotonoha::GameLauncher::rememberedPath(settingsPath, "dir.txt");
+      const auto directory = std::filesystem::path(saved);
+      const auto path = saved.empty() ? std::string{}
+          : (directory.is_absolute() ? directory
+             : std::filesystem::path(settingsPath).parent_path() / directory)
+                .lexically_normal().string();
       std::string info;
       return !path.empty() && SchoolDays::Assets::checkDirectory(path, info)
                  ? path : std::string{};
     };
     if (directory.empty()) directory = rememberedValidDirectory(settings);
+    if (directory.empty()) {
+#if defined(_WIN32) && !defined(__ANDROID__)
+      // Installed game folders keep Packs beside SchoolDays.exe, while the
+      // default discovery API normally starts from game-assets/. Prefer the
+      // installed retail packs even if launched by a desktop shortcut whose
+      // Start In folder is unrelated to the executable directory.
+      std::string installedInfo;
+      const auto installedRoot = Kotonoha::resourceDirectory();
+      if (SchoolDays::Assets::checkDirectory(installedRoot, installedInfo))
+        directory = installedRoot.string();
+#endif
+    }
     if (directory.empty() && !legacySettings.empty() &&
         legacySettings != settings)
       directory = rememberedValidDirectory(legacySettings);
     if (directory.empty()) directory = SchoolDays::Assets::defaultDirectory().string();
     DevStartupLog("data-directory-selected", directory);
     if (app->options.launcher) {
-      app->launcher = std::make_unique<SchoolDays::Launcher>(settings, directory, app->route);
+      // Use the same dedicated School Days launcher, not a second/parallel
+      // UI. Integrated LxH is always present; the selected language controls
+      // both original retail content and the appended epilogues.
+      app->launcher = std::make_unique<SchoolDays::Launcher>(
+          settings, directory, app->route);
+      app->launcher->setRetailConfigRoot(
+          app->documents.empty() ? Kotonoha::resourceDirectory()
+                                 : std::filesystem::path(app->documents));
+      if (!app->scripts.empty())
+        app->launcher->setScriptOverlayPath(app->scripts);
+      if (!app->options.translationPath.empty()) {
+        // Explicit --translation remains authoritative over a remembered
+        // language. The player can still change it in the launcher.
+        app->launcher->settings().translationPath = app->options.translationPath;
+        app->launcher->setLanguage(SchoolDays::Launcher::Language::CustomJson);
+      }
       app->launcher->open();
     } else {
       app->start(directory);
@@ -226,6 +410,11 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
   auto *app = static_cast<App *>(appstate);
   if (!app) return SDL_APP_FAILURE;
   try {
+    if (!app->launcher && app->application &&
+        (event->type == SDL_EVENT_WINDOW_CLOSE_REQUESTED ||
+         event->type == SDL_EVENT_QUIT) &&
+        app->application->runtime.handleNativeQuitRequest())
+      return SDL_APP_CONTINUE;
     return app->launcher ? app->launcher->event(*event) : app->application->engine.Event(event);
   } catch (const std::exception &error) {
     DevStartupLog("event-error", error.what());
@@ -245,6 +434,11 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
         const auto directory = app->launcher->path();
         app->route = app->launcher->routePath();
         app->options.settings = app->launcher->settings();
+        // Seed --translation into the launcher when it opens, then honor the
+        // player's final choice. Choosing English must be able to clear a
+        // previously supplied JSON rather than loading it silently anyway.
+        app->options.translationPath = app->launcher->translationPath();
+        app->lxhJsonOverride = app->launcher->manualLxhJsonPath();
         app->launcher.reset();
         app->start(directory);
       }

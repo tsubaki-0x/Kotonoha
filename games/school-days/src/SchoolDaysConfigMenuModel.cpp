@@ -42,7 +42,7 @@ const char *SchoolDaysConfigMenuModel::PageToken(Page page) {
   case Page::Sound:
     return "Sound";
   case Page::Display:
-    return "Def";
+    return "Display";
   }
   return "Def";
 }
@@ -178,6 +178,18 @@ bool SchoolDaysConfigMenuModel::DecodeAction(Page page, int control,
       action->kind = ActionKind::SetSoundLevel;
       action->soundBank = (control - 14) / 10;
       action->value = ((control - 14) % 10) + 1;
+      return true;
+    }
+    return false;
+  }
+
+  if (page == Page::Display) {
+    // Corrected custom Display CMAP reserves regions 1..22 for control IDs
+    // 0..21. Navigation/Close are handled above; the remaining controls are
+    // forwarded without imposing any physical display policy in the model.
+    if (control >= 4 && control <= 21) {
+      action->kind = ActionKind::DisplayControl;
+      action->value = control;
       return true;
     }
     return false;

@@ -211,6 +211,17 @@ int main() {
                   Presenter::ReplayOpacityAlphaForControl(16) == 50 &&
                   Presenter::ReplayOpacityAlphaForControl(24) == 250,
               "native repeat opacity alpha map drifted");
+        // The Replay Data status label has its own, hover-independent alpha.
+        // Ordinary gameplay, a real 0-level selection, an explicit handoff and
+        // the meter-only choice tail never project the persistent indicator.
+        const auto replayVisible = Presenter::ReplayIndicatorAlphaForState;
+        Check(replayVisible(true, 250, false, false) == 250 &&
+                  replayVisible(true, 50, false, false) == 50 &&
+                  replayVisible(true, 0, false, false) == 0 &&
+                  replayVisible(false, 250, false, false) == 0 &&
+                  replayVisible(true, 250, true, false) == 0 &&
+                  replayVisible(true, 250, false, true) == 0,
+              "Replay Data indicator opacity or independent composition drifted");
         const auto repeatOff = Presenter::FixedChipRecord(69, Variant::Standard);
         const auto repeatOn = Presenter::FixedChipRecord(70, Variant::Standard);
         const auto repeatSelector = Presenter::FixedChipRecord(71, Variant::Standard);
@@ -235,6 +246,33 @@ int main() {
 
         const auto speedEnabled = Presenter::FixedChipRecord(47, Variant::Standard);
         const auto speedDisabled = Presenter::FixedChipRecord(66, Variant::Standard);
+        // Retail MenuBar: selected x2..x32 remains orange when the pointer
+        // leaves the speed row, while x1 has no persistent orange square.
+        const auto selected1x = Presenter::SelectedSpeedChip(
+            0, true, false, Variant::Standard);
+        const auto selected2x = Presenter::SelectedSpeedChip(
+            1, true, false, Variant::Standard);
+        const auto selected4x = Presenter::SelectedSpeedChip(
+            2, true, false, Variant::Standard);
+        const auto selected32xFull = Presenter::SelectedSpeedChip(
+            4, true, false, Variant::WideFull);
+        Check(selected1x.source.w == 0.0f,
+              "Retail x1 has no persistent selected-speed highlight");
+        Near(selected2x.source.x, 231.0f,
+             "Retail x2 persistent selected-speed CHIP source drifted");
+        Near(selected2x.destination.x, 273.0f,
+             "Retail x2 persistent selected-speed destination drifted");
+        Near(selected4x.source.x, 273.0f,
+             "Retail x4 persistent selected-speed CHIP source drifted");
+        Near(selected32xFull.destination.x, 646.4f,
+             "WideFull x32 persistent selected-speed scale drifted");
+        Check(Presenter::SelectedSpeedChip(1, false, false, Variant::Standard)
+                  .source.w == 0.0f &&
+                  Presenter::SelectedSpeedChip(1, true, true, Variant::Standard)
+                      .source.w == 0.0f &&
+                  Presenter::SelectedSpeedChip(5, true, false, Variant::Standard)
+                      .source.w == 0.0f,
+              "Persistent speed highlight ignored native availability");
         const auto superSkipEnabled = Presenter::FixedChipRecord(46, Variant::Standard);
         const auto superSkipDisabled = Presenter::FixedChipRecord(65, Variant::Standard);
         Near(speedEnabled.source.y, 127.0f, "enabled speed base record drifted");
@@ -271,11 +309,20 @@ int main() {
         // Authenticated speed selector mapping. The v3 policy intentionally
         // stays pure: applying the rate belongs to the runtime adapter.
         constexpr double expectedRates[] = {1.0, 2.0, 4.0, 12.0, 24.0};
+        constexpr int expectedLabels[] = {1, 2, 4, 16, 32};
         for (int index = 0; index < 5; ++index) {
             double rate = 0.0;
+            Kotonoha::SchoolDaysPlaybackPolicy::Selection selection;
             Check(Kotonoha::SchoolDaysPlaybackPolicy::RateForIndex(index, &rate) &&
                       rate == expectedRates[index],
                   "School Days playback-rate index mapping drifted");
+            Check(Kotonoha::SchoolDaysPlaybackPolicy::SelectionForIndex(index, &selection) &&
+                      selection.displayedMultiplier == expectedLabels[index] &&
+                      selection.internalRate == expectedRates[index] &&
+                      selection.suppressNarrativeAudio == (index >= 3) &&
+                      Kotonoha::SchoolDaysPlaybackPolicy::SuppressesNarrativeAudioAtRate(rate) ==
+                          selection.suppressNarrativeAudio,
+                  "Retail displayed rate, internal rate or audio threshold drifted");
             const auto action = Presenter::ActionForControl(5 + index);
             Check(action.kind == Presenter::ActionKind::SetPlaybackSpeed &&
                       action.value == index,
@@ -286,6 +333,14 @@ int main() {
                   !Kotonoha::SchoolDaysPlaybackPolicy::RateForIndex(5, &invalidRate) &&
                   !Kotonoha::SchoolDaysPlaybackPolicy::RateForIndex(0, nullptr),
               "School Days playback-rate mapping accepted invalid input");
+        Kotonoha::SchoolDaysPlaybackPolicy::Selection invalidSelection;
+        Check(!Kotonoha::SchoolDaysPlaybackPolicy::SelectionForIndex(-1, &invalidSelection) &&
+                  !Kotonoha::SchoolDaysPlaybackPolicy::SelectionForIndex(5, &invalidSelection) &&
+                  !Kotonoha::SchoolDaysPlaybackPolicy::SelectionForIndex(0, nullptr) &&
+                  !Kotonoha::SchoolDaysPlaybackPolicy::SuppressesNarrativeAudioAtRate(4.0) &&
+                  Kotonoha::SchoolDaysPlaybackPolicy::SuppressesNarrativeAudioAtRate(12.0) &&
+                  Kotonoha::SchoolDaysPlaybackPolicy::SuppressesNarrativeAudioAtRate(24.0),
+              "School Days retail audio suppression threshold drifted");
 
         Check(Presenter::FadeAlpha(0, true, 0) == 0,
               "MenuBar reveal start drifted");
@@ -303,6 +358,82 @@ int main() {
               "MenuBar interrupted reveal interpolation drifted");
         Check(Presenter::FadeAlpha(100, false, 500) == 50,
               "MenuBar interrupted hide interpolation drifted");
+
+        // Outgoing choice-tail composition retains the complete feeling meter
+        // even while the shared MenuBar alpha is zero or its chrome suppressed.
+        const auto hidden = Presenter::VisibilityForState(0, false, false);
+        const auto ordinary = Presenter::VisibilityForState(255, false, false);
+        const auto suppressed = Presenter::VisibilityForState(255, true, false);
+        const auto meterOnlyHidden = Presenter::VisibilityForState(0, true, true);
+        const auto meterOnlyVisible = Presenter::VisibilityForState(255, false, true);
+        Check(!hidden.meter && !hidden.chrome &&
+                  ordinary.meter && ordinary.chrome &&
+                  !suppressed.meter && !suppressed.chrome &&
+                  meterOnlyHidden.meter && !meterOnlyHidden.chrome &&
+                  meterOnlyVisible.meter && !meterOnlyVisible.chrome,
+              "Choice-tail must keep feeling meter while suppressing all MenuBar chrome");
+
+        // The retail selected-speed square and AUTO ON are full-opacity
+        // standalone sprites even while the ordinary hover chrome is hidden.
+        // The outgoing-choice meter and explicit handoff suppress them.
+        const auto persistentAuto = Presenter::PersistentTransportForState(
+            true, 0, true, false, false, false);
+        const auto persistentSpeed = Presenter::PersistentTransportForState(
+            false, 3, true, false, false, false);
+        const auto persistentBoth = Presenter::PersistentTransportForState(
+            true, 4, true, false, false, false);
+        const auto persistentOff = Presenter::PersistentTransportForState(
+            false, 0, true, false, false, false);
+        const auto persistentLocked = Presenter::PersistentTransportForState(
+            true, 2, true, true, false, false);
+        const auto persistentMeter = Presenter::PersistentTransportForState(
+            true, 2, true, false, false, true);
+        const auto persistentHandoff = Presenter::PersistentTransportForState(
+            true, 2, true, false, true, false);
+        const auto persistentSpeedDisabled = Presenter::PersistentTransportForState(
+            true, 2, false, false, false, false);
+        Check(!hidden.chrome && persistentAuto.autoOn &&
+                  !persistentAuto.selectedSpeed &&
+                  persistentSpeed.selectedSpeed && !persistentSpeed.autoOn &&
+                  persistentBoth.autoOn && persistentBoth.selectedSpeed &&
+                  !persistentOff.autoOn && !persistentOff.selectedSpeed &&
+                  persistentLocked.autoOn && !persistentLocked.selectedSpeed &&
+                  persistentSpeedDisabled.autoOn &&
+                  !persistentSpeedDisabled.selectedSpeed &&
+                  !persistentMeter.autoOn && !persistentMeter.selectedSpeed &&
+                  !persistentHandoff.autoOn &&
+                  !persistentHandoff.selectedSpeed,
+              "Hidden/menu-only AUTO and speed sprite persistence drifted");
+
+        // SysMenu 0x100252BA..0x10025323 takes AUTO-on GetTickCount epoch
+        // (EXE vtable+0x138, host+0x224), chooses 1000/(speedIndex+1) ms per
+        // frame and cycles through exactly 13 CHIP records 29..41.
+        const auto frame = Presenter::AutoLightRecordForTime;
+        Check(frame(1000, 1000, 0) == 29 &&
+                  frame(1999, 1000, 0) == 29 &&
+                  frame(2000, 1000, 0) == 30 &&
+                  frame(13999, 1000, 0) == 41 &&
+                  frame(14000, 1000, 0) == 29 &&
+                  frame(1499, 1000, 1) == 29 &&
+                  frame(1500, 1000, 1) == 30 &&
+                  frame(7500, 1000, 1) == 29 &&
+                  frame(1332, 1000, 2) == 29 &&
+                  frame(1333, 1000, 2) == 30 &&
+                  frame(1250, 1000, 3) == 30 &&
+                  frame(1200, 1000, 4) == 30 &&
+                  frame(3600, 1000, 4) == 29 &&
+                  frame(0x20u, 0xfffffff0u, 0) == 29 &&
+                  frame(999, 1000, 4) == 29 &&
+                  frame(0, 0, -1) == -1 &&
+                  frame(0, 0, 5) == -1,
+              "Retail AUTO 13-frame animation timing drifted");
+        for (int index = 0; index < 13; ++index) {
+            const auto record = Presenter::FixedChipRecord(29 + index, Variant::Standard);
+            Near(record.destination.x, 6.0f, "AUTO glint record destination x drifted");
+            Near(record.destination.y, 3.0f, "AUTO glint record destination y drifted");
+            Near(record.destination.w, 106.0f, "AUTO glint record width drifted");
+            Near(record.destination.h, 19.0f, "AUTO glint record height drifted");
+        }
 
         const auto standard = Presenter::LayoutForVariant(Variant::Standard);
         auto vp = Presenter::FitViewport(1280, 720, standard);

@@ -225,8 +225,9 @@ Engine::Engine(Runtime &run, EngineOptions options)
     dumpTranslation(options.dumpTranslationPath);
     translationDumpComplete = true;
   }
-  if (options.enableMCP)
-    mcp = std::make_unique<MCPServer>(*this, options.mcpFileRoot);
+  if (options.enableMCP || options.mcpPort)
+    mcp = std::make_unique<MCPServer>(*this, options.mcpFileRoot,
+                                      options.mcpPort);
   frameClock.reset();
   SDL_LogInfo(LogCore, "Engine started (%s renderer)",
               SDL_GetRendererName(renderer.get()));
@@ -689,6 +690,22 @@ SDL_AppResult Engine::dispatchEvent(EventPtr event) {
   SDL_Event logical = *event;
   if (!SDL_ConvertEventToRenderCoordinates(renderer.get(), &logical))
     throw std::runtime_error(SDL_GetError());
+  // A game can letterbox/compress only its authored Novel frame without
+  // changing the native Screen controls or the engine-wide SettingsMenu.
+  // Invert that transform for story/title input so hotspots still align with
+  // their pixels after the texture is composed into a shorter rectangle.
+  if (!consumed && !settingsMenu->isOpen()) {
+    const float novelHeightScale = runtime.narrativePresentationHeightScale();
+    if (novelHeightScale > 0.0f && novelHeightScale < 1.0f) {
+      const SDL_Point view = runtime.viewport();
+      const float yInset = view.y * (1.0f - novelHeightScale) * 0.5f;
+      if (logical.type == SDL_EVENT_MOUSE_MOTION)
+        logical.motion.y = (logical.motion.y - yInset) / novelHeightScale;
+      else if (logical.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+               logical.type == SDL_EVENT_MOUSE_BUTTON_UP)
+        logical.button.y = (logical.button.y - yInset) / novelHeightScale;
+    }
+  }
   const SDL_Point view = runtime.viewport();
   const auto frame = UI::designFrame(view);
   SDL_Event framed = UI::toFrame(logical, frame);
@@ -722,8 +739,13 @@ SDL_AppResult Engine::dispatchEvent(EventPtr event) {
       logical.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
       (logical.button.x < 0 || logical.button.x >= view.x ||
        logical.button.y < 0 || logical.button.y >= view.y);
-  if (settingsMenu->isOpen())
-    settingsMenu->onEvent(UI::toFrame(logical, UI::designFrame(view)));
+  if (settingsMenu->isOpen()) {
+    // The click that launches Settings from a game's native panel owns its
+    // release as well. Do not reinterpret that release as a tap on an engine
+    // tab underneath the same screen coordinate (e.g. SOMCON -> VN text).
+    if (!consumed)
+      settingsMenu->onEvent(UI::toFrame(logical, UI::designFrame(view)));
+  }
   else if (!consumed && !outsideNovel)
     runtime.onEvent(logical);
   const bool wasPaused = timeline->isPaused();
@@ -831,7 +853,15 @@ SDL_AppResult Engine::Iterate() {
     // The media/image upscalers have already run at their existing call sites.
     // This copy only maps the reduced Novel raster back to the fitted physical
     // presentation, avoiding a second upscaler pass over the whole frame.
-    if (!SDL_RenderTexture(renderer.get(), novelTarget.get(), nullptr, nullptr))
+    const float heightScale = runtime.narrativePresentationHeightScale();
+    if (!std::isfinite(heightScale) || heightScale <= 0.0f || heightScale > 1.0f)
+      throw std::invalid_argument("Invalid Novel presentation height scale");
+    const SDL_FRect presentedNovel{0.0f,
+                                   novelView.y * (1.0f - heightScale) * 0.5f,
+                                   static_cast<float>(novelView.x),
+                                   novelView.y * heightScale};
+    if (!SDL_RenderTexture(renderer.get(), novelTarget.get(), nullptr,
+                           &presentedNovel))
       throw std::runtime_error(SDL_GetError());
   }
   configureRenderSpace(RenderSpace::Screen);

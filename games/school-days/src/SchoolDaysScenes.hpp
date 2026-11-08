@@ -2,9 +2,12 @@
 
 #include <Kotonoha/componentes/SubtitleScene.hpp>
 #include <Kotonoha/core/SDL.hpp>
+#include <Kotonoha/localization/Translation.hpp>
+#include <optional>
 #include <Kotonoha/parsers/Ors.h>
 #include <Kotonoha/routing/SchoolDaysMenuBarPresenter.hpp>
 #include <SDL3_ttf/SDL_ttf.h>
+#include <string_view>
 
 namespace SchoolDays {
 class Assets;
@@ -36,25 +39,56 @@ public:
 };
 
 class Subtitles final : public Kotonoha::SubtitleScene {
+  std::vector<Kotonoha::SubtitleCue> originalCues_;
+  std::vector<std::size_t> cueOrdinals_;
+  int nodeId_ = -1;
+  const Kotonoha::Translation *dlcDictionary_ = nullptr;
+  std::optional<std::size_t> lxhFirstEvent_;
+  std::string locale_ = "en";
+  void refreshLocalizedCues();
 protected:
   bool replacesPreviousCue() const override { return true; }
   std::string displayCueText(const std::string &text) const override;
 
 public:
   using SubtitleScene::SubtitleScene;
-  void bind(const Kotonoha_orsData &script);
+  // Also used by headless color tests: the speaker remains the original ASS
+  // style identifier even when text and names have JSON dictionary entries.
+  static std::vector<Kotonoha::SubtitleCue> TranslateCues(
+      const std::vector<Kotonoha::SubtitleCue> &original,
+      const std::vector<std::size_t> &ordinals, int nodeId,
+      const Kotonoha::Translation &dictionary,
+      const Kotonoha::Translation *dlc = nullptr,
+      std::optional<std::size_t> lxhFirstEvent = std::nullopt,
+      std::string_view locale = "en");
+  void bind(const Kotonoha_orsData &script, int nodeId,
+            const Kotonoha::Translation *dlc = nullptr,
+            std::optional<std::size_t> lxhFirstEvent = std::nullopt,
+            std::string locale = "en");
+  void translationChanged(const std::string &original,
+                          const std::string &previous,
+                          const std::string &translated) override;
 };
 
 class GameScene final : public Kotonoha::Scene {
+  friend class RuntimeHandoffTestAccess;
   Runtime &runtime;
   Kotonoha::SchoolDaysMenuBarPresenter menuBar;
   Kotonoha::SchoolDaysSaveFeelModel::Variant menuBarVariant =
       Kotonoha::SchoolDaysSaveFeelModel::Variant::Standard;
   const Kotonoha_orsEvent *lastChoice = nullptr;
   bool menuBarAttempted = false;
+  // The choice font must keep SDL_ttf initialized independently of Engine UI.
+  // If Engine construction throws after Runtime::init, the two UI instances
+  // are destroyed before Runtime::~Runtime releases GameScene. Declaring this
+  // session first guarantees both fonts close before TTF_Quit.
+  Kotonoha::TTFSession choiceFontTtfSession;
+  Kotonoha::FontPtr choiceChineseFallback;
   Kotonoha::SDLHandle<TTF_Font, TTF_CloseFont> choiceFont;
   Kotonoha::TexturePtr choiceScratch;
   const Kotonoha_orsEvent *choiceScratchEvent = nullptr;
+  std::vector<int> choiceScratchSlots;
+  std::vector<std::string> choiceScratchTexts;
   void syncChoice();
   bool ensureMenuBar();
   std::vector<int> choices() const;
@@ -70,5 +104,8 @@ public:
   void render(Kotonoha::RendererRef renderer, float scale) override;
   bool handleMenuBarEvent(Kotonoha::EventRef event);
   void renderMenuBar(Kotonoha::RendererRef renderer);
+  // Explicit NewGame/LOAD/RouteMap restoration changes KTRF session state
+  // while this GameScene and its MenuBar remain alive in the same process.
+  void restoreMenuBarFeelingState();
 };
 } // namespace SchoolDays

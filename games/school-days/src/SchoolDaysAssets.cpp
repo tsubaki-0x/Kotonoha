@@ -2,7 +2,9 @@
 
 #include <Kotonoha/SchoolDaysAssetMount.hpp>
 #include <Kotonoha/SchoolDaysImageAssetResolver.hpp>
+#include <Kotonoha/routing/SchoolDaysLxhContent.hpp>
 #include <Kotonoha/core/FileSystem.hpp>
+#include <Kotonoha/core/SDL.hpp>
 #include <algorithm>
 #include <cctype>
 #include <functional>
@@ -35,13 +37,34 @@ bool HasAsciiCaseInsensitivePrefix(const std::string &value,
                       return std::tolower(a) == std::tolower(b);
                     });
 }
+
+// The user's new Display Options artwork is a separate remaster overlay.
+// Never rewrite the retail System.GPK. An explicitly configured overlay still
+// takes priority; otherwise an external asset folder bundled beside the game
+// executable supplies only our game-specific replacement resources.
+std::string SelectDisplayOptionsOverlay(const std::string &requested) {
+  if (!requested.empty()) return requested;
+#if defined(_WIN32) && !defined(__ANDROID__)
+  const char *base = SDL_GetBasePath();
+  if (!base || !*base) return {};
+  const auto root = std::filesystem::path(base) / "display-options";
+  std::error_code ec;
+  if (std::filesystem::is_regular_file(
+          root / "System/Option/Option_Display.png", ec) &&
+      std::filesystem::is_regular_file(
+          root / "System/Option/Option_Display.cmap", ec))
+    return root.string();
+#endif
+  return {};
+}
 }
 
 Assets::Assets(std::filesystem::path root, const std::string &scripts)
     : directory(std::move(root)) {
-  if (!scripts.empty() && !std::filesystem::is_directory(scripts))
+  const std::string effectiveOverlay = SelectDisplayOptionsOverlay(scripts);
+  if (!effectiveOverlay.empty() && !std::filesystem::is_directory(effectiveOverlay))
     throw std::runtime_error("School Days script directory does not exist");
-  setOverlay(scripts);
+  setOverlay(effectiveOverlay);
   std::string info;
   if (!checkDirectory(directory, info))
     throw std::runtime_error(info);
@@ -51,8 +74,8 @@ Assets::Assets(std::filesystem::path root, const std::string &scripts)
     mounted = true;
     Kotonoha::InstallMountedSchoolDaysAssetResolver();
   }
-  if (!scripts.empty() &&
-      !Kotonoha::SetSchoolDaysAssetOverlay(scripts, &info)) {
+  if (!effectiveOverlay.empty() &&
+      !Kotonoha::SetSchoolDaysAssetOverlay(effectiveOverlay, &info)) {
     if (mounted) {
       Kotonoha::UninstallMountedSchoolDaysAssetResolver();
       Kotonoha::UnmountSchoolDaysRetailGpks();
@@ -77,7 +100,19 @@ Assets::~Assets() {
 
 std::string Assets::resolve(const std::string &logical, bool image) const {
   if (Kotonoha::IsSchoolDaysGpkUri(logical)) return logical;
-  auto found = image
+  // Extracted developer fixtures may provide authored epilogues in their
+  // selected script overlay. Packaged installations never use this path:
+  // the mandatory GPK owns all 28 integrated LxH resources.
+  std::string looseOverlay;
+  if (!mounted && Kotonoha::ResolveSchoolDaysOverlayFile(logical, &looseOverlay))
+    return looseOverlay;
+  // ImageAssetResolver accepts a stem and appends .PNG. References that
+  // already end in .png (including integrated cards and display options)
+  // must resolve as exact logical paths rather than "name.png.PNG".
+  const bool hasPngExtension = logical.size() >= 4u &&
+      Kotonoha::SchoolDaysAsciiCaseEqual(logical.substr(logical.size() - 4u),
+                                         ".png");
+  auto found = image && !hasPngExtension
       ? Kotonoha::ResolveSchoolDaysImageAsset(directory.string().c_str(), logical)
       : Kotonoha::ResolveSchoolDaysAssetPath(directory.string().c_str(), logical);
   // The retail ORS 03-BK-H00 contains one accidental space in this voice path.
@@ -104,7 +139,14 @@ std::string Assets::resolve(const std::string &logical, bool image) const {
 std::string Assets::overlayId(const std::string &id) const {
   std::string logical;
   if (Kotonoha::SchoolDaysLogicalFromGpkUri(id, &logical))
-    return logical;
+    // AssetProvider::read() checks its own overlay BEFORE readAsset().
+    // The integrated pack must win even if an old loose ORS/WMV/PNG still
+    // exists in a custom overlay. Returning an empty overlay key ensures
+    // the selected sdgpk:// resource actually reaches the GPK reader.
+    return Kotonoha::SchoolDaysLxhContent::IsPackResource(logical)
+               ? std::string() : logical;
+  if (mounted && Kotonoha::SchoolDaysLxhContent::IsPackResource(id))
+    return {};
   std::filesystem::path file(id);
   if (file.is_absolute()) {
     auto rel = file.lexically_relative(directory);
@@ -173,7 +215,9 @@ std::vector<std::string> Assets::listAsset(const std::string &prefix) const {
     return result;
   }
 
-  if (mounted) {
+  // An absolute path may point to a locally installed extension outside the
+  // retail GPK root. Do not reinterpret it as a virtual GPK prefix.
+  if (mounted && !std::filesystem::path(prefix).is_absolute()) {
     std::string normalized = prefix;
     for (char &ch : normalized)
       if (ch == '\\') ch = '/';
@@ -198,23 +242,45 @@ std::vector<std::string> Assets::listAsset(const std::string &prefix) const {
     } else if (normalized.empty()) {
       for (const auto &spec : Kotonoha::SchoolDaysRetailGpkSpecs())
         appendVirtualTree(Kotonoha::MakeSchoolDaysGpkUri(spec.logicalPrefix), normalized);
+      appendVirtualTree(Kotonoha::MakeSchoolDaysGpkUri("LxH"), normalized);
     }
   }
 
   std::error_code ec;
   const auto absolutePrefix = std::filesystem::path(prefix).is_absolute();
   std::string normalizedAbsolutePrefix;
+  std::filesystem::path enumerationRoot = directory;
   if (absolutePrefix) {
     const bool directoryPrefix = !prefix.empty() &&
         (prefix.back() == '/' || prefix.back() == '\\');
-    normalizedAbsolutePrefix =
-        std::filesystem::path(prefix).lexically_normal().string();
+    auto requested = std::filesystem::path(prefix).lexically_normal();
+    requested.make_preferred();
+    normalizedAbsolutePrefix = requested.string();
     if (directoryPrefix && !normalizedAbsolutePrefix.empty() &&
         normalizedAbsolutePrefix.back() != std::filesystem::path::preferred_separator) {
       normalizedAbsolutePrefix.push_back(std::filesystem::path::preferred_separator);
     }
+    auto normalizedRetail = std::filesystem::absolute(directory).lexically_normal();
+    normalizedRetail.make_preferred();
+    std::string retailPrefix = normalizedRetail.string();
+    const bool equalsRetail = Kotonoha::SchoolDaysAsciiCaseEqual(
+        normalizedAbsolutePrefix, retailPrefix);
+    if (!retailPrefix.empty() &&
+        retailPrefix.back() != std::filesystem::path::preferred_separator)
+      retailPrefix.push_back(std::filesystem::path::preferred_separator);
+    if (!equalsRetail &&
+        !HasAsciiCaseInsensitivePrefix(normalizedAbsolutePrefix, retailPrefix)) {
+      // Overlay movies and audio can live next to the executable while the
+      // original GPKs live elsewhere. Enumerate only the relevant subtree.
+      enumerationRoot = requested;
+      if (!std::filesystem::is_directory(enumerationRoot, ec))
+        enumerationRoot = enumerationRoot.parent_path();
+      ec.clear();
+      if (!std::filesystem::is_directory(enumerationRoot, ec))
+        return result;
+    }
   }
-  for (std::filesystem::recursive_directory_iterator it(directory, ec), end;
+  for (std::filesystem::recursive_directory_iterator it(enumerationRoot, ec), end;
        !ec && it != end; it.increment(ec)) {
     if (!it->is_regular_file(ec)) continue;
     const auto physical = it->path().lexically_normal().string();
@@ -261,7 +327,12 @@ bool Assets::checkDirectory(const std::filesystem::path &root, std::string &info
                  spec.filename;
           return false;
         }
-      info = "School Days HQ retail 29-pack set found (validated on launch)";
+      if (!Kotonoha::ResolveSchoolDaysAssetPath(candidate.string().c_str(),
+                                               "LxH.GPK").present) {
+        info = "Incomplete integrated School Days pack set: missing LxH.GPK";
+        return false;
+      }
+      info = "School Days HQ 29 retail GPK + mandatory LxH.GPK found";
       return true;
     }
   }

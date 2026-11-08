@@ -13,6 +13,11 @@ class Assets final : public Kotonoha::AssetProvider {
 public:
   explicit Assets(std::filesystem::path root, const std::string &scripts = {});
   ~Assets() override;
+  // Distinguishes authenticated packaged installations from extracted loose
+  // developer fixtures. Never selects an LxH ON/OFF policy: packaged installs
+  // always require the 30th GPK, and only existing loose script content can
+  // be parsed when no retail Packs directory is involved.
+  bool usesPackedResources() const { return mounted; }
   const std::filesystem::path &root() const { return directory; }
   std::filesystem::path orsRoot() const;
   std::string name() const override { return "School Days HQ"; }

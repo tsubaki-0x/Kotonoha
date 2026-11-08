@@ -1,7 +1,9 @@
 #include "SchoolDaysAssets.hpp"
 #include "SchoolDaysRuntime.hpp"
-#include <Kotonoha/componentes/SettingsMenu.hpp>
+#include <Kotonoha/routing/SchoolDaysConfigMenuRenderPlan.hpp>
+#include <Kotonoha/routing/SchoolDaysSaveLoadRenderPlan.hpp>
 #include <Kotonoha/core/Engine.hpp>
+#include <algorithm>
 #include <iostream>
 #include <stdexcept>
 
@@ -29,7 +31,7 @@ struct Application {
 } // namespace
 int main(int argc, char **argv) {
   try {
-    check(argc == 3, "Expected retail data and route");
+    check(argc == 4, "Expected retail data, route and remaster display overlay");
     struct Directory {
       std::filesystem::path path =
           std::filesystem::temp_directory_path() /
@@ -39,7 +41,10 @@ int main(int argc, char **argv) {
         std::filesystem::remove_all(path, ec);
       }
     } documents;
-    auto assets = std::make_shared<SchoolDays::Assets>(argv[1]);
+    // The original System.GPK has SOMCON, not Display Options. Mount the
+    // user's separate authored overlay just as the bundled Windows game does,
+    // never mutate or replace the commercial GPK.
+    auto assets = std::make_shared<SchoolDays::Assets>(argv[1], argv[3]);
     Application app(assets, argv[2], documents.path);
     app.runtime.SetState(Kotonoha::GameState::Gameplay);
     app.runtime.debugJumpToNode("0");
@@ -89,6 +94,12 @@ int main(int argc, char **argv) {
           error);
     check(storage.Initialize(documents.path, profile, &error), error);
     openPanel(10);
+    const auto saveSprites = Kotonoha::SchoolDaysSaveLoadRenderPlan::Build(
+        app.runtime.panels().SaveLoad());
+    check(std::none_of(saveSprites.begin(), saveSprites.end(), [](const auto& sprite) {
+            return sprite.role == Kotonoha::SchoolDaysSaveLoadRenderPlan::Role::RouteMap;
+          }),
+          "Retail SAVE must not render Open Route Map");
     row();
     check(app.runtime.panels().IsSaveLoadCommentEditorOpen(),
           "Retail save must request its comment");
@@ -125,10 +136,29 @@ int main(int argc, char **argv) {
     SDL_Delay(510);
     app.runtime.update();
     openPanel(11);
+    const auto loadSprites = Kotonoha::SchoolDaysSaveLoadRenderPlan::Build(
+        app.runtime.panels().SaveLoad());
+    check(std::any_of(loadSprites.begin(), loadSprites.end(), [](const auto& sprite) {
+            return sprite.role == Kotonoha::SchoolDaysSaveLoadRenderPlan::Role::RouteMap;
+          }),
+          "Retail LOAD must retain Open Route Map");
     row();
+    // Retail LOAD now dims SaveLoad, presents POPUP_LOAD, fades the card to
+    // black, restores the slot behind it, then reveals the new scene. Advance
+    // each real-time stage before testing controls on the restored gameplay.
+    SDL_Delay(1010);
+    app.runtime.update();
+    SDL_Delay(910);
+    app.runtime.update();
+    SDL_Delay(510);
+    app.runtime.update();
+    SDL_Delay(510);
+    app.runtime.update();
+    check(!app.runtime.panels().IsSaveLoadOpen(),
+          "Retail LOAD did not close SaveLoad after the loading transition");
     check(app.runtime.debugNode() == original,
           "Retail save/load changed the scene");
-    // Exercise the original aspect buttons and repurposed SOMCON tab through
+    // Exercise the original aspect buttons and new Display Options tab through
     // their actual retail hit maps, not a synthetic host-only setter.
     auto configControl = [&](int control) {
       check(app.runtime.panels().IsConfigOpen(),
@@ -159,10 +189,18 @@ int main(int argc, char **argv) {
     app.runtime.update();
     openPanel(13);
     configControl(2);
-    check(!app.runtime.panels().IsConfigOpen() &&
-              app.engine.GetSettingsMenu().isOpen(),
-          "SOMCON replacement must open the Kotonoha settings component");
-    app.engine.GetSettingsMenu().close();
+    check(app.runtime.panels().IsConfigOpen() &&
+              app.runtime.panels().ConfigMenu().CurrentPage() ==
+                  Kotonoha::SchoolDaysConfigMenuModel::Page::Display,
+          "New Display Options must remain a native School Days config tab");
+    check(app.runtime.panels().ConfigMenu().Cmap().Width() > 0,
+          "Display Options CMAP must load from the separate authored overlay");
+    const auto displaySprites = Kotonoha::SchoolDaysConfigMenuRenderPlan::Build(
+        app.runtime.panels().ConfigMenu(), {});
+    check(!displaySprites.empty() &&
+              displaySprites.front().role ==
+                  Kotonoha::SchoolDaysConfigMenuRenderPlan::Role::Base,
+          "Display Options base art must be rendered from its own atlas");
     // Terminal handoff is exercised by SchoolDaysHandoffRuntimeTest.
     std::cout << "School Days retail save: cancel, named UTF-16 metadata, "
                  "write and reload passed\n";

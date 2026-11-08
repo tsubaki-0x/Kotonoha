@@ -42,6 +42,22 @@ function(kotonoha_configure_app target)
     kotonoha_copy_assets(${target} GAME "${APP_GAME}")
 
     if(WIN32 AND NOT ANDROID)
+        # A static KotonohaEngine/ImGui target has no DLL to deploy. The
+        # portable build leaves native SDL3/SDL3_ttf as the only runtime DLLs
+        # while the normal shared build keeps its original copy behavior.
+        get_target_property(kotonoha_engine_type KotonohaEngine TYPE)
+        get_target_property(kotonoha_imgui_type kotonoha_imgui TYPE)
+        set(kotonoha_project_dll_copies)
+        if(kotonoha_engine_type STREQUAL "SHARED_LIBRARY")
+            list(APPEND kotonoha_project_dll_copies
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "$<TARGET_FILE:KotonohaEngine>" "$<TARGET_FILE_DIR:${target}>")
+        endif()
+        if(kotonoha_imgui_type STREQUAL "SHARED_LIBRARY")
+            list(APPEND kotonoha_project_dll_copies
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "$<TARGET_FILE:kotonoha_imgui>" "$<TARGET_FILE_DIR:${target}>")
+        endif()
         set(windows_dependency_dirs
             "$<TARGET_FILE_DIR:KotonohaEngine>"
             "$<TARGET_FILE_DIR:kotonoha_imgui>"
@@ -65,13 +81,8 @@ function(kotonoha_configure_app target)
         endif()
         list(REMOVE_DUPLICATES windows_dependency_dirs)
         add_custom_command(TARGET ${target} POST_BUILD
-            # Always refresh the four direct runtime DLLs before dependency
-            # discovery; otherwise an older DLL already beside the executable
-            # wins Windows' normal lookup order and gets repackaged again.
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                "$<TARGET_FILE:KotonohaEngine>" "$<TARGET_FILE_DIR:${target}>"
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                "$<TARGET_FILE:kotonoha_imgui>" "$<TARGET_FILE_DIR:${target}>"
+            # Refresh only existing shared targets before dependency discovery.
+            ${kotonoha_project_dll_copies}
             COMMAND "${CMAKE_COMMAND}" -E copy_if_different
                 "$<TARGET_FILE:SDL3::SDL3>" "$<TARGET_FILE_DIR:${target}>"
             COMMAND "${CMAKE_COMMAND}" -E copy_if_different

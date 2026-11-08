@@ -1,3 +1,15 @@
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+// Winsock2 must precede any indirect windows.h / winsock.h include.
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#endif
+
 #include <Kotonoha/mcp/MCPServer.hpp>
 
 #include <Kotonoha/componentes/ChoiceQuestionScene.hpp>
@@ -20,24 +32,51 @@
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
 #include <fcntl.h>
 #include <io.h>
 #include <windows.h>
 #else
+#include <arpa/inet.h>
 #include <csignal>
+#include <fcntl.h>
+#include <netinet/in.h>
 #include <poll.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #endif
 
 namespace Kotonoha {
 namespace {
+#ifdef _WIN32
+using SocketHandle = SOCKET;
+constexpr SocketHandle invalidSocket = INVALID_SOCKET;
+void closeSocket(SocketHandle socket) { closesocket(socket); }
+int socketError() { return WSAGetLastError(); }
+bool socketWouldBlock(int code) { return code == WSAEWOULDBLOCK; }
+bool socketInterrupted(int code) { return code == WSAEINTR; }
+bool setSocketNonblocking(SocketHandle socket) {
+  u_long mode = 1;
+  return ioctlsocket(socket, FIONBIO, &mode) == 0;
+}
+#else
+using SocketHandle = int;
+constexpr SocketHandle invalidSocket = -1;
+void closeSocket(SocketHandle socket) { close(socket); }
+int socketError() { return errno; }
+bool socketWouldBlock(int code) {
+  return code == EAGAIN || code == EWOULDBLOCK;
+}
+bool socketInterrupted(int code) { return code == EINTR; }
+bool setSocketNonblocking(SocketHandle socket) {
+  const int flags = fcntl(socket, F_GETFL, 0);
+  return flags >= 0 && fcntl(socket, F_SETFL, flags | O_NONBLOCK) == 0;
+}
+#endif
+
 struct JSONDeleter {
   void operator()(json_object *value) const { json_object_put(value); }
 };
@@ -223,30 +262,178 @@ struct MCPServer::State {
   std::filesystem::path root;
   std::string buffer;
   bool initialized = false, ready = false, eof = false;
+  bool tcp = false;
+  SocketHandle listener = invalidSocket, client = invalidSocket;
+  std::string outgoing;
+#ifdef _WIN32
+  bool winsockStarted = false;
+#endif
 #ifndef _WIN32
   using SignalHandler = void (*)(int);
   SignalHandler previousPipeHandler;
 #endif
 
-  State(Engine &engine, const std::string &fileRoot)
-      : engine(engine), root(std::filesystem::canonical(fileRoot)) {
+  State(Engine &engine, const std::string &fileRoot, unsigned short tcpPort)
+      : engine(engine), root(std::filesystem::canonical(fileRoot)),
+        tcp(tcpPort != 0) {
     if (!std::filesystem::is_directory(root))
       throw std::invalid_argument("MCP file root must be a directory");
 #ifdef _WIN32
-    if (_setmode(_fileno(stdin), _O_BINARY) < 0 ||
-        _setmode(_fileno(stdout), _O_BINARY) < 0)
-      throw std::runtime_error("Cannot configure MCP binary stdio");
+    if (!tcp) {
+      if (_setmode(_fileno(stdin), _O_BINARY) < 0 ||
+          _setmode(_fileno(stdout), _O_BINARY) < 0)
+        throw std::runtime_error("Cannot configure MCP binary stdio");
+    } else {
+      WSADATA data{};
+      if (WSAStartup(MAKEWORD(2, 2), &data) != 0)
+        throw std::runtime_error("Cannot start TCP sockets for MCP");
+      winsockStarted = true;
+    }
 #else
     previousPipeHandler = std::signal(SIGPIPE, SIG_IGN);
     if (previousPipeHandler == SIG_ERR)
       throw std::runtime_error("Cannot configure MCP pipe handling");
 #endif
+    if (tcp) {
+      listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+      if (listener == invalidSocket || !setSocketNonblocking(listener)) {
+        cleanupSockets();
+#ifndef _WIN32
+        std::signal(SIGPIPE, previousPipeHandler);
+#endif
+        throw std::runtime_error("Cannot create nonblocking MCP socket");
+      }
+      sockaddr_in local{};
+      local.sin_family = AF_INET;
+      local.sin_port = htons(tcpPort);
+      local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+      if (bind(listener, reinterpret_cast<const sockaddr *>(&local),
+               sizeof(local)) != 0 ||
+          listen(listener, 1) != 0) {
+        cleanupSockets();
+#ifndef _WIN32
+        std::signal(SIGPIPE, previousPipeHandler);
+#endif
+        throw std::runtime_error("Cannot bind TCP MCP to 127.0.0.1");
+      }
+      SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                  "MCP TCP listening on 127.0.0.1:%u", tcpPort);
+    }
   }
 
   ~State() {
+    cleanupSockets();
 #ifndef _WIN32
     std::signal(SIGPIPE, previousPipeHandler);
 #endif
+  }
+
+  void cleanupSockets() {
+    if (client != invalidSocket) {
+      closeSocket(client);
+      client = invalidSocket;
+    }
+    if (listener != invalidSocket) {
+      closeSocket(listener);
+      listener = invalidSocket;
+    }
+#ifdef _WIN32
+    if (winsockStarted) {
+      WSACleanup();
+      winsockStarted = false;
+    }
+#endif
+  }
+
+  void disconnectClient() {
+    if (client != invalidSocket) {
+      closeSocket(client);
+      client = invalidSocket;
+    }
+    buffer.clear();
+    outgoing.clear();
+    initialized = false;
+    ready = false;
+  }
+
+  void acceptClients() {
+    // Leave pending connections queued until the current client's EOF has
+    // been observed. Accepting them first would reset a fast reconnect.
+    if (client != invalidSocket)
+      return;
+    // Only the first local controller is admitted; reject additional clients.
+    for (int attempt = 0; attempt < 4; ++attempt) {
+      sockaddr_in peer{};
+#ifdef _WIN32
+      int peerSize = sizeof(peer);
+#else
+      socklen_t peerSize = sizeof(peer);
+#endif
+      const auto incoming = accept(listener, reinterpret_cast<sockaddr *>(&peer),
+                                   &peerSize);
+      if (incoming == invalidSocket) {
+        const auto code = socketError();
+        if (socketWouldBlock(code) || socketInterrupted(code))
+          return;
+        throw std::runtime_error("Cannot accept TCP MCP client");
+      }
+      if (client != invalidSocket || peer.sin_addr.s_addr != htonl(INADDR_LOOPBACK) ||
+          !setSocketNonblocking(incoming)) {
+        closeSocket(incoming);
+        continue;
+      }
+      client = incoming;
+      buffer.clear();
+      outgoing.clear();
+      initialized = ready = false;
+    }
+  }
+
+  void readTcpInput() {
+    char chunk[4096];
+    for (int count = 0; count < 16 && client != invalidSocket; ++count) {
+      const auto bytes = recv(client, chunk, sizeof(chunk), 0);
+      if (bytes == 0) {
+        disconnectClient();
+        break;
+      }
+      if (bytes < 0) {
+        const auto code = socketError();
+        if (socketInterrupted(code))
+          continue;
+        if (!socketWouldBlock(code))
+          disconnectClient();
+        break;
+      }
+      if (buffer.size() + static_cast<std::size_t>(bytes) > 1024 * 1024) {
+        disconnectClient();
+        break;
+      }
+      buffer.append(chunk, static_cast<std::size_t>(bytes));
+    }
+  }
+
+  void flushTcpOutput() {
+    std::size_t budget = 64 * 1024;
+    while (client != invalidSocket && !outgoing.empty() && budget) {
+      const auto amount = static_cast<int>(
+          std::min<std::size_t>({outgoing.size(), budget, 4096}));
+      const auto written = ::send(client, outgoing.data(), amount, 0);
+      if (written < 0) {
+        const auto code = socketError();
+        if (socketInterrupted(code))
+          continue;
+        if (!socketWouldBlock(code))
+          disconnectClient();
+        break;
+      }
+      if (written == 0) {
+        disconnectClient();
+        break;
+      }
+      outgoing.erase(0, static_cast<std::size_t>(written));
+      budget -= static_cast<std::size_t>(written);
+    }
   }
 
   std::string filePath(json_object *arguments) const {
@@ -266,6 +453,17 @@ struct MCPServer::State {
     const std::string line = std::string(json_object_to_json_string_ext(
                                  message, JSON_C_TO_STRING_PLAIN)) +
                              "\n";
+    if (tcp) {
+      if (client == invalidSocket)
+        return;
+      if (outgoing.size() + line.size() > 1024 * 1024) {
+        // A client that does not read must not grow engine memory unbounded.
+        disconnectClient();
+        return;
+      }
+      outgoing.append(line);
+      return;
+    }
     if (std::fwrite(line.data(), 1, line.size(), stdout) != line.size() ||
         std::fflush(stdout) != 0)
       throw std::runtime_error("Cannot write MCP stdout response");
@@ -655,12 +853,25 @@ struct MCPServer::State {
   }
 };
 
-MCPServer::MCPServer(Engine &engine, const std::string &root)
-    : state(std::make_unique<State>(engine, root)) {}
+MCPServer::MCPServer(Engine &engine, const std::string &root,
+                     unsigned short tcpPort)
+    : state(std::make_unique<State>(engine, root, tcpPort)) {}
 MCPServer::~MCPServer() = default;
 
 bool MCPServer::pump() {
-  state->readInput();
+  if (state->tcp) {
+    state->flushTcpOutput();
+    if (state->client != invalidSocket)
+      state->readTcpInput();
+    // Retire a closed client before accepting the next connection. A newly
+    // accepted client still gets one input read on this same frame.
+    const bool currentClientRead = state->client != invalidSocket;
+    state->acceptClients();
+    if (!currentClientRead && state->client != invalidSocket)
+      state->readTcpInput();
+  } else {
+    state->readInput();
+  }
   for (int requests = 0; requests < 32; ++requests) {
     const auto end = state->buffer.find('\n');
     if (end == std::string::npos)
@@ -669,6 +880,10 @@ bool MCPServer::pump() {
     state->buffer.erase(0, end + 1);
     if (!line.empty() && line != "\r")
       state->dispatch(line);
+  }
+  if (state->tcp) {
+    state->flushTcpOutput();
+    return true;
   }
   if (state->eof && state->buffer.find('\n') == std::string::npos) {
     if (!state->buffer.empty())

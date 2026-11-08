@@ -102,8 +102,7 @@ void Launcher::open() {
     }
 
     // 3. Obtém o tamanho da tela do monitor principal se for mobile/fullscreen
-    int width = 760;
-    int height = 560;
+    auto [width, height] = preferredWindowSize();
 
     if (isMobilePlatform()) {
       SDL_DisplayID displayID = SDL_GetPrimaryDisplay();
@@ -222,7 +221,7 @@ void Launcher::setStatus(std::string message, bool error) {
     SDL_LogWarn(LogConfig, "Launcher: %s", status.c_str());
 }
 
-bool Launcher::launch() {
+bool Launcher::apply() {
   try {
     draft.validate();
     std::string error;
@@ -237,6 +236,12 @@ bool Launcher::launch() {
     setStatus(error.what(), true);
     return false;
   }
+  setStatus("Settings saved", false);
+  return true;
+}
+
+bool Launcher::launch() {
+  if (!apply()) return false;
   setStatus("", false);
   current = State::Launch;
   SDL_LogInfo(LogConfig, "Launcher: starting with upscaling %s x%.2f",
@@ -382,6 +387,7 @@ void Launcher::draw() {
                    ImGuiWindowFlags_NoSavedSettings |
                    ImGuiWindowFlags_NoBringToFrontOnFocus);
   ImGui::PopStyleVar(3);
+  if (!drawCustomContents()) {
   {
     // Header band: accent strip + large title + settings location.
     const ImVec2 origin = ImGui::GetWindowPos();
@@ -469,6 +475,7 @@ void Launcher::draw() {
   ImGui::SameLine();
   if (ImGui::Button("Quit"))
     quit();
+  }
   ImGui::End();
   ImGui::Render();
   SDL_SetRenderScale(renderer.get(), io.DisplayFramebufferScale.x,
