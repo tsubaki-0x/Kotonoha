@@ -4,13 +4,16 @@
 #include <Kotonoha/core/FileSystem.hpp>
 #include <Kotonoha/core/DiscImage.hpp>
 #include <Kotonoha/localization/Translation.hpp>
+#include <Kotonoha/media/MediaPlayer.hpp>
 #include <Kotonoha/media/MediaDecoder.hpp>
 #include <Kotonoha/routing/SchoolDaysDesktopStartupProfile.hpp>
 #include <Kotonoha/routing/SchoolDaysDisplayPolicy.hpp>
 #include <Kotonoha/routing/SchoolDaysKtrfSession.hpp>
 #include <Kotonoha/routing/SchoolDaysLxhContent.hpp>
 #include <Kotonoha/routing/SchoolDaysRetailConfigPolicy.hpp>
+#include <Kotonoha/routing/SchoolDaysTitleProfile.hpp>
 #include <Kotonoha/routing/SchoolDaysTranslationCoverage.hpp>
+#include <Kotonoha/routing/SchoolDaysUpscalingPolicy.hpp>
 
 #include <imgui.h>
 #include <imgui_stdlib.h>
@@ -78,6 +81,38 @@ bool regularTranslationFile(const std::string &path) {
 // exclusively responsible for physical monitor/output settings.
 constexpr std::string_view kAspectKey = "ContentAspectPreference=";
 constexpr const char *kShaderSidecarHeader = "SchoolDaysShaderPaths.v1";
+
+constexpr const char *kTitleMusicId = "launcher-title-loop";
+
+// Copy the selected retail TitleBGM once, then release the GPK mount before
+// the launcher validates/saves Options. The MediaPlayer's FFmpeg decoder must
+// never retain an AssetStream against an unmounted GPK archive.
+class LauncherMusicBytes final : public Kotonoha::AssetProvider {
+  const std::vector<Uint8> &bytes;
+
+public:
+  explicit LauncherMusicBytes(const std::vector<Uint8> &value) : bytes(value) {}
+  std::string name() const override { return "School Days launcher music"; }
+  bool containsAsset(const std::string &id) const override {
+    return id == kTitleMusicId;
+  }
+  std::vector<Uint8> readAsset(const std::string &id) const override {
+    if (!containsAsset(id))
+      throw std::runtime_error("Unknown launcher music resource");
+    return bytes;
+  }
+};
+
+bool readLauncherMusicEnabled(const fs::path &path) {
+  std::error_code ec;
+  if (path.empty() || !fs::is_regular_file(path, ec) || ec ||
+      fs::file_size(path, ec) > 16 || ec)
+    return true;
+  std::ifstream input(path);
+  std::string value;
+  std::getline(input, value);
+  return value != "off";
+}
 
 std::filesystem::path shaderSidecarPath(const std::string &settingsPath) {
   return fs::path(settingsPath).parent_path() / "shader-paths.txt";
@@ -279,6 +314,148 @@ Launcher::Launcher(std::string settingsPath, std::string directory,
       !settings().upscaling.shaderFiles.empty())
     settings().upscaling.shaderFiles = resolveStoredShaderPaths(
         getSettingsPath(), settings().upscaling.shaderFiles);
+  if (!getSettingsPath().empty()) {
+    musicPreferenceFile = fs::path(getSettingsPath()).parent_path() /
+                          "launcher-music.txt";
+    musicEnabled = readLauncherMusicEnabled(musicPreferenceFile);
+  }
+}
+
+Launcher::~Launcher() { close(); }
+
+void Launcher::close() {
+  titleMusic.reset();
+  titleMusicBytes.clear();
+  titleMusicSource.clear();
+  musicAttempted = false;
+  if (audioInitialized) {
+    SDL_QuitSubSystem(SDL_INIT_AUDIO);
+    audioInitialized = false;
+  }
+  GameLauncher::close();
+}
+
+bool Launcher::savedNoticeExpired(std::uint64_t savedAt, std::uint64_t now) {
+  return now >= savedAt && now - savedAt >= SavedNoticeMilliseconds;
+}
+
+void Launcher::toggleMusic() {
+  musicEnabled = !musicEnabled;
+  if (titleMusic && !musicEnabled) {
+    try {
+      titleMusic->setPaused(true);
+    } catch (const std::exception &error) {
+      titleMusic.reset();
+      SDL_LogWarn(SDL_LOG_CATEGORY_AUDIO,
+                  "Cannot pause launcher music: %s", error.what());
+    }
+  }
+  if (musicEnabled && !titleMusic)
+    musicAttempted = false; // retry a previously unavailable retail folder
+  if (!musicPreferenceFile.empty()) {
+    try {
+      Kotonoha::writeTextFileAtomically(
+          musicPreferenceFile.string(), musicEnabled ? "on\n" : "off\n");
+    } catch (const std::exception &error) {
+      SDL_LogWarn(SDL_LOG_CATEGORY_AUDIO,
+                  "Cannot remember launcher music preference: %s", error.what());
+    }
+  }
+}
+
+void Launcher::drawMusicToggle(const ImVec2 &position) {
+  ImGui::SetCursorScreenPos(position);
+  // Use a dedicated high-contrast control. The old pale 119 px button in the
+  // artwork's bright sky could look missing, even on a current build.
+  ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 5.0f);
+  ImGui::PushStyleColor(ImGuiCol_Button,
+                        ImVec4(0.055f, 0.19f, 0.33f, 0.96f));
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                        ImVec4(0.13f, 0.35f, 0.54f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+                        ImVec4(0.10f, 0.28f, 0.47f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_Text,
+                        ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+  if (ImGui::Button(musicEnabled ? "Launcher music: ON##launcher" :
+                                  "Launcher music: OFF##launcher",
+                    {190.0f, 33.0f}))
+    toggleMusic();
+  ImGui::PopStyleColor(4);
+  ImGui::PopStyleVar();
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("This switch affects only the launcher. It does not "
+                      "change the game's Title/BGM playback.");
+}
+
+void Launcher::updateTitleMusic() {
+  if (!isOpen() || !musicEnabled || !pathValid() || path().empty()) {
+    if (titleMusic) {
+      try {
+        titleMusic->setPaused(true);
+      } catch (const std::exception &error) {
+        titleMusic.reset();
+        SDL_LogWarn(SDL_LOG_CATEGORY_AUDIO,
+                    "Cannot pause launcher music: %s", error.what());
+      }
+    }
+    return;
+  }
+  if (!musicAttempted || titleMusicSource != path()) {
+    titleMusic.reset();
+    titleMusicBytes.clear();
+    titleMusicSource = path();
+    musicAttempted = true;
+    try {
+      // The engine doesn't exist yet: the embedded launcher owns its audio
+      // subsystem reference and releases it before entering gameplay.
+      if (!audioInitialized) {
+        if (!SDL_InitSubSystem(SDL_INIT_AUDIO))
+          throw std::runtime_error(SDL_GetError());
+        audioInitialized = true;
+      }
+      {
+        Assets assets(Kotonoha::gameDataDirectory(path()));
+        Kotonoha::SchoolDaysEndBackgroundResolver::Profile profile;
+        std::string error;
+        if (!Kotonoha::SchoolDaysTitleProfile::Load(
+                assets.root().string(), &profile, &error))
+          throw std::runtime_error(error);
+        titleMusicBytes = assets.read(
+            assets.resolve(profile.titleBgmStem + "_loop.ogg"));
+      }
+      LauncherMusicBytes inMemory(titleMusicBytes);
+      auto player = std::make_unique<Kotonoha::MediaPlayer>();
+      player->setBufferSeconds(1.0);
+      // Prepare paused, so a muted/zero-volume profile never leaks a short
+      // audible burst between opening the stream and applying the gain.
+      player->prepare(inMemory, kTitleMusicId, true, "BGM");
+      titleMusic = std::move(player);
+    } catch (const std::exception &error) {
+      titleMusic.reset();
+      titleMusicBytes.clear();
+      SDL_LogWarn(SDL_LOG_CATEGORY_AUDIO,
+                  "School Days launcher title BGM unavailable: %s", error.what());
+    }
+  }
+  if (!titleMusic) return;
+  try {
+    // Decorative launcher audio belongs only to its ON/OFF preference.
+    // Config.DAT Mute/BgmVolume and in-game master settings must not make a
+    // visible "Launcher music: ON" control silently inaudible, or be changed
+    // by that control. Use a comfortable fixed gain with a private mixer.
+    constexpr float kLauncherMusicGain = 0.35f;
+    titleMusic->getChannel()->setVolume(kLauncherMusicGain);
+    titleMusic->setPaused(false);
+    titleMusic->update(*launcherRenderer());
+    if (titleMusic->finished()) {
+      LauncherMusicBytes inMemory(titleMusicBytes);
+      titleMusic->prepare(inMemory, kTitleMusicId, true, "BGM");
+    }
+  } catch (const std::exception &error) {
+    titleMusic.reset();
+    SDL_LogWarn(SDL_LOG_CATEGORY_AUDIO,
+                "School Days launcher title BGM stopped: %s", error.what());
+  }
 }
 
 bool Launcher::initializeFirstRunDisplay(Kotonoha::EngineSettings &target,
@@ -334,6 +511,7 @@ void Launcher::seedFirstRunDisplayIfPossible() {
 SDL_AppResult Launcher::iterate() {
   if (!isOpen()) open();
   seedFirstRunDisplayIfPossible();
+  updateTitleMusic();
   return GameLauncher::iterate();
 }
 
@@ -892,11 +1070,11 @@ void Launcher::drawGraphicsOptions() {
       draft.renderer.empty() ? "Automatic" : draft.renderer;
   if (ImGui::BeginCombo("Renderer##sd", renderer.c_str())) {
     if (ImGui::Selectable("Automatic", draft.renderer.empty()))
-      draft.renderer.clear();
+      Kotonoha::SchoolDaysUpscalingPolicy::SelectRenderer(draft, {});
     for (int index = 0; index < SDL_GetNumRenderDrivers(); ++index) {
       const char *driver = SDL_GetRenderDriver(index);
       if (driver && ImGui::Selectable(driver, draft.renderer == driver))
-        draft.renderer = driver;
+        Kotonoha::SchoolDaysUpscalingPolicy::SelectRenderer(draft, driver);
     }
     ImGui::EndCombo();
   }
@@ -922,17 +1100,41 @@ void Launcher::drawGraphicsOptions() {
   }
   ImGui::SliderFloat("Upscale factor##sd", &draft.upscaling.factor,
                      1.0f, 4.0f, "%.2fx");
+  if (draft.upscaling.factor <= 1.0f)
+    ImGui::TextDisabled("Upscaling is OFF at 1.0x, regardless of preset.");
   if (ImGui::BeginCombo("Shader preset##sd",
                         Kotonoha::UpscalePresetName(draft.upscaling.preset))) {
     for (const auto preset : Kotonoha::UpscalePresets())
       if (ImGui::Selectable(Kotonoha::UpscalePresetName(preset),
                             draft.upscaling.preset == preset)) {
-        draft.upscaling.preset = preset;
-        draft.upscaling.shaderFiles.clear();
+        // A shader selection explicitly asks for an active shader pipeline.
+        // Direct3D12 does not execute MPV/GLSL; switch to OpenGL instead of
+        // silently saving a preset that cannot affect rendering.
+        Kotonoha::SchoolDaysUpscalingPolicy::SelectPreset(draft, preset);
       }
     ImGui::EndCombo();
   }
-  ImGui::InputText("Custom GLSL paths##sd", &draft.upscaling.shaderFiles);
+  ImGui::TextDisabled("Choosing a shader preset selects OpenGL + MPV and >=2.0x.");
+  if (!draft.renderer.empty() &&
+      !Kotonoha::SchoolDaysUpscalingPolicy::IsOpenGLRenderer(draft.renderer)) {
+    ImGui::TextWrapped("%s uses Linear with Auto: Anime4K/ArtCNN GLSL "
+                       "presets are NOT active. Select a shader preset to "
+                       "switch to OpenGL + MPV, or keep this renderer for "
+                       "Linear scaling.", draft.renderer.c_str());
+  } else if (draft.renderer.empty()) {
+    ImGui::TextWrapped("Automatic renderer: the active upscaler depends on "
+                       "the driver SDL chooses. GLSL requires OpenGL + MPV.");
+  }
+  if (ImGui::InputText("Custom GLSL paths##sd", &draft.upscaling.shaderFiles) &&
+      !draft.upscaling.shaderFiles.empty()) {
+    draft.renderer = "opengl";
+    draft.upscaling.backend = Kotonoha::UpscaleBackend::MPV;
+    draft.upscaling.factor = std::max(2.0f, draft.upscaling.factor);
+  }
+  if (!draft.upscaling.shaderFiles.empty() &&
+      !Kotonoha::SchoolDaysUpscalingPolicy::UsesShaders(draft))
+    ImGui::TextWrapped("Custom GLSL paths are saved but inactive with this "
+                       "renderer/backend or 1.0x factor.");
 }
 
 void Launcher::drawRetailGeneralSound() {
@@ -1228,6 +1430,9 @@ void Launcher::drawMainScreen() {
   ImGui::PopStyleColor(4);
   ImGui::PopStyleVar(2);
 
+  // Clearly visible in both windows; no dependency on Audio tab or hovering.
+  drawMusicToggle({start.x + size.x - 214.0f, start.y + 20.0f});
+
   if (!getStatus().empty()) {
     // Play failures must remain visible, rather than obscured by the artwork.
     const ImVec2 a{start.x + size.x * 0.43f, start.y + size.y * 0.17f};
@@ -1324,6 +1529,12 @@ void Launcher::drawOptionsScreen() {
       ImGui::EndTabItem();
     }
     if (ImGui::BeginTabItem("Audio")) {
+      ImGui::SeparatorText("Launcher-only music");
+      bool launcherMusic = musicEnabled;
+      if (ImGui::Checkbox("Play music while launcher is open##sd",
+                          &launcherMusic))
+        toggleMusic();
+      ImGui::TextDisabled("Does not change the Title music in the game.");
       drawRetailAudioOptions();
       ImGui::EndTabItem();
     }
@@ -1361,9 +1572,11 @@ void Launcher::drawOptionsScreen() {
   ImGui::SetCursorScreenPos({top.x + 25.0f, footerY});
   if (ImGui::Button("Reset##school-days-options", {112.0f, 31.0f}))
     resetOptions();
+  drawMusicToggle({top.x + 155.0f, footerY});
   ImGui::SetCursorScreenPos({top.x + size.x - 261.0f, footerY});
   if (ImGui::Button("OK##school-days-options", {112.0f, 31.0f})) {
     if (apply()) {
+      savedNoticeAt = SDL_GetTicks();
       optionSnapshot.reset();
       screen = Screen::Main;
       if (launcherWindow()) SDL_SetWindowSize(launcherWindow(), 950, 600);
@@ -1386,6 +1599,14 @@ void Launcher::drawOptionsScreen() {
 
 bool Launcher::drawCustomContents() {
   if (!launcherWindow() || !launcherRenderer()) return false;
+  if (savedNoticeAt) {
+    if (getStatus() != "Settings saved") {
+      savedNoticeAt.reset();
+    } else if (savedNoticeExpired(*savedNoticeAt, SDL_GetTicks())) {
+      setStatus("", false);
+      savedNoticeAt.reset();
+    }
+  }
   if (screen == Screen::Main)
     drawMainScreen();
   else
@@ -1396,6 +1617,11 @@ bool Launcher::drawCustomContents() {
 bool Launcher::validate(std::string &error) {
   seedFirstRunDisplayIfPossible();
   if (!GameLauncher::validate(error)) return false;
+  if (Kotonoha::SchoolDaysUpscalingPolicy::IncompatibleMpvSelection(settings())) {
+    error = "MPV/Anime4K/ArtCNN requires the OpenGL renderer. Select "
+            "OpenGL or change Upscaler to Auto/Linear for Direct3D12.";
+    return false;
+  }
   if (retailConfigReady) {
     try {
       checkRetailFileUnchanged();

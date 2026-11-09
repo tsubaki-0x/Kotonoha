@@ -4,6 +4,7 @@
 #include <Kotonoha/routing/SchoolDaysLxhContent.hpp>
 #include <Kotonoha/routing/SchoolDaysMediaCancellationPool.hpp>
 #include <Kotonoha/routing/SchoolDaysTranslationCoverage.hpp>
+#include <Kotonoha/routing/SchoolDaysUpscalingPolicy.hpp>
 #include <Kotonoha/componentes/TextInputDialog.hpp>
 #include <Kotonoha/componentes/DisplayModeCatalog.hpp>
 #include <Kotonoha/events/BackAction.hpp>
@@ -3876,11 +3877,10 @@ void Runtime::activateDesktopDisplayControl(int control) {
     break;
   }
   case 10: {
-    if (engine->GetUpscaler().resolve(draft.upscaling.backend) !=
-        Kotonoha::UpscaleBackend::MPV) {
-      setStatus("Shader presets require the MPV/OpenGL upscaler");
-      return;
-    }
+    // Always show the preset list. The previous gate made the list appear
+    // broken when Launcher had saved Direct3D12 + Auto (which resolves to
+    // Linear). A selection can only apply on a live OpenGL renderer; the
+    // popup explains this rather than pretending D3D12 supports GLSL.
     const auto &presets = Kotonoha::UpscalePresets();
     const auto it = std::find(presets.begin(), presets.end(), draft.upscaling.preset);
     openPopup(DesktopDisplayPopup::Shader,
@@ -3889,9 +3889,9 @@ void Runtime::activateDesktopDisplayControl(int control) {
   }
   case 11:
   case 12:
-    if (engine->GetUpscaler().resolve(draft.upscaling.backend) !=
-        Kotonoha::UpscaleBackend::MPV) {
-      setStatus("Custom GLSL requires the MPV/OpenGL upscaler");
+    if (!engine->GetUpscaler().supports(Kotonoha::UpscaleBackend::MPV)) {
+      setStatus("Custom GLSL requires OpenGL. Change renderer in launcher "
+                "and restart the game.");
       return;
     }
     // BROWSE deliberately opens the keyboard/paste path editor. There is no
@@ -4042,12 +4042,27 @@ void Runtime::renderDesktopDisplayPanel(Kotonoha::RendererRef renderer) {
              (draft.mode == Kotonoha::WindowMode::Windowed ? " (window)" : ""),
          254.0f, 113.0f, 488.0f);
   }
-  draw(Kotonoha::UpscaleBackendName(draft.upscaling.backend),
-       254.0f, 215.0f, 488.0f);
+  std::string backendLabel =
+      Kotonoha::UpscaleBackendName(draft.upscaling.backend);
+  if (draft.upscaling.backend == Kotonoha::UpscaleBackend::Auto) {
+    backendLabel += " -> ";
+    backendLabel += Kotonoha::UpscaleBackendName(
+        engine->GetUpscaler().resolve(draft.upscaling.backend));
+  }
+  draw(backendLabel, 254.0f, 215.0f, 488.0f);
   draw(draft.upscaling.shaderFiles.empty()
            ? Kotonoha::UpscalePresetName(draft.upscaling.preset)
            : "Custom GLSL",
        254.0f, 248.0f, 488.0f);
+  // y=317..344 contains the seven scale chips. Keep diagnostics in the free
+  // 345..379 band, never draw text over the player's buttons.
+  if (!engine->GetUpscaler().supports(Kotonoha::UpscaleBackend::MPV))
+    draw("GLSL inactive: use OpenGL in launcher", 254.0f, 350.0f, 488.0f);
+  else if (draft.upscaling.factor <= 1.0f)
+    draw("Upscaling OFF at 1.0x", 254.0f, 350.0f, 488.0f);
+  else if (engine->GetUpscaler().resolve(draft.upscaling.backend) !=
+           Kotonoha::UpscaleBackend::MPV)
+    draw("GLSL inactive: select MPV upscaler", 254.0f, 350.0f, 488.0f);
   draw(draft.upscaling.shaderFiles.empty()
            ? "(none)" : DisplayClipText(draft.upscaling.shaderFiles, 48),
        254.0f, 281.0f, 371.0f);
@@ -4101,7 +4116,9 @@ void Runtime::renderDesktopDisplayPanel(Kotonoha::RendererRef renderer) {
                       (engine->GetUpscaler().supports(backend) ? "" : " (unavailable)"));
     }
   } else {
-    title = "SHADER PRESET - 15 MPV GLSL PROFILES";
+    title = engine->GetUpscaler().supports(Kotonoha::UpscaleBackend::MPV)
+        ? "SHADER PRESET - 15 MPV GLSL PROFILES"
+        : "SHADERS INACTIVE - OPENGL REQUIRED (RESTART)";
     for (const auto preset : Kotonoha::UpscalePresets())
       names.push_back(Kotonoha::UpscalePresetName(preset));
   }
@@ -4118,7 +4135,12 @@ void Runtime::renderDesktopDisplayPanel(Kotonoha::RendererRef renderer) {
     ui.button(renderer, rect, names[static_cast<size_t>(index)],
               desktopDisplayPopupHover == index);
   }
-  if (maxScroll > 0) {
+  if (desktopDisplayPopup == DesktopDisplayPopup::Shader &&
+      !engine->GetUpscaler().supports(Kotonoha::UpscaleBackend::MPV)) {
+    popupText("OPENGL REQUIRED - CHANGE RENDERER IN LAUNCHER",
+              kDesktopPopupX + 12, kDesktopPopupY + 309,
+              kDesktopPopupWidth - 24);
+  } else if (maxScroll > 0) {
     char page[64];
     SDL_snprintf(page, sizeof(page), "%d-%d / %d",
                  desktopDisplayPopupScroll + 1,
@@ -4172,6 +4194,11 @@ bool Runtime::handleDesktopDisplayPanel(Kotonoha::EventRef event) {
         }
       }
       desktopDisplayDraft.upscaling.shaderFiles = desktopDisplayPathEdit;
+      if (!desktopDisplayPathEdit.empty()) {
+        desktopDisplayDraft.upscaling.backend = Kotonoha::UpscaleBackend::MPV;
+        desktopDisplayDraft.upscaling.factor =
+            std::max(2.0f, desktopDisplayDraft.upscaling.factor);
+      }
       finishPopup();
       // GLSL editor confirmation must behave like every other Display choice:
       // apply and persist immediately, including the external-path sidecar.
@@ -4210,6 +4237,16 @@ bool Runtime::handleDesktopDisplayPanel(Kotonoha::EventRef event) {
       }
       desktopDisplayDraft.upscaling.backend = backend;
     } else if (popup == DesktopDisplayPopup::Shader) {
+      if (!engine->GetUpscaler().supports(Kotonoha::UpscaleBackend::MPV)) {
+        setStatus("Preset needs MPV/OpenGL, unavailable on this renderer. "
+                  "Select OpenGL in the launcher and restart.");
+        finishPopup();
+        playSound(Ui::UiSfxCue::Cancel);
+        return;
+      }
+      desktopDisplayDraft.upscaling.backend = Kotonoha::UpscaleBackend::MPV;
+      desktopDisplayDraft.upscaling.factor =
+          std::max(2.0f, desktopDisplayDraft.upscaling.factor);
       desktopDisplayDraft.upscaling.preset =
           Kotonoha::UpscalePresets()[static_cast<size_t>(choice)];
       desktopDisplayDraft.upscaling.shaderFiles.clear();

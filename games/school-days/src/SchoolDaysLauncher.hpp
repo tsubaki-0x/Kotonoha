@@ -6,7 +6,12 @@
 
 #include <filesystem>
 #include <cstdint>
+#include <memory>
 #include <optional>
+#include <vector>
+
+namespace Kotonoha { class MediaPlayer; }
+struct ImVec2;
 
 namespace SchoolDays {
 
@@ -41,6 +46,13 @@ public:
 
   Launcher(std::string settingsPath, std::string directory,
            std::string route = {});
+  ~Launcher() override;
+  void close();
+  // Pure wall-clock policy; a successful Options save is informational, not
+  // a permanent banner. Failures still remain visible until addressed.
+  static constexpr std::uint64_t SavedNoticeMilliseconds = 4000;
+  static bool savedNoticeExpired(std::uint64_t savedAt,
+                                 std::uint64_t now);
   // Config.DAT lives in Runtime's executable/--documents profile, not beside
   // settings.json. The owning main.cpp MUST supply that exact path explicitly:
   // never guess and overwrite an unrelated commercial save profile.
@@ -99,8 +111,16 @@ private:
   };
   Screen screen = Screen::Main;
   std::optional<OptionsSnapshot> optionSnapshot;
+  std::optional<std::uint64_t> savedNoticeAt;
   Kotonoha::TexturePtr launcherArtwork;
   bool artworkAttempted = false;
+  std::filesystem::path musicPreferenceFile;
+  std::vector<Uint8> titleMusicBytes;
+  std::unique_ptr<Kotonoha::MediaPlayer> titleMusic;
+  std::string titleMusicSource;
+  bool musicEnabled = true;
+  bool musicAttempted = false;
+  bool audioInitialized = false;
   std::size_t routeOption = 0;
   Language selectedLanguage = Language::English;
   std::filesystem::path languagePreferenceFile;
@@ -135,6 +155,9 @@ private:
   void openOptions();
   void cancelOptions();
   void resetOptions();
+  void updateTitleMusic();
+  void toggleMusic();
+  void drawMusicToggle(const ImVec2 &position);
   bool loadLauncherArtwork();
   void syncMixerFromRetail();
   void syncRetailFromMixer();

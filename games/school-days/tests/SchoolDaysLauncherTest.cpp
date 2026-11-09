@@ -6,6 +6,7 @@
 #include <Kotonoha/routing/SchoolDaysRetailConfigPolicy.hpp>
 #include <Kotonoha/routing/SchoolDaysLxhContent.hpp>
 #include <Kotonoha/routing/SchoolDaysTranslationCoverage.hpp>
+#include <Kotonoha/routing/SchoolDaysUpscalingPolicy.hpp>
 #include <Kotonoha/localization/Translation.hpp>
 #include <Kotonoha/script/KtrfScript.hpp>
 
@@ -97,11 +98,111 @@ struct TemporaryDirectory {
 
 int main(int argc, char **argv) {
   try {
+    // Two-way settings contract: Direct3D12 can resize with Linear but never
+    // runs GLSL/ArtCNN. A preset selection switches explicitly to MPV/OpenGL
+    // with a non-zero factor; selecting Direct3D12 afterward changes only
+    // the backend (not the user's chosen preset) and must stay consistent.
+    {
+      using Policy = Kotonoha::SchoolDaysUpscalingPolicy;
+      using Backend = Kotonoha::UpscaleBackend;
+      using Preset = Kotonoha::UpscalePreset;
+      Kotonoha::EngineSettings values;
+      values.renderer = "direct3d12";
+      values.upscaling.backend = Backend::Auto;
+      values.upscaling.factor = 2.0f;
+      values.upscaling.preset = Preset::ArtCNNLarge;
+      require(!Policy::UsesShaders(values) &&
+                  !Policy::IncompatibleMpvSelection(values),
+              "Direct3D12+Auto mistakenly advertised GLSL shader support");
+      values.upscaling.backend = Backend::MPV;
+      require(Policy::IncompatibleMpvSelection(values),
+              "Direct3D12+MPV impossible configuration went unnoticed");
+      Policy::SelectRenderer(values, "direct3d11");
+      require(values.renderer == "direct3d11" &&
+                  values.upscaling.backend == Backend::Auto &&
+                  values.upscaling.preset == Preset::ArtCNNLarge &&
+                  !Policy::UsesShaders(values),
+              "Switching away from OpenGL left MPV active or lost the preset");
+      values.upscaling.factor = 1.0f;
+      values.upscaling.shaderFiles = "example.glsl";
+      Policy::SelectPreset(values, Preset::Anime4KModeCAFast);
+      require(values.renderer == "opengl" &&
+                  values.upscaling.backend == Backend::MPV &&
+                  values.upscaling.factor >= 2.0f &&
+                  values.upscaling.shaderFiles.empty() &&
+                  values.upscaling.preset == Preset::Anime4KModeCAFast &&
+                  Policy::UsesShaders(values),
+              "Selecting shader preset failed to enable OpenGL MPV and scale");
+      values.upscaling.factor = 1.0f;
+      require(!Policy::UsesShaders(values),
+              "GLSL must not be advertised active at factor 1.0");
+      values.upscaling.factor = 2.0f;
+      values.upscaling.backend = Backend::Linear;
+      require(!Policy::UsesShaders(values),
+              "Linear must not advertise MPV shader effects on OpenGL");
+      Policy::SelectRenderer(values, "direct3d12");
+      require(values.renderer == "direct3d12" &&
+                  values.upscaling.backend == Backend::Linear &&
+                  !Policy::UsesShaders(values),
+              "Direct3D12 renderer switch mutated an independent Linear backend");
+      values.upscaling.backend = Backend::MPV;
+      Policy::SelectRenderer(values, {});
+      require(values.renderer.empty() &&
+                  values.upscaling.backend == Backend::Auto &&
+                  !Policy::UsesShaders(values),
+              "Automatic renderer kept an MPV backend without guaranteed OpenGL");
+      Policy::SelectRenderer(values, "direct3d12");
+      values.upscaling.backend = Backend::Auto;
+      require(!Policy::UsesShaders(values),
+              "Direct3D12+Auto unexpectedly gained MPV shaders");
+      values.upscaling.backend = Backend::None;
+      require(!Policy::UsesShaders(values),
+              "Disabled backend must not advertise shader effects");
+    }
+    require(!SchoolDays::Launcher::savedNoticeExpired(1000, 4999) &&
+                SchoolDays::Launcher::savedNoticeExpired(1000, 5000) &&
+                SchoolDays::Launcher::savedNoticeExpired(1000, 9000) &&
+                !SchoolDays::Launcher::savedNoticeExpired(1000, 999),
+            "Options success notice did not expire at the four-second boundary");
     require(argc == 4,
             "Usage: SchoolDaysLauncherTest route fixtures executable");
     const fs::path original = fs::absolute(argv[1]);
     const fs::path fixtures = fs::absolute(argv[2]);
     TemporaryDirectory temporary;
+    // Reopen both profiles exactly as the game does after launcher OK. A
+    // Direct3D12 selection must not regenerate MPV (and vice versa) simply
+    // because settings.json is round-tripped through the generic serializer.
+    {
+      const auto file = (temporary.path / "upscale-roundtrip.json").string();
+      Kotonoha::EngineSettings draft;
+      draft.width = 1600;
+      draft.height = 900;
+      draft.renderScale = 0.75f;
+      draft.masterVolume = 0.25f;
+      draft.renderer = "direct3d12";
+      draft.upscaling.backend = Kotonoha::UpscaleBackend::Auto;
+      draft.upscaling.factor = 1.0f;
+      Kotonoha::SchoolDaysUpscalingPolicy::SelectPreset(
+          draft, Kotonoha::UpscalePreset::ArtCNN);
+      draft.save(file);
+      auto game = Kotonoha::EngineSettings::load(file);
+      require(game.renderer == "opengl" &&
+                  game.upscaling.backend == Kotonoha::UpscaleBackend::MPV &&
+                  game.upscaling.preset == Kotonoha::UpscalePreset::ArtCNN &&
+                  game.upscaling.factor >= 2.0f &&
+                  game.width == 1600 && game.height == 900 &&
+                  std::abs(game.renderScale - 0.75f) < 0.001f &&
+                  std::abs(game.masterVolume - 0.25f) < 0.001f,
+              "Shader selection did not survive launcher -> game settings load");
+      Kotonoha::SchoolDaysUpscalingPolicy::SelectRenderer(game, "direct3d12");
+      game.save(file);
+      const auto reopened = Kotonoha::EngineSettings::load(file);
+      require(reopened.renderer == "direct3d12" &&
+                  reopened.upscaling.backend == Kotonoha::UpscaleBackend::Auto &&
+                  reopened.upscaling.preset == Kotonoha::UpscalePreset::ArtCNN &&
+                  !Kotonoha::SchoolDaysUpscalingPolicy::UsesShaders(reopened),
+              "Direct3D12 re-opened with a forbidden MPV shader backend");
+    }
     const auto workspace = temporary.path / "workspace";
     const auto gameAssets = workspace / "games/school-days/game-assets";
     fs::create_directories(gameAssets / "Script/English");
