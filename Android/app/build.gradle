@@ -109,13 +109,27 @@ android.applicationVariants.all { variant ->
     def includeThisGame = includeGameAssets || variant.flavorName == 'example'
     def assets = tasks.register("stage${taskSuffix}Assets", Sync) {
         from(new File(engineRoot, 'assets')) { into 'assets' }
-        if (includeThisGame) {
+        if (variant.flavorName == 'schoolDays') {
+            // Android School Days always needs its engine-owned routing and
+            // subtitle style. Never bundle original retail GPKs or arbitrary
+            // files from a developer's local game-assets directory into APKs.
+            from(gameAssets) {
+                include 'school-days-hq.ktnroute', 'styles.ass'
+                into 'game-assets'
+            }
+        } else if (includeThisGame) {
             from(gameAssets) { into 'game-assets' }
         }
         into staged
         doFirst {
-            if (includeThisGame && !gameAssets.isDirectory()) {
+            if ((includeThisGame || variant.flavorName == 'schoolDays') &&
+                    !gameAssets.isDirectory()) {
                 throw new GradleException("Game asset source directory is missing: ${gameAssets}")
+            }
+            if (variant.flavorName == 'schoolDays' &&
+                    (!new File(gameAssets, 'school-days-hq.ktnroute').isFile() ||
+                     !new File(gameAssets, 'styles.ass').isFile())) {
+                throw new GradleException('School Days route/styles are required for the APK')
             }
         }
         doLast {

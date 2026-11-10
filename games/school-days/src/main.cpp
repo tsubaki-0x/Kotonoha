@@ -274,10 +274,10 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     auto app = std::make_unique<App>();
     std::string directory;
     app->options.persistSettings = true;
-    // On Windows this is a single-executable game: an ordinary double-click
-    // always opens the embedded launcher. --no-launcher remains available for
-    // automated/headless and developer runs. Android behavior is unchanged.
-#if defined(_WIN32) && !defined(__ANDROID__)
+    // Both desktop and Android use the shared School Days launcher; Android's
+    // separate Java bootstrap handles SAF imports before opening this UI.
+    // Non-interactive/developer CLI paths can still bypass it below.
+#if (defined(_WIN32) && !defined(__ANDROID__)) || defined(__ANDROID__) || defined(ANDROID)
     app->options.launcher = true;
 #else
     app->options.launcher = false;
@@ -435,6 +435,11 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     if (directory.empty() && !legacySettings.empty() &&
         legacySettings != settings)
       directory = rememberedValidDirectory(legacySettings);
+#if defined(__ANDROID__) || defined(ANDROID)
+    // Bootstrap has already copied validated user-owned Packs to app-private
+    // storage. Never launch Android with an empty desktop-style folder field.
+    if (directory.empty()) directory = SchoolDays::Assets::defaultDirectory().string();
+#endif
 #if !defined(KOTONOHA_DISTRIBUTION_BUILD)
     if (directory.empty()) directory = SchoolDays::Assets::defaultDirectory().string();
 #else
@@ -450,8 +455,13 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
       app->launcher = std::make_unique<SchoolDays::Launcher>(
           settings, directory, app->route);
       app->launcher->setRetailConfigRoot(
-          app->documents.empty() ? Kotonoha::resourceDirectory()
-                                 : std::filesystem::path(app->documents));
+          app->documents.empty()
+#if defined(__ANDROID__) || defined(ANDROID)
+              ? Kotonoha::preferredDocumentsDirectory("school-days")
+#else
+              ? Kotonoha::resourceDirectory()
+#endif
+              : std::filesystem::path(app->documents));
 #if defined(KOTONOHA_DISTRIBUTION_BUILD)
       if (!app->launcher->pathValid())
         app->launcher->promptForOriginalGameFiles();

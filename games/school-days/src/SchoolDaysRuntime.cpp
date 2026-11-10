@@ -5299,9 +5299,16 @@ bool Runtime::onScreenEvent(Kotonoha::EventRef event) {
 }
 
 bool Runtime::onEvent(Kotonoha::EventRef eventInput) {
-  const SDL_Event event = Kotonoha::MapControllerEvent(
+  SDL_Event event = Kotonoha::MapControllerEvent(
       eventInput, currentState == Kotonoha::GameState::Gameplay,
       backlogFallback && backlogFallback->isVisible());
+#if defined(__ANDROID__) || defined(ANDROID)
+  // SDL maps Android's physical/gesture Back key to AC_BACK. Reuse all the
+  // existing ESC close/cancel routes (Save, BackLog, Config, Replay, Title)
+  // rather than leaving touch-only players trapped inside modal screens.
+  if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_AC_BACK)
+    event.key.key = SDLK_ESCAPE;
+#endif
   if (currentState == Kotonoha::GameState::Splash) {
     return Kotonoha::Runtime::onEvent(event);
   }

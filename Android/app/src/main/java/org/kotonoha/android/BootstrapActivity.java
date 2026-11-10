@@ -7,10 +7,11 @@ import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
 import android.provider.DocumentsContract;
+import android.provider.OpenableColumns;
 import android.util.Log;
-import android.view.View;
 import android.widget.Button;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 import java.io.File;
@@ -26,6 +27,8 @@ import java.util.UUID;
 
 public final class BootstrapActivity extends Activity {
     private static final int SCHOOL_DAYS_PACKS_REQUEST = 4536;
+    private static final int SCHOOL_DAYS_EN_LXH_REQUEST = 4537;
+    private static final int SCHOOL_DAYS_TRANSLATION_REQUEST = 4538;
     // These names identify the 29 files from the player's legitimate HQ 1.02
     // installation and the separate, required LxH media archive. The APK never
     // contains or creates any of these copyrighted archives.
@@ -102,6 +105,11 @@ public final class BootstrapActivity extends Activity {
         return new File(new File(getDataDir(), "game_assets"), "Packs");
     }
 
+    private File privateSchoolDaysEnglishLxh() {
+        return new File(new File(getDataDir(), "game_assets"),
+                "translations/jsons/en-lxh.json");
+    }
+
     private static boolean completePacks(File directory) {
         if (!directory.isDirectory()) return false;
         File[] files = directory.listFiles();
@@ -130,22 +138,29 @@ public final class BootstrapActivity extends Activity {
     }
 
     private void showSchoolDaysSetup() {
-        if (hasSchoolDaysPacks()) {
-            launchGame();
-            return;
-        }
+        final boolean packsReady = hasSchoolDaysPacks();
+        final boolean lxhReady = privateSchoolDaysEnglishLxh().isFile() &&
+                privateSchoolDaysEnglishLxh().length() > 0;
+        // Keep this small Android storage/import screen available on every
+        // launch so other language packs can be installed without reinstalling
+        // the APK or ever replacing the player's existing settings/saves.
         LinearLayout controls = new LinearLayout(this);
         controls.setOrientation(LinearLayout.VERTICAL);
         controls.setPadding(32, 32, 32, 32);
+        status = new TextView(this);
         status.setPadding(0, 0, 0, 22);
-        status.setText("School Days HQ needs your own original game files.\n\n" +
-                "Select the original Packs folder (or the game folder containing Packs). " +
-                "The importer copies 29 retail GPKs and LxH.GPK into this app's private " +
-                "game storage. It never changes the source files or your saves. " +
-                "Make sure your device has enough free space.");
+        status.setText("School Days HQ — Android game files\n\n" +
+                (packsReady ? "Original Packs: ready\n" :
+                        "Original Packs: missing (29 HQ GPK + LxH.GPK)\n") +
+                (lxhReady ? "English LxH text: ready\n" :
+                        "English LxH text: missing (en-lxh.json)\n") +
+                "\nChoose the files from your own PC installation. Original data " +
+                "is not included in the APK. Imported copies stay inside the app; " +
+                "existing saves and source files are not changed.");
         controls.addView(status);
         Button choose = new Button(this);
         choose.setText("Import original Packs...");
+        choose.setEnabled(!packsReady);
         choose.setOnClickListener(view -> {
             if (importingPacks) return;
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
@@ -157,41 +172,187 @@ public final class BootstrapActivity extends Activity {
             }
         });
         controls.addView(choose);
+        Button english = new Button(this);
+        english.setText("Import English LxH text (en-lxh.json)...");
+        english.setEnabled(!lxhReady);
+        english.setOnClickListener(view -> {
+            if (importingPacks) return;
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType("*/*");
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            try {
+                startActivityForResult(intent, SCHOOL_DAYS_EN_LXH_REQUEST);
+            } catch (Exception error) {
+                status.setText("Could not open Android's file picker: " + error.getMessage());
+            }
+        });
+        controls.addView(english);
+        Button translations = new Button(this);
+        translations.setText("Import language GPK or JSON...");
+        translations.setOnClickListener(view -> {
+            if (importingPacks) return;
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType("*/*");
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            try {
+                startActivityForResult(intent, SCHOOL_DAYS_TRANSLATION_REQUEST);
+            } catch (Exception error) {
+                status.setText("Could not open translation picker: " + error.getMessage());
+            }
+        });
+        controls.addView(translations);
         Button retry = new Button(this);
-        retry.setText("Check previously installed Packs");
+        retry.setText("Recheck imported files");
         retry.setOnClickListener(view -> {
             if (!importingPacks) showSchoolDaysSetup();
         });
         controls.addView(retry);
-        setContentView(controls);
+        Button play = new Button(this);
+        play.setText("Open School Days launcher");
+        play.setEnabled(packsReady && lxhReady);
+        play.setOnClickListener(view -> { if (!importingPacks) launchGame(); });
+        controls.addView(play);
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(controls);
+        setContentView(scroll);
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != SCHOOL_DAYS_PACKS_REQUEST || resultCode != RESULT_OK ||
-                data == null || data.getData() == null || importingPacks) return;
+        if ((requestCode != SCHOOL_DAYS_PACKS_REQUEST &&
+                requestCode != SCHOOL_DAYS_EN_LXH_REQUEST &&
+                requestCode != SCHOOL_DAYS_TRANSLATION_REQUEST) ||
+                resultCode != RESULT_OK || data == null || data.getData() == null ||
+                importingPacks) return;
         importingPacks = true;
-        Uri originalFolder = data.getData();
-        status.setText("Checking the selected original Packs directory...");
+        Uri selected = data.getData();
+        status.setText(requestCode == SCHOOL_DAYS_PACKS_REQUEST
+                ? "Checking the selected original Packs directory..."
+                : "Checking the selected English LxH text file...");
         new Thread(() -> {
             try {
-                importSchoolDaysPacks(originalFolder);
+                if (requestCode == SCHOOL_DAYS_PACKS_REQUEST)
+                    importSchoolDaysPacks(selected);
+                else if (requestCode == SCHOOL_DAYS_EN_LXH_REQUEST)
+                    importEnglishLxh(selected);
+                else
+                    importSchoolDaysTranslation(selected);
                 runOnUiThread(() -> {
                     importingPacks = false;
-                    if (!isFinishing() && !isDestroyed()) launchGame();
+                    if (!isFinishing() && !isDestroyed()) showSchoolDaysSetup();
                 });
             } catch (Exception error) {
-                Log.e("Kotonoha", "School Days Packs import failed", error);
+                Log.e("Kotonoha", "School Days file import failed", error);
                 runOnUiThread(() -> {
                     importingPacks = false;
                     if (!isFinishing() && !isDestroyed())
-                        status.setText("Original Packs were not imported:\n" + error.getMessage() +
+                        status.setText("The selected files were not imported:\n" + error.getMessage() +
                                 "\n\nYour original files and saved games were not modified. " +
-                                "You may select the correct folder and retry.");
+                                "You may select the correct file or folder and retry.");
                 });
             }
-        }, "SchoolDays-Packs-import").start();
+        }, "SchoolDays-asset-import").start();
+    }
+
+    private void importEnglishLxh(Uri source) throws IOException {
+        String displayName = null;
+        try (Cursor cursor = getContentResolver().query(source,
+                new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) displayName = cursor.getString(0);
+        } catch (SecurityException error) {
+            throw new IOException("Android denied access to the selected text file", error);
+        }
+        if (!"en-lxh.json".equals(displayName))
+            throw new IOException("Select the English epilogue translation named en-lxh.json");
+        File destination = privateSchoolDaysEnglishLxh();
+        if (destination.isFile() && destination.length() > 0) return;
+        File parent = destination.getParentFile();
+        if (!parent.isDirectory() && !parent.mkdirs())
+            throw new IOException("Cannot prepare the private translation folder");
+        File temporary = new File(parent, ".en-lxh-import-" + UUID.randomUUID());
+        try {
+            long copied = 0;
+            try (InputStream input = getContentResolver().openInputStream(source);
+                 FileOutputStream output = new FileOutputStream(temporary)) {
+                if (input == null) throw new IOException("Cannot read the selected text file");
+                byte[] buffer = new byte[65536];
+                int count;
+                while ((count = input.read(buffer)) != -1) {
+                    copied += count;
+                    if (copied > 4 * 1024 * 1024)
+                        throw new IOException("The selected LxH JSON exceeds 4 MiB");
+                    output.write(buffer, 0, count);
+                }
+                output.getFD().sync();
+            }
+            if (copied <= 0) throw new IOException("The selected LxH JSON is empty");
+            Files.move(temporary.toPath(), destination.toPath());
+        } finally {
+            Files.deleteIfExists(temporary.toPath());
+        }
+    }
+
+    private void importSchoolDaysTranslation(Uri source) throws IOException {
+        String name = null;
+        try (Cursor cursor = getContentResolver().query(source,
+                new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) name = cursor.getString(0);
+        } catch (SecurityException error) {
+            throw new IOException("Android denied access to the selected translation", error);
+        }
+        if (name == null) throw new IOException("The selected file has no filename");
+        String folder;
+        long maximum;
+        if (name.equals("Script - Brazilian.GPK") || name.equals("pt-BR-lxh.GPK") ||
+                name.equals("Script - Spanish.GPK") || name.equals("es-lxh.GPK") ||
+                name.equals("en-lxh.GPK") || name.equals("Script - chinese-compatible.GPK") ||
+                name.equals("zh-CN-lxh.GPK")) {
+            folder = "scripts";
+            maximum = 128L * 1024 * 1024;
+        } else if (name.matches("[A-Za-z0-9][A-Za-z0-9_-]{0,70}\\.json")) {
+            folder = "jsons";
+            maximum = 16L * 1024 * 1024;
+        } else {
+            throw new IOException("Unrecognized translation filename. Select a " +
+                    "compatible Script/LxH GPK or an HQ/LxH JSON without path characters.");
+        }
+        // This is precisely the directory the native launcher uses for
+        // settings.json, Config.DAT and language sidecars on Android. Never
+        // create a second, hidden translation profile under a different root.
+        File documentRoot = getExternalFilesDir(null);
+        if (documentRoot == null) documentRoot = getFilesDir();
+        File destination = new File(new File(new File(new File(documentRoot,
+                "Kotonoha"), getPackageName()), "translations"), folder + "/" + name);
+        // Existing translations (especially private PT-BR files) are owned by
+        // the user. Do not replace them through an import or a package update.
+        if (destination.exists())
+            throw new IOException("Translation already installed; it was left unchanged: " + name);
+        File parent = destination.getParentFile();
+        if (!parent.isDirectory() && !parent.mkdirs())
+            throw new IOException("Cannot create the translation directory");
+        File temporary = new File(parent, ".translation-import-" + UUID.randomUUID());
+        try {
+            long size = 0;
+            try (InputStream input = getContentResolver().openInputStream(source);
+                 FileOutputStream output = new FileOutputStream(temporary)) {
+                if (input == null) throw new IOException("Cannot open translation");
+                byte[] buffer = new byte[65536];
+                int read;
+                while ((read = input.read(buffer)) != -1) {
+                    size += read;
+                    if (size > maximum) throw new IOException("Selected translation is too large");
+                    output.write(buffer, 0, read);
+                }
+                output.getFD().sync();
+            }
+            if (size == 0) throw new IOException("Selected translation is empty");
+            Files.move(temporary.toPath(), destination.toPath());
+        } finally {
+            Files.deleteIfExists(temporary.toPath());
+        }
     }
 
     private static final class DocumentEntry {

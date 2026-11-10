@@ -15,6 +15,7 @@
 #include <Kotonoha/routing/SchoolDaysTranslationCoverage.hpp>
 #include <Kotonoha/routing/SchoolDaysUpscalingPolicy.hpp>
 #include <Kotonoha/routing/SchoolDaysGpkLanguageProfile.hpp>
+#include <Kotonoha/mobile/AndroidDisplay.hpp>
 #include <Kotonoha/SchoolDaysGpkArchive.hpp>
 #include <Kotonoha/routing/SchoolDaysShaderPresetCatalog.hpp>
 
@@ -48,6 +49,16 @@ Kotonoha::EngineSettings defaultSchoolDaysLauncherSettings() {
   defaults.upscaling.backend = Kotonoha::UpscaleBackend::Auto;
   defaults.upscaling.preset = Kotonoha::UpscalePreset::ArtCNN;
   defaults.upscaling.factor = 1.5f;
+#elif defined(__ANDROID__) || defined(ANDROID)
+  // Use the same mobile-low first-run profile as SDL_AppInit. Opening the
+  // launcher must not save generic desktop defaults before the game starts.
+  defaults.renderer = "opengles2";
+  defaults.mode = Kotonoha::WindowMode::Borderless;
+  defaults.vsync = true;
+  defaults.renderScale = 0.75f;
+  defaults.upscaling.backend = Kotonoha::UpscaleBackend::Auto;
+  defaults.upscaling.preset = Kotonoha::UpscalePreset::ArtCNN;
+  defaults.upscaling.factor = 2.0f;
 #endif
   return defaults;
 }
@@ -379,6 +390,12 @@ Launcher::Launcher(std::string settingsPath, std::string directory,
   }
   initialDisplayPending = !validSavedSettings;
   initialDisplayBaseline = settings();
+#if defined(__ANDROID__) || defined(ANDROID)
+  // Android's GLES Surface is platform-managed, not a desktop display/window.
+  // Even a relocated Windows JSON must not select an unavailable renderer.
+  settings().renderer = "opengles2";
+  settings().mode = Kotonoha::WindowMode::Borderless;
+#endif
   if (!getSettingsPath().empty() &&
       !settings().upscaling.shaderFiles.empty())
     settings().upscaling.shaderFiles = resolveStoredShaderPaths(
@@ -546,6 +563,10 @@ bool Launcher::selectPhysicalResolution(
 }
 
 void Launcher::seedFirstRunDisplayIfPossible() {
+#if defined(__ANDROID__) || defined(ANDROID)
+  initialDisplayPending = false;
+  return;
+#endif
   if (!initialDisplayPending || !SDL_WasInit(SDL_INIT_VIDEO)) return;
   auto &draft = settings();
   // Another explicit caller may have seeded video before the first frame.
@@ -1047,6 +1068,51 @@ void Launcher::drawPhysicalDisplayOptions() {
   auto &draft = settings();
   ImGui::Spacing();
   ImGui::SeparatorText("Display Options (same settings as in-game)");
+#if defined(__ANDROID__) || defined(ANDROID)
+  ImGui::TextWrapped("Android uses a fullscreen Surface controlled by the "
+                     "device. Windowed, exclusive fullscreen and monitor "
+                     "switching do not apply on phones.");
+  draft.mode = Kotonoha::WindowMode::Borderless;
+  draft.display = 0;
+  const auto modes = Kotonoha::AndroidEnumerateDisplayModes();
+  const int currentId = Kotonoha::AndroidCurrentDisplayModeId();
+  std::string current = "Device default";
+  for (const auto &mode : modes) {
+    const bool matches = draft.fullscreenWidth == mode.width &&
+        draft.fullscreenHeight == mode.height &&
+        std::abs(draft.refreshRate - mode.refreshRate) < 0.05f;
+    if (matches || (draft.fullscreenWidth == 0 && mode.modeId == currentId)) {
+      current = std::to_string(mode.width) + " x " +
+          std::to_string(mode.height) + " @ " +
+          std::to_string(static_cast<int>(std::lround(mode.refreshRate))) + " Hz";
+      break;
+    }
+  }
+  if (ImGui::BeginCombo("Native resolution / refresh##sd", current.c_str())) {
+    if (ImGui::Selectable("Device default", draft.fullscreenWidth == 0)) {
+      draft.fullscreenWidth = 0;
+      draft.fullscreenHeight = 0;
+      draft.refreshRate = 0;
+    }
+    for (const auto &mode : modes) {
+      const std::string label = std::to_string(mode.width) + " x " +
+          std::to_string(mode.height) + " @ " +
+          std::to_string(static_cast<int>(std::lround(mode.refreshRate))) + " Hz";
+      const bool selected = draft.fullscreenWidth == mode.width &&
+          draft.fullscreenHeight == mode.height &&
+          std::abs(draft.refreshRate - mode.refreshRate) < 0.05f;
+      if (ImGui::Selectable(label.c_str(), selected)) {
+        draft.fullscreenWidth = mode.width;
+        draft.fullscreenHeight = mode.height;
+        draft.refreshRate = mode.refreshRate;
+      }
+    }
+    ImGui::EndCombo();
+  }
+  if (modes.empty()) ImGui::TextDisabled("The device did not publish display modes.");
+  ImGui::Checkbox("VSync##sd", &draft.vsync);
+  ImGui::TextDisabled("Render resolution is adjusted separately in Graphics.");
+#else
   ImGui::TextDisabled(
       "The selected monitor, mode, refresh, upscaler and renderer are saved "
       "in settings.json and used by in-game Display Options.");
@@ -1151,6 +1217,7 @@ void Launcher::drawPhysicalDisplayOptions() {
     ImGui::SameLine();
     ImGui::Checkbox("Resizable window##sd", &draft.resizable);
   }
+#endif
 }
 
 void Launcher::drawGraphicsOptions() {
@@ -1161,6 +1228,12 @@ void Launcher::drawGraphicsOptions() {
                      "%.2fx");
   const std::string renderer =
       draft.renderer.empty() ? "Automatic" : draft.renderer;
+#if defined(__ANDROID__) || defined(ANDROID)
+  // SDL/Android exposes the device's GLES Surface; desktop renderer backends
+  // and an arbitrary Windows D3D/Metal renderer are not valid choices here.
+  draft.renderer = "opengles2";
+  ImGui::TextDisabled("Renderer: OpenGL ES (device-native)");
+#else
   if (ImGui::BeginCombo("Renderer##sd", renderer.c_str())) {
     if (ImGui::Selectable("Automatic", draft.renderer.empty()))
       Kotonoha::SchoolDaysUpscalingPolicy::SelectRenderer(draft, {});
@@ -1171,6 +1244,7 @@ void Launcher::drawGraphicsOptions() {
     }
     ImGui::EndCombo();
   }
+#endif
   if (ImGui::BeginCombo("Upscaler##sd",
                         Kotonoha::UpscaleBackendName(draft.upscaling.backend))) {
     for (const auto backend : {
@@ -1213,6 +1287,9 @@ void Launcher::drawGraphicsOptions() {
           // builtin would be shown but the external GLSL would keep running.
           draft.upscaling.shaderFiles.clear();
           Kotonoha::SchoolDaysUpscalingPolicy::SelectPreset(draft, preset);
+#if defined(__ANDROID__) || defined(ANDROID)
+          draft.renderer = "opengles2";
+#endif
         }
       }
       ImGui::TreePop();
@@ -1232,7 +1309,11 @@ void Launcher::drawGraphicsOptions() {
   }
   if (ImGui::InputText("Custom GLSL paths##sd", &draft.upscaling.shaderFiles) &&
       !draft.upscaling.shaderFiles.empty()) {
+#if defined(__ANDROID__) || defined(ANDROID)
+    draft.renderer = "opengles2";
+#else
     draft.renderer = "opengl";
+#endif
     draft.upscaling.backend = Kotonoha::UpscaleBackend::MPV;
     draft.upscaling.factor = std::max(2.0f, draft.upscaling.factor);
   }
@@ -1440,6 +1521,25 @@ void Launcher::drawLanguageOptions() {
       ImGui::TextWrapped(
           "Base language JSON missing. Choose the matching HQ JSON before Play.");
     }
+#if defined(__ANDROID__) || defined(ANDROID)
+    ImGui::TextDisabled("Import JSON through Android game-file setup first.");
+    if (ImGui::BeginCombo("Installed HQ JSON##sd",
+                          settings().translationPath.empty() ? "Select imported JSON" :
+                          fs::path(settings().translationPath).filename().string().c_str())) {
+      if (!getSettingsPath().empty())
+        for (const auto &file : Kotonoha::SchoolDaysGpkLanguageProfile::
+                 DiscoverJsonFiles(getSettingsPath())) {
+          const auto name = file.filename().string();
+          if (ImGui::Selectable(name.c_str(), settings().translationPath == file.string())) {
+            if (selected == Language::Spanish) setSpanishJsonPath(file.string());
+            else if (selected == Language::ChineseSimplified)
+              setChineseJsonPath(file.string());
+            else setCustomJsonPath(file.string());
+          }
+        }
+      ImGui::EndCombo();
+    }
+#else
     if (ImGui::Button("Choose base HQ JSON...")) {
       const auto initial = settings().translationPath.empty()
                                ? (getSettingsPath().empty() ? std::string{}
@@ -1456,6 +1556,7 @@ void Launcher::drawLanguageOptions() {
                    else setCustomJsonPath(path);
                  });
     }
+#endif
   }
 
   ImGui::Spacing();
@@ -1465,6 +1566,22 @@ void Launcher::drawLanguageOptions() {
   ImGui::TextWrapped("LxH JSON (%s): %s",
                      manual.empty() ? "auto-matched to base" : "manual override",
                      lxh.empty() ? "Not found" : lxh.c_str());
+#if defined(__ANDROID__) || defined(ANDROID)
+  if (ImGui::BeginCombo("Installed LxH JSON##sd",
+                        lxh.empty() ? "Select imported LxH JSON" :
+                        fs::path(lxh).filename().string().c_str())) {
+    if (!getSettingsPath().empty())
+      for (const auto &file : Kotonoha::SchoolDaysGpkLanguageProfile::
+               DiscoverJsonFiles(getSettingsPath(), true)) {
+        const auto name = file.filename().string();
+        if (name.size() < 9 || name.compare(name.size() - 9, 9, "-lxh.json") != 0)
+          continue;
+        if (ImGui::Selectable(name.c_str(), manual == file.string()))
+          setLxhJsonPath(file.string());
+      }
+    ImGui::EndCombo();
+  }
+#else
   if (ImGui::Button("Choose LxH JSON...")) {
     const auto initial = lxh.empty()
         ? (getSettingsPath().empty() ? std::string{}
@@ -1473,6 +1590,7 @@ void Launcher::drawLanguageOptions() {
     browseFile({{"Translation JSON (*.json)", "json"}, {"All files (*)", "*"}},
                initial, [this](const std::string &path) { setLxhJsonPath(path); });
   }
+#endif
   if (!manual.empty()) {
     ImGui::SameLine();
     if (ImGui::Button("Use matching LxH automatically")) setLxhJsonPath({});
@@ -1533,7 +1651,9 @@ void Launcher::openOptions() {
                                    selectedManualLxhJsonPath,
                                    manualLxhBaseJsonPath, aspectPreference};
   screen = Screen::Options;
+#if !defined(__ANDROID__) && !defined(ANDROID)
   if (launcherWindow()) SDL_SetWindowSize(launcherWindow(), 950, 700);
+#endif
 }
 
 #if defined(KOTONOHA_DISTRIBUTION_BUILD)
@@ -1555,7 +1675,9 @@ void Launcher::cancelOptions() {
   }
   optionSnapshot.reset();
   screen = Screen::Main;
+#if !defined(__ANDROID__) && !defined(ANDROID)
   if (launcherWindow()) SDL_SetWindowSize(launcherWindow(), 950, 600);
+#endif
 }
 
 void Launcher::resetOptions() {
@@ -1742,7 +1864,21 @@ void Launcher::drawOptionsScreen() {
       drawLanguageOptions();
       ImGui::EndTabItem();
     }
-#if defined(KOTONOHA_DISTRIBUTION_BUILD)
+#if defined(__ANDROID__) || defined(ANDROID)
+    if (ImGui::BeginTabItem("Game Files")) {
+      ImGui::SeparatorText("Imported School Days HQ data");
+      ImGui::TextWrapped("Original 29 HQ GPKs and LxH.GPK are imported using "
+                         "the Android file picker, before this launcher opens. "
+                         "They remain outside the APK and are not modified.");
+      ImGui::TextWrapped("Active Packs folder: %s", path().c_str());
+      ImGui::TextWrapped("Routing profile: %s", routePath().c_str());
+      ImGui::TextDisabled("To import a new language, close the app and use "
+                          "Import language GPK or JSON on its Android setup screen.");
+      ImGui::TextDisabled("A content:// URI is not a disk path and cannot be "
+                          "entered into the desktop Folder/ISO field.");
+      ImGui::EndTabItem();
+    }
+#elif defined(KOTONOHA_DISTRIBUTION_BUILD)
     if (ImGui::BeginTabItem("Game Files", nullptr,
                             selectGameFilesTab ? ImGuiTabItemFlags_SetSelected
                                                : ImGuiTabItemFlags_None)) {
@@ -1795,7 +1931,9 @@ void Launcher::drawOptionsScreen() {
     if (apply()) {
       optionSnapshot.reset();
       screen = Screen::Main;
+#if !defined(__ANDROID__) && !defined(ANDROID)
       if (launcherWindow()) SDL_SetWindowSize(launcherWindow(), 950, 600);
+#endif
     }
   }
   ImGui::SameLine();
