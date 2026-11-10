@@ -14,6 +14,7 @@
 #include <Kotonoha/core/FileSystem.hpp>
 #include <cstdlib>
 #include <cstdio>
+#include <cstring>
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
@@ -22,6 +23,23 @@
 #include <stdexcept>
 
 namespace {
+#if defined(__ANDROID__) || defined(ANDROID)
+// Per-game Android frame pacing. This does not change script/video time (24fps)
+// or any Windows render loop, and is intentionally separate from device Hz.
+int ReadAndroidFrameLimit(const std::filesystem::path &documents) {
+  std::ifstream input(documents / "Kotonoha.ini");
+  std::string line;
+  while (std::getline(input, line)) {
+    constexpr const char *key = "AndroidFrameLimit=";
+    if (line.rfind(key, 0) != 0) continue;
+    try {
+      const auto parsed = std::stoi(line.substr(std::strlen(key)));
+      return parsed == 30 || parsed == 60 ? parsed : 0;
+    } catch (...) { return 0; }
+  }
+  return 0;
+}
+#endif
 #if defined(KOTONOHA_DISTRIBUTION_BUILD)
 // No QA startup trace file or developer logger exists in a shipped binary.
 #define DevStartupLog(...) ((void)0)
@@ -154,7 +172,14 @@ struct App {
   Kotonoha::EngineOptions options;
   std::string scripts, route, startNode, dump, documents, lxhJsonOverride;
   long frames = -1;
+#if defined(__ANDROID__) || defined(ANDROID)
+  int frameLimit = 0;
+#endif
   void start(const std::string &directory) {
+#if defined(__ANDROID__) || defined(ANDROID)
+    frameLimit = ReadAndroidFrameLimit(
+        Kotonoha::preferredDocumentsDirectory("school-days"));
+#endif
     DevStartupLog("assets-open", directory);
     const bool explicitlySelectedJson = !options.translationPath.empty() ||
         (std::getenv("KOTONOHA_TRANSLATION") &&
@@ -534,7 +559,17 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
     }
     static bool firstFrameLogged = false;
     if (!firstFrameLogged) DevStartupLog("first-frame-entered");
+#if defined(__ANDROID__) || defined(ANDROID)
+    const Uint64 renderStartNs = SDL_GetTicksNS();
+#endif
     const auto result = app->application->engine.Iterate();
+#if defined(__ANDROID__) || defined(ANDROID)
+    if (result == SDL_APP_CONTINUE && app->frameLimit > 0) {
+      const Uint64 elapsed = SDL_GetTicksNS() - renderStartNs;
+      const Uint64 targetNs = Uint64{1000000000} / app->frameLimit;
+      if (elapsed < targetNs) SDL_DelayNS(targetNs - elapsed);
+    }
+#endif
     if (!firstFrameLogged) {
       DevStartupLog("first-frame-complete");
       firstFrameLogged = true;

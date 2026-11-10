@@ -512,27 +512,7 @@ public final class BootstrapActivity extends Activity {
     }
 
     private void openPreliminaryDisplayOptions() {
-        final float[] scales = {1.0f, .75f, .5f};
-        final String[] labels = {
-                "Native rendering · 100%",
-                "Balanced rendering · 75%",
-                "Battery saving · 50%"};
-        final float current = SchoolDaysMobileProfile.renderScale(this);
-        int selected = current > .875f ? 0 : current > .625f ? 1 : 2;
-        new AlertDialog.Builder(this)
-                .setTitle("Display Options · Android")
-                .setSingleChoiceItems(labels, selected, (dialog, which) -> {
-                    try {
-                        SchoolDaysMobileProfile.setRenderScale(this, scales[which]);
-                        dialog.dismiss();
-                        status.setText("Render scale saved: " + labels[which] +
-                                "\nApplied when the game starts.");
-                    } catch (IOException error) {
-                        status.setText("Display settings not changed: " + error.getMessage());
-                    }
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
+        SchoolDaysMobileDisplayOptions.show(this, message -> status.setText(message));
     }
 
     @Override
