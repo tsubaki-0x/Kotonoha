@@ -117,6 +117,19 @@ android {
                 }
             }
         }
+        // Installable commercial-feature smoke test, never a production
+        // release. Use the local Android debug signing identity, but retain
+        // the exact native distribution flags and remove DEV source code.
+        // A distinct application ID isolates its data and allows a later
+        // genuinely release-signed commercial app to install independently.
+        distTest {
+            initWith dist
+            matchingFallbacks = ['release']
+            applicationIdSuffix '.test'
+            versionNameSuffix '-install-test'
+            signingConfig signingConfigs.debug
+            buildConfigField 'boolean', 'DISTRIBUTION_BUILD', 'true'
+        }
         // Separate package/Android data root: development saves must never be
         // re-used by the commercial installation on the same device.
         dev {
@@ -136,9 +149,9 @@ android {
     // For School Days, only the explicit commercial/dev editions are valid.
     variantFilter { variant ->
         boolean schoolDaysVariant = variant.flavors.any { it.name == 'schoolDays' }
-        if (schoolDaysVariant && !(variant.buildType.name in ['dist', 'dev'])) {
+        if (schoolDaysVariant && !(variant.buildType.name in ['dist', 'distTest', 'dev'])) {
             variant.setIgnore(true)
-        } else if (!schoolDaysVariant && (variant.buildType.name in ['dist', 'dev'])) {
+        } else if (!schoolDaysVariant && (variant.buildType.name in ['dist', 'distTest', 'dev'])) {
             variant.setIgnore(true)
         }
     }
