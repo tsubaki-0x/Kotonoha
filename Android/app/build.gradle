@@ -81,6 +81,44 @@ android {
                     'proguard-rules.pro',
                     file("${sdlRoot}/android-project/app/proguard-rules.pro")
         }
+        // The School Days distribution is a dedicated, non-debuggable build,
+        // NOT the old schoolDaysDebug APK renamed to dist. CMake also excludes
+        // DebugOverlay/MCP/QA code, instead of merely hiding the controls.
+        dist {
+            initWith release
+            matchingFallbacks = ['release']
+            buildConfigField 'boolean', 'DISTRIBUTION_BUILD', 'true'
+            externalNativeBuild {
+                cmake {
+                    arguments '-DKOTONOHA_DISTRIBUTION_BUILD=ON',
+                              '-DKOTONOHA_DEV_CONTROL=OFF'
+                }
+            }
+        }
+        // Separate package/Android data root: development saves must never be
+        // re-used by the commercial installation on the same device.
+        dev {
+            initWith debug
+            matchingFallbacks = ['debug']
+            applicationIdSuffix '.dev'
+            buildConfigField 'boolean', 'DISTRIBUTION_BUILD', 'false'
+            externalNativeBuild {
+                cmake {
+                    arguments '-DKOTONOHA_DISTRIBUTION_BUILD=OFF',
+                              '-DKOTONOHA_DEV_CONTROL=OFF'
+                }
+            }
+        }
+    }
+    // Preserve the established debug/release variants of every other game.
+    // For School Days, only the explicit commercial/dev editions are valid.
+    variantFilter { variant ->
+        boolean schoolDaysVariant = variant.flavors.any { it.name == 'schoolDays' }
+        if (schoolDaysVariant && !(variant.buildType.name in ['dist', 'dev'])) {
+            variant.setIgnore(true)
+        } else if (!schoolDaysVariant && (variant.buildType.name in ['dist', 'dev'])) {
+            variant.setIgnore(true)
+        }
     }
     buildFeatures { buildConfig true }
     compileOptions {
@@ -172,6 +210,12 @@ android.applicationVariants.all { variant ->
         dependsOn assets
         inputs.dir staged
     }
+    // Release lint also examines merged assets. Gradle 8.14 rejects reading a
+    // generated directory from stage*Assets without an explicit task edge.
+    tasks.matching {
+        it.name.toLowerCase(Locale.ROOT).contains(variant.name.toLowerCase(Locale.ROOT)) &&
+                it.name.toLowerCase(Locale.ROOT).contains('lint')
+    }.configureEach { dependsOn assets }
     android.sourceSets[variant.name].assets.srcDir staged
     if (variant.flavorName == 'dokiDoki') {
         assets.configure {
