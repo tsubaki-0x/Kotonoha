@@ -17,6 +17,9 @@ def includeGameAssets = providers.gradleProperty('bundleGameAssets').orElse('tru
 // User-owned GPK/JSON translations are never committed in this repository.
 // School Days builds require an explicit external source directory.
 def schoolDaysTranslationsDir = providers.gradleProperty('schoolDaysTranslationsDir').orNull
+// Only the DEV variant may receive user-supplied, read-only LxH test saves.
+// No checked-in fixtures, and no implicitly selected PC saves directory.
+def schoolDaysDevSavesDir = providers.gradleProperty('schoolDaysDevSavesDir').orNull
 def abis = providers.gradleProperty('abis').orElse('arm64-v8a').get().split(',').toList()
 if (abis.size() != 1 || !(abis[0] in ['arm64-v8a', 'x86_64'])) {
     throw new GradleException('Android builds must select exactly one supported ABI: -Pabis=arm64-v8a or -Pabis=x86_64.')
@@ -181,6 +184,15 @@ android.applicationVariants.all { variant ->
                     into 'translations'
                 }
             }
+            if (variant.name == 'schoolDaysDev' && schoolDaysDevSavesDir) {
+                from(new File(schoolDaysDevSavesDir)) {
+                    include 'SaveFile000.DAT', 'SaveFile001.DAT',
+                            'SaveFile002.DAT', 'SaveFile003.DAT',
+                            'SaveFile004.DAT', 'SaveFile005.DAT',
+                            'SaveFile006.DAT', 'GlobalFlag.DAT'
+                    into 'dev-save-fixtures/Save'
+                }
+            }
         } else if (includeThisGame) {
             from(gameAssets) { into 'game-assets' }
         }
@@ -215,6 +227,18 @@ android.applicationVariants.all { variant ->
                             ' (required EN/PT-BR/ES GPK and EN/ES JSON/LxH files). Original contents are never modified.')
                 }
             }
+            if (variant.name == 'schoolDaysDev') {
+                if (!schoolDaysDevSavesDir)
+                    throw new GradleException('Missing -PschoolDaysDevSavesDir=...: DEV requires an external Save folder containing 7 LxH SaveFiles and GlobalFlag.DAT. These files must not be checked into Git.')
+                def directory = new File(schoolDaysDevSavesDir)
+                def expectedSaves = (0..6).collect { String.format('SaveFile%03d.DAT', it) } + ['GlobalFlag.DAT']
+                if (!directory.isDirectory() ||
+                        expectedSaves.any { !new File(directory, it).isFile() ||
+                                new File(directory, it).length() == 0 }) {
+                    throw new GradleException('Missing or empty School Days DEV LxH save fixtures in ' +
+                            directory + '; original data was not modified.')
+                }
+            }
         }
         doLast {
             new File(staged.get().asFile, 'game-assets').mkdirs()
@@ -246,6 +270,28 @@ android.applicationVariants.all { variant ->
                     lines.add(relative + '\t' + sha.digest().encodeHex().toString())
                 }
                 new File(staged.get().asFile, 'translations-manifest.sha256').text =
+                        lines.join('\n') + '\n'
+            }
+            if (variant.name == 'schoolDaysDev') {
+                def folder = new File(staged.get().asFile, 'dev-save-fixtures/Save')
+                def expectedSaves = (0..6).collect { String.format('SaveFile%03d.DAT', it) } + ['GlobalFlag.DAT']
+                def actual = fileTree(folder).files.sort { it.name }
+                if (actual.size() != expectedSaves.size() ||
+                        actual.any { !(it.name in expectedSaves) })
+                    throw new GradleException('DEV save fixture staging mismatch; refusing an incomplete APK')
+                def lines = ['SchoolDaysDevSaveFixtures.v1']
+                actual.each { save ->
+                    def sha = MessageDigest.getInstance('SHA-256')
+                    save.withInputStream { input ->
+                        byte[] buffer = new byte[65536]
+                        int read
+                        while ((read = input.read(buffer)) != -1)
+                            sha.update(buffer, 0, read)
+                    }
+                    lines.add(save.name + '\t' + sha.digest().encodeHex().toString() +
+                            '\t' + save.length())
+                }
+                new File(staged.get().asFile, 'dev-save-fixtures-manifest.sha256').text =
                         lines.join('\n') + '\n'
             }
             if (variant.flavorName == 'dokiDoki') {

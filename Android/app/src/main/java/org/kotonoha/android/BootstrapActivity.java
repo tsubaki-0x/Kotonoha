@@ -65,6 +65,7 @@ public final class BootstrapActivity extends Activity {
     private boolean importingPacks;
     private volatile boolean assetsPrepared;
     private volatile String packagedTranslationStatus = "";
+    private volatile String devSaveStatus = "";
     private SchoolDaysMobileProfile.Choice currentLanguage;
 
     @Override
@@ -121,6 +122,24 @@ public final class BootstrapActivity extends Activity {
                             (result.protectedFiles.isEmpty() ? "" :
                                     "\nUnchanged user-owned translations: " +
                                     String.join(", ", result.protectedFiles));
+                    if (!BuildConfig.DISTRIBUTION_BUILD) {
+                        // The implementation lives exclusively in the
+                        // schoolDaysDev Java source set. Keep it completely
+                        // absent from a minified commercial APK, not hidden
+                        // behind an inoperative UI control.
+                        try {
+                            final Class<?> fixtureClass = Class.forName(
+                                    "org.kotonoha.android.SchoolDaysDevSaveFixtures");
+                            devSaveStatus = (String) fixtureClass.getMethod("install",
+                                    android.content.Context.class,
+                                    AssetManager.class).invoke(null, this, getAssets());
+                        } catch (ReflectiveOperationException failure) {
+                            final Throwable cause = failure.getCause() != null
+                                    ? failure.getCause() : failure;
+                            throw new IOException("DEV LxH save fixture installation failed: " +
+                                    cause.getMessage(), cause);
+                        }
+                    }
                 }
                 if (!fingerprint.equals(installed))
                     Files.write(complete.toPath(), fingerprint.getBytes(StandardCharsets.UTF_8));
@@ -389,6 +408,7 @@ public final class BootstrapActivity extends Activity {
                 "\n" + (packsReady ? "Original Packs: 30/30 found" : missingPacksSummary()) +
                 (packagedTranslationStatus.isEmpty() ? "" :
                         "\n" + packagedTranslationStatus) +
+                (devSaveStatus.isEmpty() ? "" : "\n" + devSaveStatus) +
                 "\n" + (choices.get(selected).available ?
                         "Language ready for native validation" :
                         "A complete language profile is required"),
