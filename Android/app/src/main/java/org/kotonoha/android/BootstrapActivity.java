@@ -1,17 +1,33 @@
 package org.kotonoha.android;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.res.AssetManager;
 import android.database.Cursor;
+import android.graphics.BitmapFactory;
+import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
 import android.util.Log;
+import android.util.TypedValue;
+import android.view.DisplayCutout;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.WindowInsets;
+import android.widget.AdapterView;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
+import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Spinner;
 import android.widget.TextView;
 
 import java.io.File;
@@ -20,7 +36,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
@@ -46,6 +64,7 @@ public final class BootstrapActivity extends Activity {
     private TextView status;
     private boolean importingPacks;
     private volatile boolean assetsPrepared;
+    private SchoolDaysMobileProfile.Choice currentLanguage;
 
     @Override
     public void onCreate(Bundle state) {
@@ -238,103 +257,264 @@ public final class BootstrapActivity extends Activity {
         return summary.toString();
     }
 
+    private int dp(float value) {
+        return (int) (value * getResources().getDisplayMetrics().density + .5f);
+    }
+
+    private TextView launcherText(String value, int sp, int color) {
+        TextView text = new TextView(this);
+        text.setText(value);
+        text.setTextColor(color);
+        text.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
+        return text;
+    }
+
+    private Button launcherButton(String label, boolean primary) {
+        Button button = new Button(this);
+        button.setText(label);
+        button.setAllCaps(false);
+        button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        button.setTextColor(Color.WHITE);
+        button.setMinHeight(dp(primary ? 62 : 54));
+        GradientDrawable shape = new GradientDrawable(
+                GradientDrawable.Orientation.LEFT_RIGHT,
+                primary ? new int[]{0xff2473b6, 0xff0b467c}
+                        : new int[]{0xff263e61, 0xff192d4b});
+        shape.setCornerRadius(dp(12));
+        shape.setStroke(dp(1), primary ? 0xffa5d8ff : 0xff7487a6);
+        button.setBackground(shape);
+        return button;
+    }
+
+    private void addLauncherControl(LinearLayout parent, View child) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        params.topMargin = dp(9);
+        parent.addView(child, params);
+    }
+
+    private void openFolderPicker(int requestCode) {
+        if (importingPacks) return;
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |
+                Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        try {
+            startActivityForResult(intent, requestCode);
+        } catch (Exception error) {
+            status.setText("Android could not open the folder picker: " +
+                    error.getMessage());
+        }
+    }
+
     private void showSchoolDaysSetup() {
         final boolean packsReady = hasSchoolDaysPacks();
-        final boolean lxhReady = hasEnglishLxh();
-        final boolean languageReady = hasUsableLanguageFiles();
-        // Keep this small Android storage/import screen available on every
-        // launch so other language packs can be installed without reinstalling
-        // the APK or ever replacing the player's existing settings/saves.
+        final List<SchoolDaysMobileProfile.Choice> choices =
+                new ArrayList<>(SchoolDaysMobileProfile.available(this));
+        final String savedId = SchoolDaysMobileProfile.selectedId(this);
+        int selected = -1;
+        for (int i = 0; i < choices.size(); i++) {
+            if (choices.get(i).id.equals(savedId)) selected = i;
+        }
+        if (selected < 0 && !savedId.isEmpty()) {
+            choices.add(0, new SchoolDaysMobileProfile.Choice(savedId,
+                    "Missing previously chosen language: " + savedId,
+                    "", "", null, null, false));
+            selected = 0;
+        }
+        if (choices.isEmpty()) {
+            choices.add(new SchoolDaysMobileProfile.Choice("none",
+                    "No complete GPK/JSON translation installed", "",
+                    "", null, null, false));
+        }
+        if (selected < 0) selected = 0;
+        currentLanguage = choices.get(selected);
+
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(0xff0c1a30);
+        ImageView art = new ImageView(this);
+        art.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        try (InputStream input = getAssets().open("launcher-art/SchoolDaysHQ-Launcher.png")) {
+            art.setImageBitmap(BitmapFactory.decodeStream(input));
+        } catch (IOException error) {
+            Log.w("Kotonoha", "Launcher art unavailable", error);
+        }
+        root.addView(art, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        View shade = new View(this);
+        shade.setBackground(new GradientDrawable(
+                GradientDrawable.Orientation.LEFT_RIGHT,
+                new int[]{0x33071326, 0x66071326, 0xd90b1a31}));
+        root.addView(shade, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setVerticalScrollBarEnabled(false);
+        int screenWidth = getResources().getDisplayMetrics().widthPixels;
+        int panelWidth = Math.min(screenWidth, Math.max(dp(370), (int)(screenWidth * .53f)));
+        FrameLayout.LayoutParams panel = new FrameLayout.LayoutParams(
+                panelWidth, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.END);
+        root.addView(scroll, panel);
         LinearLayout controls = new LinearLayout(this);
         controls.setOrientation(LinearLayout.VERTICAL);
-        controls.setPadding(32, 32, 32, 32);
-        status = new TextView(this);
-        status.setPadding(0, 0, 0, 22);
-        status.setText("School Days HQ — Android launcher\n\n" +
-                (assetsPrepared ? "App assets: ready\n" : "App assets: preparing...\n") +
-                (packsReady ? "Original Packs: ready\n" :
-                        "Original Packs: missing (29 HQ GPK + LxH.GPK)\n") +
-                (lxhReady ? "English LxH text: ready (GPK or JSON)\n" :
-                        "English LxH text: missing (en-lxh.GPK or en-lxh.json)\n") +
-                (languageReady ? "At least one language profile: present\n" :
-                        "Language profiles: incomplete\n") +
-                "\nChoose the files from your own PC installation. Original data " +
-                "is not included in the APK. Imported copies stay inside the app; " +
-                "existing saves and source files are not changed.\n\n" +
-                installedTranslationSummary());
-        controls.addView(status);
-        Button complete = new Button(this);
-        complete.setText("Import organized SchoolDaysHQ folder (Packs + languages)...");
-        complete.setOnClickListener(view -> {
-            if (importingPacks) return;
-            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            try {
-                startActivityForResult(intent, SCHOOL_DAYS_FOLDER_REQUEST);
-            } catch (Exception error) {
-                status.setText("Could not open Android's folder picker: " + error.getMessage());
-            }
-        });
-        controls.addView(complete);
-        Button choose = new Button(this);
-        choose.setText("Import original Packs...");
-        choose.setEnabled(!packsReady);
-        choose.setOnClickListener(view -> {
-            if (importingPacks) return;
-            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            try {
-                startActivityForResult(intent, SCHOOL_DAYS_PACKS_REQUEST);
-            } catch (Exception error) {
-                status.setText("Could not open Android's folder picker: " + error.getMessage());
-            }
-        });
-        controls.addView(choose);
-        Button english = new Button(this);
-        english.setText("Import English LxH text (en-lxh.json)...");
-        english.setEnabled(!lxhReady);
-        english.setOnClickListener(view -> {
-            if (importingPacks) return;
-            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-            intent.addCategory(Intent.CATEGORY_OPENABLE);
-            intent.setType("*/*");
-            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            try {
-                startActivityForResult(intent, SCHOOL_DAYS_EN_LXH_REQUEST);
-            } catch (Exception error) {
-                status.setText("Could not open Android's file picker: " + error.getMessage());
-            }
-        });
-        controls.addView(english);
-        Button translations = new Button(this);
-        translations.setText("Import language GPK or JSON...");
-        translations.setOnClickListener(view -> {
-            if (importingPacks) return;
-            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-            intent.addCategory(Intent.CATEGORY_OPENABLE);
-            intent.setType("*/*");
-            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            try {
+        controls.setGravity(Gravity.CENTER_VERTICAL);
+        controls.setPadding(dp(22), dp(16), dp(22), dp(18));
+        GradientDrawable backdrop = new GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{0xe6152d4c, 0xf2091528});
+        backdrop.setCornerRadius(dp(16));
+        controls.setBackground(backdrop);
+        scroll.addView(controls, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        addLauncherControl(controls, launcherText("SCHOOL DAYS HQ", 27, Color.WHITE));
+        addLauncherControl(controls, launcherText(
+                BuildConfig.DISTRIBUTION_BUILD ? "ANDROID EDITION" : "ANDROID · DEV",
+                12, 0xffb9d7f4));
+        status = launcherText(
+                (assetsPrepared ? "App resources ready" : "Preparing app resources…") +
+                "\n" + (packsReady ? "Original Packs: 30/30 found" : missingPacksSummary()) +
+                "\n" + (choices.get(selected).available ?
+                        "Language ready for native validation" :
+                        "A complete language profile is required"),
+                14, 0xffd5e1f1);
+        status.setPadding(dp(5), dp(8), dp(5), dp(8));
+        addLauncherControl(controls, status);
+
+        Button selectPacks = launcherButton(
+                packsReady ? "Packs installed · select another folder" :
+                        "Select SchoolDaysHQ / Packs folder", false);
+        selectPacks.setOnClickListener(view ->
+                openFolderPicker(SCHOOL_DAYS_FOLDER_REQUEST));
+        addLauncherControl(controls, selectPacks);
+
+        addLauncherControl(controls, launcherText("LANGUAGE · GPK / JSON", 13, 0xffb9d7f4));
+        Spinner language = new Spinner(this);
+        ArrayAdapter<SchoolDaysMobileProfile.Choice> options = new ArrayAdapter<>(
+                this, android.R.layout.simple_spinner_item, choices);
+        options.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        language.setAdapter(options);
+        language.setMinimumHeight(dp(54));
+        language.setBackgroundColor(0xffe3eaf4);
+        language.setSelection(selected);
+        addLauncherControl(controls, language);
+
+        Button display = launcherButton("Display Options", false);
+        display.setOnClickListener(view -> openPreliminaryDisplayOptions());
+        addLauncherControl(controls, display);
+
+        if (!BuildConfig.DISTRIBUTION_BUILD) {
+            Button devTranslations = launcherButton("DEV · import GPK or JSON file", false);
+            devTranslations.setOnClickListener(view -> {
+                if (importingPacks) return;
+                Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                intent.addCategory(Intent.CATEGORY_OPENABLE);
+                intent.setType("*/*");
+                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
                 startActivityForResult(intent, SCHOOL_DAYS_TRANSLATION_REQUEST);
-            } catch (Exception error) {
-                status.setText("Could not open translation picker: " + error.getMessage());
-            }
-        });
-        controls.addView(translations);
-        Button retry = new Button(this);
-        retry.setText("Recheck imported files");
-        retry.setOnClickListener(view -> {
+            });
+            addLauncherControl(controls, devTranslations);
+        }
+
+        Button refresh = launcherButton("Recheck installed Packs and languages", false);
+        refresh.setOnClickListener(view -> {
             if (!importingPacks) showSchoolDaysSetup();
         });
-        controls.addView(retry);
-        Button play = new Button(this);
-        play.setText("PLAY");
-        play.setEnabled(assetsPrepared && packsReady && languageReady);
-        play.setOnClickListener(view -> { if (!importingPacks) launchGame(); });
-        controls.addView(play);
-        ScrollView scroll = new ScrollView(this);
-        scroll.addView(controls);
-        setContentView(scroll);
+        addLauncherControl(controls, refresh);
+        Button play = launcherButton("PLAY", true);
+        play.setEnabled(assetsPrepared && packsReady && currentLanguage.available);
+        play.setOnClickListener(view -> {
+            if (importingPacks || !assetsPrepared || !hasSchoolDaysPacks() ||
+                    currentLanguage == null || !currentLanguage.available) return;
+            try {
+                SchoolDaysMobileProfile.apply(this, currentLanguage);
+                launchGame();
+            } catch (IOException error) {
+                status.setText("Cannot start with this language:\n" +
+                        error.getMessage() +
+                        "\nNo English fallback was selected.");
+            }
+        });
+        addLauncherControl(controls, play);
+
+        language.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent, View view,
+                                                  int index, long id) {
+                currentLanguage = choices.get(index);
+                play.setEnabled(assetsPrepared && packsReady && currentLanguage.available);
+                // Remember even an unavailable selection, so a temporarily
+                // missing locale never turns into English behind the user's back.
+                if (!currentLanguage.id.equals(savedId))
+                    SchoolDaysMobileProfile.rememberChoice(
+                            BootstrapActivity.this, currentLanguage);
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) {
+                play.setEnabled(false);
+            }
+        });
+        root.setOnApplyWindowInsetsListener((view, insets) -> {
+            int left = dp(8), top = dp(8), right = dp(8), bottom = dp(8);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                DisplayCutout cutout = insets.getDisplayCutout();
+                if (cutout != null) {
+                    left += cutout.getSafeInsetLeft();
+                    top += cutout.getSafeInsetTop();
+                    right += cutout.getSafeInsetRight();
+                    bottom += cutout.getSafeInsetBottom();
+                }
+            }
+            root.setPadding(left, top, right, bottom);
+            return insets;
+        });
+        setContentView(root);
+        root.requestApplyInsets();
+    }
+
+    private String missingPacksSummary() {
+        File packs = privateSchoolDaysPacks();
+        File[] existing = packs.listFiles();
+        Map<String, Boolean> names = new HashMap<>();
+        if (existing != null) {
+            for (File file : existing) {
+                if (file.isFile() && file.length() > 0)
+                    names.put(file.getName().toLowerCase(Locale.ROOT), true);
+            }
+        }
+        StringBuilder missing = new StringBuilder();
+        int found = 0;
+        for (String name : SCHOOL_DAYS_PACKS) {
+            if (names.containsKey(name.toLowerCase(Locale.ROOT))) found++;
+            else if (missing.length() < 100) {
+                if (missing.length() > 0) missing.append(", ");
+                missing.append(name);
+            }
+        }
+        return "Original Packs: " + found + "/" + SCHOOL_DAYS_PACKS.length +
+                "\nMissing: " + missing;
+    }
+
+    private void openPreliminaryDisplayOptions() {
+        final float[] scales = {1.0f, .75f, .5f};
+        final String[] labels = {
+                "Native rendering · 100%",
+                "Balanced rendering · 75%",
+                "Battery saving · 50%"};
+        final float current = SchoolDaysMobileProfile.renderScale(this);
+        int selected = current > .875f ? 0 : current > .625f ? 1 : 2;
+        new AlertDialog.Builder(this)
+                .setTitle("Display Options · Android")
+                .setSingleChoiceItems(labels, selected, (dialog, which) -> {
+                    try {
+                        SchoolDaysMobileProfile.setRenderScale(this, scales[which]);
+                        dialog.dismiss();
+                        status.setText("Render scale saved: " + labels[which] +
+                                "\nApplied when the game starts.");
+                    } catch (IOException error) {
+                        status.setText("Display settings not changed: " + error.getMessage());
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     @Override
@@ -348,6 +528,21 @@ public final class BootstrapActivity extends Activity {
                 importingPacks) return;
         importingPacks = true;
         Uri selected = data.getData();
+        if (requestCode == SCHOOL_DAYS_PACKS_REQUEST ||
+                requestCode == SCHOOL_DAYS_FOLDER_REQUEST) {
+            try {
+                getContentResolver().takePersistableUriPermission(
+                        selected, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                getSharedPreferences("school-days-android-launcher", MODE_PRIVATE)
+                        .edit().putString("packs-tree", selected.toString()).apply();
+            } catch (SecurityException error) {
+                importingPacks = false;
+                status.setText("Android did not grant persistent folder access. " +
+                        "Please choose a SchoolDaysHQ or Packs folder via SAF.\n" +
+                        error.getMessage());
+                return;
+            }
+        }
         status.setText(requestCode == SCHOOL_DAYS_FOLDER_REQUEST
                 ? "Scanning SchoolDaysHQ/Packs and translations..."
                 : requestCode == SCHOOL_DAYS_PACKS_REQUEST
@@ -591,9 +786,25 @@ public final class BootstrapActivity extends Activity {
     private static boolean hasAllPackNames(Map<String, DocumentEntry> entries) {
         for (String name : SCHOOL_DAYS_PACKS) {
             DocumentEntry found = entries.get(name.toLowerCase(Locale.ROOT));
-            if (found == null || found.directory) return false;
+            if (found == null || found.directory || found.size == 0) return false;
         }
         return true;
+    }
+
+    private static String missingPackNames(Map<String, DocumentEntry> entries) {
+        StringBuilder missing = new StringBuilder();
+        int found = 0;
+        for (String name : SCHOOL_DAYS_PACKS) {
+            DocumentEntry entry = entries.get(name.toLowerCase(Locale.ROOT));
+            if (entry != null && !entry.directory && entry.size != 0) {
+                found++;
+            } else {
+                if (missing.length() > 0) missing.append(", ");
+                missing.append(name);
+            }
+        }
+        return "Found " + found + "/" + SCHOOL_DAYS_PACKS.length +
+                " original GPKs; missing/empty: " + missing;
     }
 
     private void importSchoolDaysPacks(Uri tree) throws IOException {
@@ -606,7 +817,8 @@ public final class BootstrapActivity extends Activity {
                 entries = listDocumentChildren(tree, packs.uri);
         }
         if (!hasAllPackNames(entries))
-            throw new IOException("Select a folder with all 29 original GPK files AND LxH.GPK.");
+            throw new IOException("Select a folder with all 29 original HQ GPKs " +
+                    "and LxH.GPK. " + missingPackNames(entries));
 
         File target = privateSchoolDaysPacks();
         if (target.exists()) {

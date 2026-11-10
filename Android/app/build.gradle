@@ -41,6 +41,9 @@ android {
         targetSdk 34
         versionCode 1
         versionName '0.1.0'
+        // Every game compiles the shared launcher Java sources; only the
+        // explicit School Days dist build overrides this field to true.
+        buildConfigField 'boolean', 'DISTRIBUTION_BUILD', 'false'
         ndk { abiFilters.addAll(abis) }
         externalNativeBuild {
             cmake {
@@ -155,6 +158,10 @@ android.applicationVariants.all { variant ->
                 include 'school-days-hq.ktnroute', 'styles.ass'
                 into 'game-assets'
             }
+            from(new File(engineRoot, 'games/school-days/launcher-art')) {
+                include 'SchoolDaysHQ-Launcher.png'
+                into 'launcher-art'
+            }
         } else if (includeThisGame) {
             from(gameAssets) { into 'game-assets' }
         }
@@ -168,6 +175,11 @@ android.applicationVariants.all { variant ->
                     (!new File(gameAssets, 'school-days-hq.ktnroute').isFile() ||
                      !new File(gameAssets, 'styles.ass').isFile())) {
                 throw new GradleException('School Days route/styles are required for the APK')
+            }
+            if (variant.flavorName == 'schoolDays' &&
+                    !new File(engineRoot,
+                            'games/school-days/launcher-art/SchoolDaysHQ-Launcher.png').isFile()) {
+                throw new GradleException('School Days Android launcher artwork is missing')
             }
         }
         doLast {
