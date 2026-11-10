@@ -14,6 +14,9 @@ if (!vcpkgRoot) {
     throw new GradleException('Set VCPKG_ROOT to your vcpkg checkout before opening Android.')
 }
 def includeGameAssets = providers.gradleProperty('bundleGameAssets').orElse('true').get().toBoolean()
+// User-owned GPK/JSON translations are never committed in this repository.
+// School Days builds require an explicit external source directory.
+def schoolDaysTranslationsDir = providers.gradleProperty('schoolDaysTranslationsDir').orNull
 def abis = providers.gradleProperty('abis').orElse('arm64-v8a').get().split(',').toList()
 if (abis.size() != 1 || !(abis[0] in ['arm64-v8a', 'x86_64'])) {
     throw new GradleException('Android builds must select exactly one supported ABI: -Pabis=arm64-v8a or -Pabis=x86_64.')
@@ -162,6 +165,22 @@ android.applicationVariants.all { variant ->
                 include 'SchoolDaysHQ-Launcher.png'
                 into 'launcher-art'
             }
+            // Only translated language GPKs are eligible; original HQ Packs
+            // must NEVER be copied from either a player's install or Downloads.
+            // A missing external translation source is a build error.
+            if (schoolDaysTranslationsDir) {
+                from(new File(schoolDaysTranslationsDir)) {
+                    include 'jsons/*.json'
+                    include 'scripts/en-lxh.GPK',
+                            'scripts/pt-BR-lxh.GPK',
+                            'scripts/es-lxh.GPK',
+                            'scripts/zh-CN-lxh.GPK',
+                            'scripts/Script - Brazilian.GPK',
+                            'scripts/Script - Spanish.GPK',
+                            'scripts/Script - chinese-compatible.GPK'
+                    into 'translations'
+                }
+            }
         } else if (includeThisGame) {
             from(gameAssets) { into 'game-assets' }
         }
@@ -181,9 +200,54 @@ android.applicationVariants.all { variant ->
                             'games/school-days/launcher-art/SchoolDaysHQ-Launcher.png').isFile()) {
                 throw new GradleException('School Days Android launcher artwork is missing')
             }
+            if (variant.flavorName == 'schoolDays') {
+                if (!schoolDaysTranslationsDir)
+                    throw new GradleException('Missing -PschoolDaysTranslationsDir=...: provide an external folder with translations/jsons and translations/scripts. No translation files are stored in Git.')
+                def source = new File(schoolDaysTranslationsDir)
+                def essential = ['scripts/en-lxh.GPK',
+                        'scripts/Script - Brazilian.GPK', 'scripts/pt-BR-lxh.GPK',
+                        'scripts/Script - Spanish.GPK', 'scripts/es-lxh.GPK',
+                        'jsons/en-lxh.json', 'jsons/es.json', 'jsons/es-lxh.json']
+                if (!source.isDirectory() ||
+                        essential.any { !new File(source, it).isFile() ||
+                                new File(source, it).length() == 0 }) {
+                    throw new GradleException('School Days external language source is missing or incomplete: ' + source +
+                            ' (required EN/PT-BR/ES GPK and EN/ES JSON/LxH files). Original contents are never modified.')
+                }
+            }
         }
         doLast {
             new File(staged.get().asFile, 'game-assets').mkdirs()
+            if (variant.flavorName == 'schoolDays') {
+                // Verified per-file SHA256 makes updates possible without
+                // replacing user-owned PT-BR or previously imported content.
+                def folder = new File(staged.get().asFile, 'translations')
+                def translated = fileTree(folder).files.sort { a, b -> a.path <=> b.path }
+                if (translated.empty)
+                    throw new GradleException('No packaged translations for School Days')
+                def lines = ['SchoolDaysEmbeddedTranslations.v1']
+                translated.each { source ->
+                    def relative = folder.toPath().relativize(source.toPath()).toString().replace('\\', '/')
+                    if (!(relative ==~ /jsons\/[A-Za-z0-9][A-Za-z0-9_-]{0,70}\.json/) &&
+                            !(relative in [
+                                    'scripts/en-lxh.GPK', 'scripts/pt-BR-lxh.GPK',
+                                    'scripts/es-lxh.GPK', 'scripts/zh-CN-lxh.GPK',
+                                    'scripts/Script - Brazilian.GPK',
+                                    'scripts/Script - Spanish.GPK',
+                                    'scripts/Script - chinese-compatible.GPK'])) {
+                        throw new GradleException('Unexpected packaged translation: ' + relative)
+                    }
+                    def sha = MessageDigest.getInstance('SHA-256')
+                    source.withInputStream { stream ->
+                        byte[] bytes = new byte[65536]
+                        int read
+                        while ((read = stream.read(bytes)) != -1) sha.update(bytes, 0, read)
+                    }
+                    lines.add(relative + '\t' + sha.digest().encodeHex().toString())
+                }
+                new File(staged.get().asFile, 'translations-manifest.sha256').text =
+                        lines.join('\n') + '\n'
+            }
             if (variant.flavorName == 'dokiDoki') {
                 def foundStdlib = false
                 abis.each { abi ->

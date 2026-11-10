@@ -64,6 +64,7 @@ public final class BootstrapActivity extends Activity {
     private TextView status;
     private boolean importingPacks;
     private volatile boolean assetsPrepared;
+    private volatile String packagedTranslationStatus = "";
     private SchoolDaysMobileProfile.Choice currentLanguage;
 
     @Override
@@ -109,8 +110,20 @@ public final class BootstrapActivity extends Activity {
                     if (BuildConfig.NATIVE_TARGET.equals("DokiDoki")) {
                         copyDirectory(getAssets(), "python", directory, "python");
                     }
-                    Files.write(complete.toPath(), fingerprint.getBytes(StandardCharsets.UTF_8));
                 }
+                if (BuildConfig.NATIVE_TARGET.equals("SchoolDays")) {
+                    // Packaged locale GPK/JSON files live under the same profile
+                    // as native translation-pack.txt and settings.json. Existing
+                    // PT-BR/imported translations are never silently replaced.
+                    final SchoolDaysEmbeddedTranslations.Result result =
+                            SchoolDaysEmbeddedTranslations.install(this, getAssets());
+                    packagedTranslationStatus = result.toString() +
+                            (result.protectedFiles.isEmpty() ? "" :
+                                    "\nUnchanged user-owned translations: " +
+                                    String.join(", ", result.protectedFiles));
+                }
+                if (!fingerprint.equals(installed))
+                    Files.write(complete.toPath(), fingerprint.getBytes(StandardCharsets.UTF_8));
                 runOnUiThread(() -> {
                     if (isFinishing() || isDestroyed()) return;
                     assetsPrepared = true;
@@ -374,6 +387,8 @@ public final class BootstrapActivity extends Activity {
         status = launcherText(
                 (assetsPrepared ? "App resources ready" : "Preparing app resources…") +
                 "\n" + (packsReady ? "Original Packs: 30/30 found" : missingPacksSummary()) +
+                (packagedTranslationStatus.isEmpty() ? "" :
+                        "\n" + packagedTranslationStatus) +
                 "\n" + (choices.get(selected).available ?
                         "Language ready for native validation" :
                         "A complete language profile is required"),
@@ -384,6 +399,7 @@ public final class BootstrapActivity extends Activity {
         Button selectPacks = launcherButton(
                 packsReady ? "Packs installed · select another folder" :
                         "Select SchoolDaysHQ / Packs folder", false);
+        selectPacks.setEnabled(assetsPrepared);
         selectPacks.setOnClickListener(view ->
                 openFolderPicker(SCHOOL_DAYS_FOLDER_REQUEST));
         addLauncherControl(controls, selectPacks);
@@ -405,6 +421,7 @@ public final class BootstrapActivity extends Activity {
 
         if (!BuildConfig.DISTRIBUTION_BUILD) {
             Button devTranslations = launcherButton("DEV · import GPK or JSON file", false);
+            devTranslations.setEnabled(assetsPrepared);
             devTranslations.setOnClickListener(view -> {
                 if (importingPacks) return;
                 Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -417,6 +434,7 @@ public final class BootstrapActivity extends Activity {
         }
 
         Button refresh = launcherButton("Recheck installed Packs and languages", false);
+        refresh.setEnabled(assetsPrepared);
         refresh.setOnClickListener(view -> {
             if (!importingPacks) showSchoolDaysSetup();
         });
