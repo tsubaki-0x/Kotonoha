@@ -5210,6 +5210,13 @@ bool Runtime::onScreenEvent(Kotonoha::EventRef event) {
     }
   }
   if (!engine) return false;
+#if defined(__ANDROID__) || defined(ANDROID)
+  if (event.type == SDL_EVENT_MOUSE_WHEEL && systemUi.IsOpen()) {
+    // The central Android adapter emits wheel ticks from vertical finger drag.
+    // Save/Load and Replay tabs can page without hitting tiny retail buttons.
+    if (systemUi.MobileSwipePage(event.wheel.y > 0 ? -1 : 1)) return true;
+  }
+#endif
   if (lxhFade.InputLocked() && FrontendInputEvent(event.type)) return true;
 #if !defined(__ANDROID__) && !defined(ANDROID)
   if (displayPanelOpen() && desktopDisplayPopup != DesktopDisplayPopup::None &&
@@ -5345,7 +5352,14 @@ bool Runtime::onEvent(Kotonoha::EventRef eventInput) {
     if (escape) {
       playSound(Ui::UiSfxCue::Cancel);
       if (!beginSystemPanelClose()) closePanels();
-    } else if (event.type == SDL_EVENT_MOUSE_MOTION) {
+    }
+#if defined(__ANDROID__) || defined(ANDROID)
+    else if (event.type == SDL_EVENT_MOUSE_WHEEL) {
+      // History scrolls by three native records per gesture tick.
+      backlogModel.MobileScroll(event.wheel.y > 0 ? -3 : 3);
+    }
+#endif
+    else if (event.type == SDL_EVENT_MOUSE_MOTION) {
       int x = -1, y = -1;
       if (pointerToBackLog(event.motion.x, event.motion.y, &x, &y))
         backlogModel.SetSelectionFromPointer(x, y);

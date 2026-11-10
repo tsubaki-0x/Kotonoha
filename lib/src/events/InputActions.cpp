@@ -74,6 +74,133 @@ bool TouchPointer::translate(EventRef event, WindowRef window,
   }
   return true;
 }
+#if defined(__ANDROID__) || defined(ANDROID)
+void MobileTouchAdapter::reset() {
+  primary_.reset();
+  fingers_.clear();
+  dragged_ = blocked_ = backSent_ = false;
+  scrollRemainder_ = 0;
+  pressedAtNs_ = 0;
+}
+
+std::vector<SDL_Event> MobileTouchAdapter::translate(EventRef raw,
+                                                     WindowRef window) {
+  if (raw.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
+    reset();
+    return {};
+  }
+  if (raw.type < SDL_EVENT_FINGER_DOWN ||
+      raw.type > SDL_EVENT_FINGER_CANCELED) return {};
+  int width = 0, height = 0;
+  if (!SDL_GetWindowSize(&window, &width, &height) ||
+      width <= 0 || height <= 0) return {};
+  const auto key = FingerKey{raw.tfinger.touchID, raw.tfinger.fingerID};
+  const SDL_WindowID id = SDL_GetWindowID(&window);
+  std::vector<SDL_Event> out;
+  const auto motion = [&](float x, float y) {
+    SDL_Event mouse{};
+    mouse.type = SDL_EVENT_MOUSE_MOTION;
+    mouse.motion.windowID = id;
+    mouse.motion.which = SDL_TOUCH_MOUSEID;
+    mouse.motion.x = x * width;
+    mouse.motion.y = y * height;
+    return mouse;
+  };
+  const auto button = [&](SDL_EventType type, float x, float y) {
+    SDL_Event mouse{};
+    mouse.type = type;
+    mouse.button.windowID = id;
+    mouse.button.which = SDL_TOUCH_MOUSEID;
+    mouse.button.button = SDL_BUTTON_LEFT;
+    mouse.button.down = type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+    mouse.button.x = x * width;
+    mouse.button.y = y * height;
+    return mouse;
+  };
+  const auto escape = [&] {
+    SDL_Event keyEvent{};
+    keyEvent.type = SDL_EVENT_KEY_DOWN;
+    keyEvent.key.windowID = id;
+    keyEvent.key.key = SDLK_ESCAPE;
+    keyEvent.key.repeat = false;
+    out.push_back(keyEvent);
+  };
+
+  if (raw.type == SDL_EVENT_FINGER_DOWN) {
+    fingers_.insert(key);
+    if (fingers_.size() != 1) {
+      blocked_ = true;
+      return out;
+    }
+    primary_ = key;
+    startX_ = lastX_ = raw.tfinger.x;
+    startY_ = lastY_ = raw.tfinger.y;
+    pressedAtNs_ = raw.tfinger.timestamp ? raw.tfinger.timestamp : SDL_GetTicksNS();
+    dragged_ = blocked_ = backSent_ = false;
+    scrollRemainder_ = 0;
+    // Hover before activation is essential for CMAP controls. It changes no
+    // selection semantics on PC and causes no premature activation on touch.
+    out.push_back(motion(lastX_, lastY_));
+    return out;
+  }
+  if (!primary_ || *primary_ != key) {
+    if (raw.type == SDL_EVENT_FINGER_UP ||
+        raw.type == SDL_EVENT_FINGER_CANCELED) fingers_.erase(key);
+    return out;
+  }
+  const float x = raw.tfinger.x, y = raw.tfinger.y;
+  const float dx = x - startX_, dy = y - startY_;
+  if (std::hypot(dx, dy) > 0.03f) dragged_ = true;
+  if (raw.type == SDL_EVENT_FINGER_MOTION) {
+    if (!blocked_) {
+      if (!backSent_ && startX_ < .055f && dx > .14f &&
+          dx > std::abs(dy) * 1.5f) {
+        escape();
+        backSent_ = blocked_ = true;
+      } else if (dragged_) {
+        // One tick per 5.5% of screen height; the runtime can page its native
+        // lists without guessing where tiny desktop scroll arrows are.
+        scrollRemainder_ += lastY_ - y;
+        if (std::abs(scrollRemainder_) >= .055f) {
+          SDL_Event wheel{};
+          wheel.type = SDL_EVENT_MOUSE_WHEEL;
+          wheel.wheel.windowID = id;
+          wheel.wheel.which = SDL_TOUCH_MOUSEID;
+          wheel.wheel.direction = SDL_MOUSEWHEEL_NORMAL;
+          wheel.wheel.y = scrollRemainder_ > 0 ? 1.0f : -1.0f;
+          wheel.wheel.integer_y = scrollRemainder_ > 0 ? 1 : -1;
+          wheel.wheel.mouse_x = x * width;
+          wheel.wheel.mouse_y = y * height;
+          out.push_back(wheel);
+          scrollRemainder_ -= wheel.wheel.y * .055f;
+        }
+      } else {
+        out.push_back(motion(x, y));
+      }
+    }
+    lastX_ = x;
+    lastY_ = y;
+    return out;
+  }
+  fingers_.erase(key);
+  if (raw.type == SDL_EVENT_FINGER_UP && !blocked_) {
+    const Uint64 now = raw.tfinger.timestamp ? raw.tfinger.timestamp : SDL_GetTicksNS();
+    if (!dragged_) {
+      if (pressedAtNs_ && now >= pressedAtNs_ &&
+          now - pressedAtNs_ >= Uint64{600000000}) {
+        escape(); // long press is Android's right-click/Menu equivalent
+      } else {
+        out.push_back(motion(x, y));
+        out.push_back(button(SDL_EVENT_MOUSE_BUTTON_DOWN, x, y));
+        out.push_back(button(SDL_EVENT_MOUSE_BUTTON_UP, x, y));
+      }
+    }
+  }
+  if (fingers_.empty()) reset();
+  else primary_.reset();
+  return out;
+}
+#endif
 
 bool HandleNavigation(Engine &engine, EventRef event) {
   auto &runtime = engine.GetRuntime();

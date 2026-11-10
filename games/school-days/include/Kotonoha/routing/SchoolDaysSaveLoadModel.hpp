@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <algorithm>
 #include <string>
 
 #include <Kotonoha/routing/SchoolDaysCmap.hpp>
@@ -69,6 +70,18 @@ public:
     // request; the caller must reproduce the high-level Save boundary before
     // reporting StayOpen back to the outer flow.
     bool Activate(Output* output);
+#if defined(__ANDROID__) || defined(ANDROID)
+    bool MobileSwipePage(int delta) {
+        if (!open_ || pendingRow_ >= 0 || commentRow_ >= 0 || delta == 0) return false;
+        const int next = std::clamp(page_ + delta, 0, 9);
+        if (next == page_) return false;
+        page_ = next;
+        selection_ = -1;
+        rowOccupied_.fill(false);
+        occupancyReady_ = false;
+        return true;
+    }
+#endif
 
     // _CommentSet@4 is invoked only by the native Win32 dialog's OK path.
     // Cancel closes the dialog without calling it and therefore aborts this

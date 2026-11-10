@@ -86,6 +86,10 @@ public:
     // Mouse commit is intentionally authenticated: the release hit must equal
     // the selection stored by the preceding pointer-motion update.
     bool ActivatePointer(int x, int y, Action* out);
+#if defined(__ANDROID__) || defined(ANDROID)
+    // Android-only scroll gesture. Retail desktop pointer behavior is intact.
+    bool MobileScroll(int delta);
+#endif
 
     bool IsOpen() const { return open_; }
     int Selection() const { return selection_; }

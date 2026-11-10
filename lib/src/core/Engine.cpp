@@ -630,6 +630,27 @@ SDL_AppResult Engine::Event(EventPtr event) {
       NormalizeControllerEvent(*event, settings.swapControllerAB);
   event = &normalized;
   session.deviceEvent(*event);
+#if defined(__ANDROID__) || defined(ANDROID)
+  // SDL_TOUCH_MOUSE_EVENTS is explicitly disabled by SDLSession. Ignore any
+  // driver-provided touch-as-mouse events as well: this is the sole ingress for
+  // physical fingers, and every native screen receives a consistent pointer.
+  if (((event->type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+        event->type == SDL_EVENT_MOUSE_BUTTON_UP) &&
+       event->button.which == SDL_TOUCH_MOUSEID) ||
+      (event->type == SDL_EVENT_MOUSE_MOTION &&
+       event->motion.which == SDL_TOUCH_MOUSEID))
+    return SDL_APP_CONTINUE;
+  if (event->type == SDL_EVENT_WINDOW_FOCUS_LOST)
+    (void)mobileTouch.translate(*event, *window);
+  if (event->type >= SDL_EVENT_FINGER_DOWN &&
+      event->type <= SDL_EVENT_FINGER_CANCELED) {
+    for (auto &action : mobileTouch.translate(*event, *window)) {
+      const auto result = dispatchEvent(&action);
+      if (result != SDL_APP_CONTINUE) return result;
+    }
+    return SDL_APP_CONTINUE;
+  }
+#endif
   const auto navigation = controllerNavigation.process(*event);
   if (event->type == SDL_EVENT_GAMEPAD_AXIS_MOTION &&
       (event->gaxis.axis == SDL_GAMEPAD_AXIS_LEFTX ||

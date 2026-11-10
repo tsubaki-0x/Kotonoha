@@ -92,6 +92,9 @@ private:
   bool translationDumpComplete = false;
   InputActions inputActions;
   TouchPointer touchPointer;
+#if defined(__ANDROID__) || defined(ANDROID)
+  MobileTouchAdapter mobileTouch;
+#endif
   ControllerNavigation controllerNavigation;
   SDL_AppResult dispatchEvent(EventPtr event);
   // A screen-space control owns both edges of a mouse press, even if the

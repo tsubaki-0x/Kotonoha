@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <algorithm>
 #include <string>
 
 #include <Kotonoha/routing/SchoolDaysCmap.hpp>
@@ -42,6 +43,17 @@ public:
     bool SetSelectionFromPointer(int x, int y);
     int HitControl(int x, int y) const;
     bool Activate(Action* out);
+#if defined(__ANDROID__) || defined(ANDROID)
+    bool MobileSwipePage(int delta) {
+        if (!open_ || sceneCheckOpen_ || delta == 0) return false;
+        const int last = view_ == View::HScene ? 3 : 9;
+        const int next = std::clamp(page_ + delta, 0, last);
+        if (next == page_) return false;
+        page_ = next;
+        selection_ = -1;
+        return true;
+    }
+#endif
 
     // Unlock/availability is owned by the host.  Defaults are fail-closed.
     void SetHSceneAvailable(int index, bool available);

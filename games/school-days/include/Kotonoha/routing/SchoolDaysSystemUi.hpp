@@ -146,6 +146,13 @@ public:
 
     bool HandleEvent(SDL_Renderer* renderer, const SDL_Event* event,
                      Output* output);
+#if defined(__ANDROID__) || defined(ANDROID)
+    bool MobileSwipePage(int delta) {
+        if (saveLoad_.IsOpen()) return saveLoad_.MobileSwipePage(delta);
+        if (replay_.IsOpen()) return replay_.MobileSwipePage(delta);
+        return false;
+    }
+#endif
     bool SubmitSaveLoadComment(const std::u16string& comment);
     bool CancelSaveLoadComment();
     bool Activate(Output* output);
