@@ -49,6 +49,9 @@ public:
   // Native script menus may poll pointer-down and pointer-up on different
   // frames.
   virtual bool continuousTouch() const { return false; }
+  // Games with a native, authored mobile menu button can own rendering and
+  // activation rather than using the engine's generic InGameMenu component.
+  virtual bool ownsMobileMenuButton() const { return false; }
 
   // Ciclo de inicialização
   virtual void init(Engine &engine);

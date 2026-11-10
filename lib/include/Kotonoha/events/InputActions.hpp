@@ -46,9 +46,11 @@ class MobileTouchAdapter {
   float scrollRemainder_ = 0;
   Uint64 pressedAtNs_ = 0;
   bool dragged_ = false, blocked_ = false, backSent_ = false;
+  bool dragControls_ = false;
 
 public:
-  std::vector<SDL_Event> translate(EventRef raw, WindowRef window);
+  std::vector<SDL_Event> translate(EventRef raw, WindowRef window,
+                                   bool nativeDragControls = false);
   void reset();
 };
 #endif

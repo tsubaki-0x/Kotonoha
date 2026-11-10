@@ -641,10 +641,11 @@ SDL_AppResult Engine::Event(EventPtr event) {
        event->motion.which == SDL_TOUCH_MOUSEID))
     return SDL_APP_CONTINUE;
   if (event->type == SDL_EVENT_WINDOW_FOCUS_LOST)
-    (void)mobileTouch.translate(*event, *window);
+    (void)mobileTouch.translate(*event, *window, settingsMenu->isOpen());
   if (event->type >= SDL_EVENT_FINGER_DOWN &&
       event->type <= SDL_EVENT_FINGER_CANCELED) {
-    for (auto &action : mobileTouch.translate(*event, *window)) {
+    for (auto &action : mobileTouch.translate(*event, *window,
+                                              settingsMenu->isOpen())) {
       const auto result = dispatchEvent(&action);
       if (result != SDL_APP_CONTINUE) return result;
     }
@@ -752,7 +753,8 @@ SDL_AppResult Engine::dispatchEvent(EventPtr event) {
 
   // Manual mobile menu button click detection
   const SDL_FRect mobileMenuButton{16, 16, 76, 36};
-  if (isMobilePlatform() && runtime.GetState() == GameState::Gameplay &&
+  if (isMobilePlatform() && !runtime.ownsMobileMenuButton() &&
+      runtime.GetState() == GameState::Gameplay &&
       !settingsMenu->isOpen() && !GetInGameMenuRuntime(*this).IsOpen()) {
     if (logical.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
         logical.button.button == SDL_BUTTON_LEFT) {
@@ -761,7 +763,9 @@ SDL_AppResult Engine::dispatchEvent(EventPtr event) {
         GetInGameMenuRuntime(*this).open();
         return SDL_APP_CONTINUE;
       }
-    } else if (logical.type == SDL_EVENT_FINGER_DOWN) {
+    }
+#if !defined(__ANDROID__) && !defined(ANDROID)
+    else if (logical.type == SDL_EVENT_FINGER_DOWN) {
       const SDL_FPoint pt{logical.tfinger.x * view.x,
                           logical.tfinger.y * view.y};
       const SDL_FPoint designPt{(pt.x - frame.x) / frame.scale,
@@ -771,6 +775,7 @@ SDL_AppResult Engine::dispatchEvent(EventPtr event) {
         return SDL_APP_CONTINUE;
       }
     }
+#endif
   }
 
   if (!consumed && !settingsMenu->isOpen() && HandleNavigation(*this, logical))

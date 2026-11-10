@@ -20,6 +20,19 @@ def schoolDaysTranslationsDir = providers.gradleProperty('schoolDaysTranslations
 // Only the DEV variant may receive user-supplied, read-only LxH test saves.
 // No checked-in fixtures, and no implicitly selected PC saves directory.
 def schoolDaysDevSavesDir = providers.gradleProperty('schoolDaysDevSavesDir').orNull
+// SHA-256 of the eight user-authorized LxH QA saves, audited as SLog/FlgH
+// with their expected seven routes. Never package a different Save folder
+// under the same names (which could mix scenes or foreign user data).
+def schoolDaysDevExpectedSaveHashes = [
+        'GlobalFlag.DAT': 'd88a3a057415c1b8b5dbdb63b5c05e485181301eab3cb583666bc2516ad1f6d0',
+        'SaveFile000.DAT': 'cbbe3787ca7a976a323be887f7825b91ae8d961a56bc6564d98b407ad64129cd',
+        'SaveFile001.DAT': 'ae5e1f57e2e1fbd1452aa67cc0c70294d5023dcc5d2ca271cd2b8c046188bb1d',
+        'SaveFile002.DAT': 'b5d931b33c8347989ef6de08ea549ec94537beacbda0354f5ed2e90761719357',
+        'SaveFile003.DAT': '2c415fba8703af68933b906b9fdaf2af07a95cb92db48224a8c22970baa6404c',
+        'SaveFile004.DAT': 'c90870be5c270e05bfd44808449e19bafb1d7c64d9f71d649e4411d630f51507',
+        'SaveFile005.DAT': '67e4ba94729086805a8c2467045fdb1ca8b7c31035e1e8ae5a548180a77657e6',
+        'SaveFile006.DAT': '8a604b43819a51d281be3c08a3dd51ee13dba2b8b709f35e81c49bfdd3d10af6'
+]
 def abis = providers.gradleProperty('abis').orElse('arm64-v8a').get().split(',').toList()
 if (abis.size() != 1 || !(abis[0] in ['arm64-v8a', 'x86_64'])) {
     throw new GradleException('Android builds must select exactly one supported ABI: -Pabis=arm64-v8a or -Pabis=x86_64.')
@@ -238,6 +251,21 @@ android.applicationVariants.all { variant ->
                     throw new GradleException('Missing or empty School Days DEV LxH save fixtures in ' +
                             directory + '; original data was not modified.')
                 }
+                // Names/non-empty files are insufficient. Pin the audited
+                // content before staging; no originals are opened for write.
+                expectedSaves.each { name ->
+                    def sha = MessageDigest.getInstance('SHA-256')
+                    new File(directory, name).withInputStream { input ->
+                        byte[] buffer = new byte[65536]
+                        int read
+                        while ((read = input.read(buffer)) != -1)
+                            sha.update(buffer, 0, read)
+                    }
+                    if (sha.digest().encodeHex().toString() !=
+                            schoolDaysDevExpectedSaveHashes[name])
+                        throw new GradleException('Unrecognized LxH DEV save fixture: ' + name +
+                                ' (SHA-256 differs from the audited source; source untouched)')
+                }
             }
         }
         doLast {
@@ -288,7 +316,10 @@ android.applicationVariants.all { variant ->
                         while ((read = input.read(buffer)) != -1)
                             sha.update(buffer, 0, read)
                     }
-                    lines.add(save.name + '\t' + sha.digest().encodeHex().toString() +
+                    def digest = sha.digest().encodeHex().toString()
+                    if (digest != schoolDaysDevExpectedSaveHashes[save.name])
+                        throw new GradleException('Staged DEV save fixture changed: ' + save.name)
+                    lines.add(save.name + '\t' + digest +
                             '\t' + save.length())
                 }
                 new File(staged.get().asFile, 'dev-save-fixtures-manifest.sha256').text =

@@ -476,6 +476,7 @@ public:
   void renderMenu(Kotonoha::RendererRef renderer, float scale) override;
   bool onEvent(Kotonoha::EventRef event) override;
   bool onScreenEvent(Kotonoha::EventRef event) override;
+  bool ownsMobileMenuButton() const override { return true; }
   void renderScreen(Kotonoha::RendererRef renderer, float scale) override;
   // Native panel state (tests and the debug tools).
   const Kotonoha::SchoolDaysSystemUi &panels() const { return systemUi; }

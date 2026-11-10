@@ -81,10 +81,12 @@ void MobileTouchAdapter::reset() {
   dragged_ = blocked_ = backSent_ = false;
   scrollRemainder_ = 0;
   pressedAtNs_ = 0;
+  dragControls_ = false;
 }
 
 std::vector<SDL_Event> MobileTouchAdapter::translate(EventRef raw,
-                                                     WindowRef window) {
+                                                     WindowRef window,
+                                                     bool nativeDragControls) {
   if (raw.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
     reset();
     return {};
@@ -129,10 +131,13 @@ std::vector<SDL_Event> MobileTouchAdapter::translate(EventRef raw,
   if (raw.type == SDL_EVENT_FINGER_DOWN) {
     fingers_.insert(key);
     if (fingers_.size() != 1) {
+      if (dragControls_ && primary_)
+        out.push_back(button(SDL_EVENT_MOUSE_BUTTON_UP, -1, -1));
       blocked_ = true;
       return out;
     }
     primary_ = key;
+    dragControls_ = nativeDragControls;
     startX_ = lastX_ = raw.tfinger.x;
     startY_ = lastY_ = raw.tfinger.y;
     pressedAtNs_ = raw.tfinger.timestamp ? raw.tfinger.timestamp : SDL_GetTicksNS();
@@ -141,11 +146,18 @@ std::vector<SDL_Event> MobileTouchAdapter::translate(EventRef raw,
     // Hover before activation is essential for CMAP controls. It changes no
     // selection semantics on PC and causes no premature activation on touch.
     out.push_back(motion(lastX_, lastY_));
+    // The engine Settings sliders capture on press and track MOUSE_MOTION
+    // while pressed. Retail CMAP panels must NOT receive this early press.
+    if (dragControls_)
+      out.push_back(button(SDL_EVENT_MOUSE_BUTTON_DOWN, lastX_, lastY_));
     return out;
   }
   if (!primary_ || *primary_ != key) {
     if (raw.type == SDL_EVENT_FINGER_UP ||
-        raw.type == SDL_EVENT_FINGER_CANCELED) fingers_.erase(key);
+        raw.type == SDL_EVENT_FINGER_CANCELED) {
+      fingers_.erase(key);
+      if (fingers_.empty()) reset();
+    }
     return out;
   }
   const float x = raw.tfinger.x, y = raw.tfinger.y;
@@ -155,24 +167,34 @@ std::vector<SDL_Event> MobileTouchAdapter::translate(EventRef raw,
     if (!blocked_) {
       if (!backSent_ && startX_ < .055f && dx > .14f &&
           dx > std::abs(dy) * 1.5f) {
+        if (dragControls_)
+          out.push_back(button(SDL_EVENT_MOUSE_BUTTON_UP, -1, -1));
         escape();
         backSent_ = blocked_ = true;
       } else if (dragged_) {
+        if (dragControls_) out.push_back(motion(x, y));
         // One tick per 5.5% of screen height; the runtime can page its native
         // lists without guessing where tiny desktop scroll arrows are.
-        scrollRemainder_ += lastY_ - y;
-        if (std::abs(scrollRemainder_) >= .055f) {
+        // Horizontal gestures are slider drags and must not scroll the page.
+        if (!dragControls_ || std::abs(dy) > std::abs(dx) * 1.25f)
+          scrollRemainder_ += lastY_ - y;
+        // Android content follows the finger: swipe UP means scroll DOWN,
+        // which SDL expresses as a negative wheel delta. Emit multiple ticks
+        // for a fast drag rather than dropping all but one per MOTION event.
+        for (int step = 0; step < 8 && std::abs(scrollRemainder_) >= .055f;
+             ++step) {
+          const float travelSign = scrollRemainder_ > 0 ? 1.0f : -1.0f;
           SDL_Event wheel{};
           wheel.type = SDL_EVENT_MOUSE_WHEEL;
           wheel.wheel.windowID = id;
           wheel.wheel.which = SDL_TOUCH_MOUSEID;
           wheel.wheel.direction = SDL_MOUSEWHEEL_NORMAL;
-          wheel.wheel.y = scrollRemainder_ > 0 ? 1.0f : -1.0f;
-          wheel.wheel.integer_y = scrollRemainder_ > 0 ? 1 : -1;
+          wheel.wheel.y = -travelSign;
+          wheel.wheel.integer_y = travelSign > 0 ? -1 : 1;
           wheel.wheel.mouse_x = x * width;
           wheel.wheel.mouse_y = y * height;
           out.push_back(wheel);
-          scrollRemainder_ -= wheel.wheel.y * .055f;
+          scrollRemainder_ -= travelSign * .055f;
         }
       } else {
         out.push_back(motion(x, y));
@@ -185,6 +207,17 @@ std::vector<SDL_Event> MobileTouchAdapter::translate(EventRef raw,
   fingers_.erase(key);
   if (raw.type == SDL_EVENT_FINGER_UP && !blocked_) {
     const Uint64 now = raw.tfinger.timestamp ? raw.tfinger.timestamp : SDL_GetTicksNS();
+    if (dragControls_) {
+      const bool held = pressedAtNs_ && now >= pressedAtNs_ &&
+                        now - pressedAtNs_ >= Uint64{600000000};
+      // End captured sliders; suppress hit activation on dragged/long-pressed
+      // rows by releasing outside the native menu's authored hit regions.
+      out.push_back(button(SDL_EVENT_MOUSE_BUTTON_UP,
+                           dragged_ || held ? -1 : x,
+                           dragged_ || held ? -1 : y));
+      if (!dragged_ && held)
+        escape();
+    } else
     if (!dragged_) {
       if (pressedAtNs_ && now >= pressedAtNs_ &&
           now - pressedAtNs_ >= Uint64{600000000}) {

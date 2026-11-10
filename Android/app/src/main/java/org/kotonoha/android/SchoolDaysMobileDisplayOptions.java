@@ -292,6 +292,7 @@ final class SchoolDaysMobileDisplayOptions {
                 .create();
         dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE)
                 .setOnClickListener(view -> {
+                    boolean settingsWritten = false;
                     try {
                         JSONObject updated = readSettings(settings);
                         updated.put("version", 1);
@@ -312,12 +313,17 @@ final class SchoolDaysMobileDisplayOptions {
                         final int newAspect = aspectChoice.getSelectedItemPosition();
                         // Same profile/format as the native in-game Display tab.
                         atomicWrite(settings, updated.toString());
+                        settingsWritten = true;
                         saveDisplaySidecar(profile, newAspect,
                                 FRAME_CAPS[capChoice.getSelectedItemPosition()]);
                         onResult.accept("Display Options saved — applied on next Play.");
                         dialog.dismiss();
                     } catch (IOException | JSONException error) {
-                        onResult.accept("Display Options NOT saved: " + error.getMessage());
+                        onResult.accept(settingsWritten
+                                ? "Display Options PARTLY saved (settings.json updated, " +
+                                    "Kotonoha.ini not confirmed). Review values before Play: " +
+                                    error.getMessage()
+                                : "Display Options NOT saved: " + error.getMessage());
                     }
                 }));
         dialog.show();

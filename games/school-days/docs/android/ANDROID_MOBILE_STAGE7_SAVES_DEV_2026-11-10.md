@@ -36,7 +36,8 @@ Apenas o build `schoolDaysDev` aceita os saves, usando o argumento externo:
 -PschoolDaysDevSavesDir='C:\Users\Suzu\Downloads\traduções\lxh\Save - LxH\Save'
 ```
 
-Ausência ou arquivo vazio aborta a build DEV. Na montagem do APK, apenas esses
+Ausência, arquivo vazio ou SHA-256 diferente dos **oito hashes fixos e auditados**
+abortam a build DEV; não basta renomear arquivos diferentes. Na montagem do APK, apenas esses
 oito nomes são permitidos em `assets/dev-save-fixtures/Save/`, com o manifesto
 `assets/dev-save-fixtures-manifest.sha256` que inclui nome, SHA-256 e tamanho.
 O código responsável está **somente** em
@@ -47,10 +48,19 @@ Na primeira abertura da DEV, `BootstrapActivity` chama a classe por reflexão
 apenas na edição DEV. A classe recusa execução com pacote não-DEV, valida
 manifesto/hashes e copia para
 `<getExternalFilesDir(null)>/Kotonoha/me.hirameki.kotonoha.schooldays.dev/Save`
-(fallback interno se indisponível). Cada cópia usa diretório temporário e
-abertura `CREATE_NEW`, portanto **nunca sobrescreve** slots existentes,
-`GlobalFlag.DAT` existente, save real ou arquivos do PC. Um resumo por nome
-`copied` / `skipped` é exibido na launcher e registrado em log DEV.
+(fallback interno se indisponível). Antes de importar, verifica se o perfil
+`Save` está **inteiramente virgem**; um único save preexistente aborta o lote
+sem mistura com o GlobalFlag de QA. A importação registra um marcador
+`pending` com hash do conjunto para retomada segura após queda do processo:
+apenas itens já verificados podem ser retomados; slots divergentes/parciais
+causam erro e nunca são sobrescritos. Cada cópia usa diretório temporário e
+abertura `CREATE_NEW`; o `GlobalFlag.DAT` é publicado por último. Quando
+os oito arquivos estão íntegros, grava marcador `ready`. Em aberturas futuras,
+o marcador impede importação repetida **mesmo que o usuário tenha excluído
+um slot intencionalmente**. Falha de escrita da própria tentativa limpa apenas
+o arquivo incompleto criado na tentativa atual. Nenhum save real ou arquivo
+do PC é sobrescrito. O resumo mostra `copied`, `verified` e o resultado
+da importação no launcher e log DEV.
 
 ## Verificação de APKs
 

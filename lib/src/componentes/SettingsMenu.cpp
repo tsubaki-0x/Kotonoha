@@ -241,6 +241,11 @@ bool SettingsMenu::onEvent(EventRef rawEvent) {
     if (event.type == SDL_EVENT_MOUSE_BUTTON_UP ||
         event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
       slider = -1;
+#if defined(__ANDROID__) || defined(ANDROID)
+      // A native Android slider release is the end of one drag, not a second
+      // row tap that should activate the underlying Settings command.
+      return true;
+#endif
       return false;
     }
   }

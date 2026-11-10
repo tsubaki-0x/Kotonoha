@@ -3759,6 +3759,22 @@ void Runtime::renderScreen(Kotonoha::RendererRef renderer, float scale) {
   if (currentState == Kotonoha::GameState::Gameplay && gameScene &&
       !panelOpen() && !exitTransition.Active())
     gameScene->renderMenuBar(renderer);
+#if defined(__ANDROID__) || defined(ANDROID)
+  if (currentState == Kotonoha::GameState::Gameplay && !modal() &&
+      !frontendTransition.Active(SDL_GetTicks()) &&
+      !transportFade.InputLocked() && !exitTransition.Active()) {
+    const SDL_FPoint output = engine->screenSize();
+    const Kotonoha::UI::Frame frame = Kotonoha::UI::designFrame(
+        {std::max(1, static_cast<int>(std::lround(output.x))),
+         std::max(1, static_cast<int>(std::lround(output.y)))});
+    // The 800/1280-pixel original top bar owns the TOP edge. Use a visible,
+    // touch-sized native button below the authored choice controls instead
+    // of opening the generic engine menu (not an active School Days scene).
+    Kotonoha::UI::FrameScope scope(renderer, frame);
+    engine->GetUI().button(renderer, {18.0f, 649.0f, 118.0f, 54.0f},
+                           "MENU");
+  }
+#endif
   if (systemUi.IsOpen()) {
     const SDL_FPoint screen = engine->screenSize();
     systemUi.SetArea({std::max(1, static_cast<int>(std::lround(screen.x))),
@@ -5210,13 +5226,6 @@ bool Runtime::onScreenEvent(Kotonoha::EventRef event) {
     }
   }
   if (!engine) return false;
-#if defined(__ANDROID__) || defined(ANDROID)
-  if (event.type == SDL_EVENT_MOUSE_WHEEL && systemUi.IsOpen()) {
-    // The central Android adapter emits wheel ticks from vertical finger drag.
-    // Save/Load and Replay tabs can page without hitting tiny retail buttons.
-    if (systemUi.MobileSwipePage(event.wheel.y > 0 ? -1 : 1)) return true;
-  }
-#endif
   if (lxhFade.InputLocked() && FrontendInputEvent(event.type)) return true;
 #if !defined(__ANDROID__) && !defined(ANDROID)
   if (displayPanelOpen() && desktopDisplayPopup != DesktopDisplayPopup::None &&
@@ -5226,6 +5235,27 @@ bool Runtime::onScreenEvent(Kotonoha::EventRef event) {
   if (transportFade.InputLocked()) return true;
   if (exitTransition.InputLocked()) return true;
   if (systemPanelTransition.InputLocked()) return true;
+  if (loadTransition.InputLocked() && FrontendInputEvent(event.type)) return true;
+#if defined(__ANDROID__) || defined(ANDROID)
+  if (currentState == Kotonoha::GameState::Gameplay && !modal() &&
+      !frontendTransition.Active(SDL_GetTicks()) &&
+      !transportFade.InputLocked() && !exitTransition.Active() &&
+      event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+      event.button.which == SDL_TOUCH_MOUSEID &&
+      event.button.button == SDL_BUTTON_LEFT) {
+    const SDL_FPoint output = engine->screenSize();
+    const auto design = Kotonoha::UI::designFrame(
+        {std::max(1, static_cast<int>(std::lround(output.x))),
+         std::max(1, static_cast<int>(std::lround(output.y)))});
+    const SDL_Event point = Kotonoha::UI::toFrame(event, design);
+    const SDL_FPoint pos{point.button.x, point.button.y};
+    const SDL_FRect button{18.0f, 649.0f, 118.0f, 54.0f};
+    if (SDL_PointInRectFloat(&pos, &button)) {
+      openConfig(Kotonoha::SchoolDaysConfigMenuModel::Page::Def);
+      return true;
+    }
+  }
+#endif
   if (!systemUi.IsOpen()) {
     return currentState == Kotonoha::GameState::Gameplay && gameScene &&
            !panelOpen() &&
@@ -5264,6 +5294,13 @@ bool Runtime::onScreenEvent(Kotonoha::EventRef event) {
                        event.type == SDL_EVENT_FINGER_MOTION;
   if (!pointer) return false;
   if (frontendTransition.Active(SDL_GetTicks())) return true;
+#if defined(__ANDROID__) || defined(ANDROID)
+  if (event.type == SDL_EVENT_MOUSE_WHEEL && systemUi.IsOpen()) {
+    // Route a mobile finger-swipe only after fade/load input gates. Positive
+    // wheel is previous, negative wheel is next, like ordinary SDL scrolling.
+    if (systemUi.MobileSwipePage(event.wheel.y > 0 ? -1 : 1)) return true;
+  }
+#endif
 
   const SDL_FPoint screen = engine->screenSize();
   systemUi.SetArea({std::max(1, static_cast<int>(std::lround(screen.x))),
@@ -5271,28 +5308,8 @@ bool Runtime::onScreenEvent(Kotonoha::EventRef event) {
   systemUi.SetConfigStandardFullscreenStretch(
       systemUi.IsConfigOpen() && narrativePresentationHeightScale() < 0.999f);
   try {
-#if defined(__ANDROID__) || defined(ANDROID)
-    // SDL emits a synthetic mouse click for the same finger activation. The
-    // Display rows consume FINGER_DOWN directly; do not activate them twice.
-    // Keep synthetic clicks outside this panel for the retail Config tabs.
-    if (displayPanelOpen() && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
-        event.button.which == SDL_TOUCH_MOUSEID) {
-      const auto geometry = DisplayGeometry(
-          systemUi.ConfigMenu().CurrentVariant(), screen.x, screen.y);
-      const SDL_FPoint point{event.button.x, event.button.y};
-      const auto resolutionPopup = DisplayResolutionPopup(geometry);
-      const auto scalePopup = AndroidRenderScalePopup(geometry);
-      const auto presetPopup = DisplayPresetPopup(geometry);
-      if (SDL_PointInRectFloat(&point, &geometry.panel) ||
-          (displayPanelResolutionOpen &&
-           SDL_PointInRectFloat(&point, &resolutionPopup.rect)) ||
-          (displayPanelRenderScaleOpen &&
-           SDL_PointInRectFloat(&point, &scalePopup.rect)) ||
-          (displayPanelPresetOpen &&
-           SDL_PointInRectFloat(&point, &presetPopup.rect)))
-        return true;
-    }
-#endif
+    // MobileTouchAdapter now owns the sole finger→mouse conversion on Android.
+    // Never filter its MOUSE_BUTTON_DOWN: Display rows and popups need it.
     if (handleDisplayPanel(event)) return true;
     Ui::Output output;
     if (systemUi.HandleEvent(&engine->GetRenderer(), &event, &output))
