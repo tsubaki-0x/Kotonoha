@@ -274,10 +274,10 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     auto app = std::make_unique<App>();
     std::string directory;
     app->options.persistSettings = true;
-    // Both desktop and Android use the shared School Days launcher; Android's
-    // separate Java bootstrap handles SAF imports before opening this UI.
-    // Non-interactive/developer CLI paths can still bypass it below.
-#if (defined(_WIN32) && !defined(__ANDROID__)) || defined(__ANDROID__) || defined(ANDROID)
+    // Desktop owns an ImGui launcher; Android owns a touch-first Java Activity
+    // that handles SAF, language and options before creating this SDL Surface.
+    // Never open a second, desktop-style launcher inside GameActivity.
+#if defined(_WIN32) && !defined(__ANDROID__)
     app->options.launcher = true;
 #else
     app->options.launcher = false;

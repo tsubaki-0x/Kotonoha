@@ -2,6 +2,7 @@ package org.kotonoha.android;
 
 import android.content.Context;
 import android.os.Build;
+import android.os.Bundle;
 import android.view.Display;
 import android.view.Surface;
 import android.view.SurfaceHolder;
@@ -15,6 +16,12 @@ import java.io.File;
 public final class GameActivity extends SDLActivity {
     private int kotonohaPreferredModeId;
     private float kotonohaPreferredRefreshRate;
+
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+        AndroidImmersion.apply(this);
+    }
 
     @Override
     protected SDLSurface createSDLSurface(Context context) {
@@ -98,13 +105,17 @@ public final class GameActivity extends SDLActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        AndroidImmersion.apply(this);
         runOnUiThread(this::applyKotonohaDisplayPreference);
     }
 
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        if (hasFocus) runOnUiThread(this::applyKotonohaDisplayPreference);
+        if (hasFocus) {
+            AndroidImmersion.apply(this);
+            runOnUiThread(this::applyKotonohaDisplayPreference);
+        }
     }
 
     @Override
