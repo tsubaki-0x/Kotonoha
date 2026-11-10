@@ -135,7 +135,12 @@ public final class GameActivity extends SDLActivity {
     }
 
     public String getKotonohaDocumentsDirectory() {
-        return directory(getExternalFilesDir(null), "Android data");
+        // External app-specific storage is optional (for example when media
+        // is absent or temporarily unavailable). Prefer it for continuity
+        // with existing saves; fall back to private storage only when absent.
+        File external = getExternalFilesDir(null);
+        return directory(external != null ? external : getFilesDir(),
+                "Android data");
     }
 
     private static String directory(File directory, String name) {

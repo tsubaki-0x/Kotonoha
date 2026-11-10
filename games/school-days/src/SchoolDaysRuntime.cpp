@@ -3326,7 +3326,16 @@ void Runtime::skipToNextChoice() {
 
 void Runtime::update() {
   const Uint64 now = SDL_GetTicks();
-  const double delta = (now - lastClock) / 1000.0;
+  const double rawDelta = (now - lastClock) / 1000.0;
+#if defined(__ANDROID__) || defined(ANDROID)
+  // Android may stop scheduling native frames for seconds or minutes when the
+  // Activity is backgrounded. Never advance the authored 24-tick narrative or
+  // jump over a timed SETSELECT simply because the phone resumed from sleep.
+  // This also bounds the impact of a single heavy decoder/shader frame.
+  const double delta = std::min(rawDelta, 0.10);
+#else
+  const double delta = rawDelta;
+#endif
   lastClock = now;
   if (currentState == Kotonoha::GameState::Splash) {
     const auto active = GetActiveScenes();
