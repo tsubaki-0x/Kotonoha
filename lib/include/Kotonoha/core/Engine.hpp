@@ -84,8 +84,10 @@ private:
   double eventSeconds = 0;
   std::string activeClockNode();
   void synchronizeNodeClock(double delta);
+#if !defined(KOTONOHA_DISTRIBUTION_BUILD)
   std::unique_ptr<DebugOverlay> debug;
   std::unique_ptr<MCPServer> mcp;
+#endif
   bool agentPaused = false;
   bool translationDumpComplete = false;
   InputActions inputActions;
@@ -163,7 +165,9 @@ public:
   void debugJumpToNode(const std::string &id);
   void loadKtrf(const std::string &path);
   void dumpKtrf(const std::string &path);
+#if !defined(KOTONOHA_DISTRIBUTION_BUILD)
   DebugOverlay &GetDebug() { return *debug; }
+#endif
   Upscaling &GetUpscaler() { return *upscaler; }
   AudioMixer &GetAudio() { return audio; }
   AssetProvider &GetAssets() { return *assets; }

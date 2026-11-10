@@ -17,7 +17,11 @@ namespace SchoolDays {
 
 class Launcher final : public Kotonoha::GameLauncher {
 public:
-  enum class Language { English, Spanish, ChineseSimplified, CustomJson };
+  // GPK locales are opt-in and never silently replace legacy user JSONs.
+  enum class Language {
+    English, Spanish, ChineseSimplified, CustomJson,
+    EnglishGpk, BrazilianGpk, ChineseGpk, SpanishGpk
+  };
 
   static bool validateRoute(const std::string &path, std::string &info);
   static constexpr const char *RouteRememberFile = "route.txt";
@@ -32,6 +36,9 @@ public:
   static bool nonNativeLanguagePreferenceSelected(const std::string &settingsPath);
   static std::string rememberedLxhJsonPath(const std::string &settingsPath,
                                            const std::string &baseJsonPath);
+  // Empty for legacy profiles, otherwise "en", "pt-BR", "es" or "zh-CN".
+  // Throws on a corrupt native-pack profile instead of falling back to EN.
+  static std::string rememberedGpkLocale(const std::string &settingsPath);
   // Used by direct --no-launcher startup after generic settings were loaded.
   static std::string resolveStoredTranslation(const std::string &settingsPath,
                                               const std::string &stored);
@@ -48,11 +55,11 @@ public:
            std::string route = {});
   ~Launcher() override;
   void close();
-  // Pure wall-clock policy; a successful Options save is informational, not
-  // a permanent banner. Failures still remain visible until addressed.
-  static constexpr std::uint64_t SavedNoticeMilliseconds = 4000;
-  static bool savedNoticeExpired(std::uint64_t savedAt,
-                                 std::uint64_t now);
+  // Every launcher status banner (informational or error) is transient.
+  // The underlying validation remains blocking until the user fixes it.
+  static constexpr std::uint64_t StatusNoticeMilliseconds = 5000;
+  static bool statusNoticeExpired(std::uint64_t shownAt,
+                                  std::uint64_t now);
   // Config.DAT lives in Runtime's executable/--documents profile, not beside
   // settings.json. The owning main.cpp MUST supply that exact path explicitly:
   // never guess and overwrite an unrelated commercial save profile.
@@ -91,6 +98,10 @@ public:
   std::string manualLxhJsonPath() const;
   // --scripts overrides the generic asset overlay in SchoolDays::Assets.
   void setScriptOverlayPath(std::string path);
+#if defined(KOTONOHA_DISTRIBUTION_BUILD)
+  // First-run setup; invoked only if no authentic Packs/Script.GPK exists.
+  void promptForOriginalGameFiles();
+#endif
 
 protected:
   bool drawCustomContents() override;
@@ -110,8 +121,12 @@ private:
     int aspect = 0;
   };
   Screen screen = Screen::Main;
+#if defined(KOTONOHA_DISTRIBUTION_BUILD)
+  bool selectGameFilesTab = false;
+#endif
   std::optional<OptionsSnapshot> optionSnapshot;
-  std::optional<std::uint64_t> savedNoticeAt;
+  std::optional<std::uint64_t> statusNoticeAt;
+  std::string lastStatusNotice;
   Kotonoha::TexturePtr launcherArtwork;
   bool artworkAttempted = false;
   std::filesystem::path musicPreferenceFile;
@@ -122,7 +137,13 @@ private:
   bool musicAttempted = false;
   bool audioInitialized = false;
   std::size_t routeOption = 0;
+#if defined(KOTONOHA_DISTRIBUTION_BUILD)
+  // A fresh player install starts with the original English HQ script and
+  // its matching LxH ORS pack. Never require a JSON translation for English.
+  Language selectedLanguage = Language::EnglishGpk;
+#else
   Language selectedLanguage = Language::English;
+#endif
   std::filesystem::path languagePreferenceFile;
   std::string scriptOverlayPath, selectedLocaleBaseJsonPath;
   std::string selectedManualLxhJsonPath, manualLxhBaseJsonPath;

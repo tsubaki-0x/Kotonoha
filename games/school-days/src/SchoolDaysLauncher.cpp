@@ -14,6 +14,9 @@
 #include <Kotonoha/routing/SchoolDaysTitleProfile.hpp>
 #include <Kotonoha/routing/SchoolDaysTranslationCoverage.hpp>
 #include <Kotonoha/routing/SchoolDaysUpscalingPolicy.hpp>
+#include <Kotonoha/routing/SchoolDaysGpkLanguageProfile.hpp>
+#include <Kotonoha/SchoolDaysGpkArchive.hpp>
+#include <Kotonoha/routing/SchoolDaysShaderPresetCatalog.hpp>
 
 #include <imgui.h>
 #include <imgui_stdlib.h>
@@ -75,6 +78,61 @@ bool regularTranslationFile(const std::string &path) {
   const auto resolved = Kotonoha::FileResolver::findAsset(path).value_or(path);
   std::error_code ec;
   return fs::is_regular_file(resolved, ec) && !ec;
+}
+
+// Keep the original user-selected filename when moving the install's
+// translations from a flat directory into translations/jsons. Never
+// substitute an arbitrary similarly named external file or another locale.
+std::string resolveInstalledJson(const std::string &settingsPath,
+                                 const std::string &stored) {
+  if (settingsPath.empty() || stored.empty()) return stored;
+  const fs::path original(stored);
+  if (regularTranslationFile(stored)) return stored;
+  if (original.extension() != ".json" || original.filename().empty())
+    return stored;
+  const auto root = fs::path(settingsPath).parent_path();
+  const auto translations = root / "translations";
+  const auto candidate = original.lexically_normal();
+  // Relocate absolute paths only if they point to this game's own old flat
+  // translation directory (including its new jsons/ child).
+  if (candidate.is_absolute()) {
+    const auto relative = candidate.lexically_relative(translations);
+    if (relative.empty() || relative == "." ||
+        *relative.begin() == "..") return stored;
+  }
+  const auto filename = original.filename();
+  // Shared discovery applies exact filename/case, checks ordinary files and
+  // preserves the legacy flat fallback only when the organized file is absent.
+  const auto managed = Kotonoha::SchoolDaysGpkLanguageProfile::JsonPath(
+      settingsPath, filename.string());
+  if (regularTranslationFile(managed.string()))
+    return fs::absolute(managed).string();
+  for (const auto &local : {translations / "jsons" / filename,
+                            translations / filename,
+                            root / filename}) {
+    if (regularTranslationFile(local.string()))
+      return fs::absolute(local).string();
+  }
+  return stored;
+}
+
+bool isGpkLanguage(SchoolDays::Launcher::Language language) {
+  using Language = SchoolDays::Launcher::Language;
+  return language == Language::EnglishGpk ||
+         language == Language::BrazilianGpk ||
+         language == Language::SpanishGpk ||
+         language == Language::ChineseGpk;
+}
+
+std::string gpkLocale(SchoolDays::Launcher::Language language) {
+  using Language = SchoolDays::Launcher::Language;
+  switch (language) {
+  case Language::EnglishGpk: return "en";
+  case Language::BrazilianGpk: return "pt-BR";
+  case Language::SpanishGpk: return "es";
+  case Language::ChineseGpk: return "zh-CN";
+  default: return {};
+  }
 }
 
 // Runtime reads exactly this game-owned sidecar key, leaving settings.json
@@ -262,13 +320,8 @@ Launcher::Launcher(std::string settingsPath, std::string directory,
       !regularTranslationFile(settings().translationPath)) {
     const auto folder = fs::path(getSettingsPath()).parent_path();
     const auto stored = fs::path(settings().translationPath);
-    for (const auto &candidate : {folder / stored,
-                                  folder / "translations" / stored}) {
-      if (regularTranslationFile(candidate.string())) {
-        settings().translationPath = fs::absolute(candidate).string();
-        break;
-      }
-    }
+    settings().translationPath =
+        resolveInstalledJson(getSettingsPath(), settings().translationPath);
   }
 
   if (!getSettingsPath().empty()) {
@@ -281,13 +334,29 @@ Launcher::Launcher(std::string settingsPath, std::string directory,
           : savedLanguage.name == "chinese" ? Language::ChineseSimplified
                                              : Language::CustomJson;
       if (!savedLanguage.jsonPath.empty())
-        settings().translationPath = savedLanguage.jsonPath;
+        settings().translationPath =
+            resolveInstalledJson(getSettingsPath(), savedLanguage.jsonPath);
       selectedLocaleBaseJsonPath = settings().translationPath;
     } else if (!settings().translationPath.empty())
       selectedLanguage = Language::CustomJson;
     if (!savedLanguage.lxhJsonPath.empty()) {
-      selectedManualLxhJsonPath = savedLanguage.lxhJsonPath;
+      selectedManualLxhJsonPath =
+          resolveInstalledJson(getSettingsPath(), savedLanguage.lxhJsonPath);
       manualLxhBaseJsonPath = settings().translationPath;
+    }
+    // Explicit opt-in GPK profiles are separate from legacy JSON selections.
+    // The existing chinese/zh-CN.json preference is kept untouched until the
+    // player explicitly selects the GPK version in this launcher.
+    const std::string nativeLocale = rememberedGpkLocale(getSettingsPath());
+    if (!nativeLocale.empty()) {
+      selectedLanguage = nativeLocale == "en" ? Language::EnglishGpk
+          : nativeLocale == "pt-BR" ? Language::BrazilianGpk
+          : nativeLocale == "es" ? Language::SpanishGpk
+                                  : Language::ChineseGpk;
+      settings().translationPath.clear();
+      selectedLocaleBaseJsonPath.clear();
+      selectedManualLxhJsonPath.clear();
+      manualLxhBaseJsonPath.clear();
     }
   } else if (!settings().translationPath.empty()) {
     selectedLanguage = Language::CustomJson;
@@ -335,8 +404,9 @@ void Launcher::close() {
   GameLauncher::close();
 }
 
-bool Launcher::savedNoticeExpired(std::uint64_t savedAt, std::uint64_t now) {
-  return now >= savedAt && now - savedAt >= SavedNoticeMilliseconds;
+bool Launcher::statusNoticeExpired(std::uint64_t shownAt,
+                                   std::uint64_t now) {
+  return now >= shownAt && now - shownAt >= StatusNoticeMilliseconds;
 }
 
 void Launcher::toggleMusic() {
@@ -382,9 +452,6 @@ void Launcher::drawMusicToggle(const ImVec2 &position) {
     toggleMusic();
   ImGui::PopStyleColor(4);
   ImGui::PopStyleVar();
-  if (ImGui::IsItemHovered())
-    ImGui::SetTooltip("This switch affects only the launcher. It does not "
-                      "change the game's Title/BGM playback.");
 }
 
 void Launcher::updateTitleMusic() {
@@ -641,7 +708,9 @@ std::string Launcher::rememberedSpanishJsonPath(
   if (settingsPath.empty()) return {};
   const auto file = fs::path(settingsPath).parent_path() / "language.txt";
   const auto saved = readLanguagePreference(file);
-  return saved.name == "spanish" ? saved.jsonPath : std::string{};
+  return saved.name == "spanish"
+             ? resolveInstalledJson(settingsPath, saved.jsonPath)
+             : std::string{};
 }
 
 std::string Launcher::rememberedLocaleJsonPath(
@@ -651,7 +720,7 @@ std::string Launcher::rememberedLocaleJsonPath(
       fs::path(settingsPath).parent_path() / "language.txt");
   return saved.name == "spanish" || saved.name == "chinese" ||
                  saved.name == "custom"
-             ? saved.jsonPath : std::string{};
+             ? resolveInstalledJson(settingsPath, saved.jsonPath) : std::string{};
 }
 
 bool Launcher::nonNativeLanguagePreferenceSelected(
@@ -673,12 +742,22 @@ std::string Launcher::rememberedLxhJsonPath(
   // another language's epilogue. Empty base matches native English only.
   if (saved.jsonPath.empty() || baseJsonPath.empty())
     return saved.jsonPath.empty() && baseJsonPath.empty()
-               ? saved.lxhJsonPath : std::string{};
+               ? resolveInstalledJson(settingsPath, saved.lxhJsonPath)
+               : std::string{};
   const auto oldBase = fs::path(saved.jsonPath).lexically_normal();
   const auto chosen = fs::path(baseJsonPath).lexically_normal();
+  const auto isInstalled = [&](const fs::path &file) {
+    if (file.empty()) return false;
+    if (!file.is_absolute()) return true; // Generic settings use basenames.
+    const auto root = fs::path(settingsPath).parent_path() / "translations";
+    const auto relative = file.lexically_relative(root);
+    return !relative.empty() && relative != "." &&
+           *relative.begin() != "..";
+  };
   if (oldBase == chosen ||
-      (!chosen.is_absolute() && oldBase.filename() == chosen.filename()))
-    return saved.lxhJsonPath;
+      (oldBase.filename() == chosen.filename() &&
+       isInstalled(oldBase) && isInstalled(chosen)))
+    return resolveInstalledJson(settingsPath, saved.lxhJsonPath);
   return {};
 }
 
@@ -690,7 +769,9 @@ bool Launcher::spanishPreferenceSelected(const std::string &settingsPath) {
 
 std::string Launcher::resolveStoredTranslation(
     const std::string &settingsPath, const std::string &stored) {
-  if (stored.empty() || fs::path(stored).is_absolute()) return stored;
+  if (stored.empty()) return stored;
+  const auto resolved = resolveInstalledJson(settingsPath, stored);
+  if (regularTranslationFile(resolved)) return resolved;
   const auto remembered = rememberedLocaleJsonPath(settingsPath);
   if (!remembered.empty() &&
       fs::path(remembered).filename() == fs::path(stored).filename() &&
@@ -699,7 +780,9 @@ std::string Launcher::resolveStoredTranslation(
   if (!settingsPath.empty()) {
     const auto folder = fs::path(settingsPath).parent_path();
     for (const auto &candidate : {folder / stored,
-                                  folder / "translations" / stored})
+                                  folder / "translations" / stored,
+                                  folder / "translations" / "jsons" /
+                                      fs::path(stored).filename()})
       if (regularTranslationFile(candidate.string()))
         return fs::absolute(candidate).string();
   }
@@ -806,6 +889,8 @@ const std::string &Launcher::routeInfo() const {
 
 Launcher::Language Launcher::language() const {
   const auto &path = currentSettings().translationPath;
+  if (isGpkLanguage(selectedLanguage) && path.empty())
+    return selectedLanguage;
   if (selectedLanguage == Language::English && path.empty())
     return Language::English;
   if ((selectedLanguage == Language::Spanish ||
@@ -820,7 +905,7 @@ void Launcher::setLanguage(Language selection) {
   // Manual LxH overrides must never leak from one base language to another.
   selectedManualLxhJsonPath.clear();
   manualLxhBaseJsonPath.clear();
-  if (selection == Language::English) {
+  if (selection == Language::English || isGpkLanguage(selection)) {
     // Clear only on an explicit native-English choice; manual JSON selection
     // in the generic Translation tab otherwise remains untouched.
     settings().translationPath.clear();
@@ -833,6 +918,10 @@ void Launcher::setLanguage(Language selection) {
   }
   selectedLocaleBaseJsonPath = settings().translationPath;
   selectedLanguage = selection;
+}
+
+std::string Launcher::rememberedGpkLocale(const std::string &settingsPath) {
+  return Kotonoha::SchoolDaysGpkLanguageProfile::Read(settingsPath);
 }
 
 void Launcher::setSpanishJsonPath(std::string path) {
@@ -910,7 +999,9 @@ std::filesystem::path Launcher::effectiveOverlayRoot() const {
 std::string Launcher::findSpanishJson() const {
   // Only installed JSON files are offered; no language is inferred from a GPK
   // or from unrelated dictionaries the user selected in the generic tab.
-  constexpr std::array<const char *, 5> names{
+  constexpr std::array<const char *, 9> names{
+      "translations/jsons/es.json", "translations/jsons/es-ES.json",
+      "translations/jsons/spanish.json", "translations/jsons/school-days-es.json",
       "translations/es.json", "translations/es-ES.json",
       "translations/spanish.json", "translations/school-days-es.json",
       "translation/es.json"};
@@ -929,7 +1020,9 @@ std::string Launcher::findSpanishJson() const {
 std::string Launcher::findChineseJson() const {
   // Prefer Simplified Chinese. Preserve the installed file's real casing so
   // non-Windows filesystems can resolve zh-CN.json / zh-CN-lxh.json as a pair.
-  constexpr std::array<const char *, 5> names{
+  constexpr std::array<const char *, 9> names{
+      "translations/jsons/zh-CN.json", "translations/jsons/zh-cn.json",
+      "translations/jsons/zh-Hans.json", "translations/jsons/chinese.json",
       "translations/zh-CN.json", "translations/zh-cn.json",
       "translations/zh-Hans.json", "translations/chinese.json",
       "translation/zh-CN.json"};
@@ -1102,16 +1195,28 @@ void Launcher::drawGraphicsOptions() {
                      1.0f, 4.0f, "%.2fx");
   if (draft.upscaling.factor <= 1.0f)
     ImGui::TextDisabled("Upscaling is OFF at 1.0x, regardless of preset.");
-  if (ImGui::BeginCombo("Shader preset##sd",
-                        Kotonoha::UpscalePresetName(draft.upscaling.preset))) {
-    for (const auto preset : Kotonoha::UpscalePresets())
-      if (ImGui::Selectable(Kotonoha::UpscalePresetName(preset),
-                            draft.upscaling.preset == preset)) {
-        // A shader selection explicitly asks for an active shader pipeline.
-        // Direct3D12 does not execute MPV/GLSL; switch to OpenGL instead of
-        // silently saving a preset that cannot affect rendering.
-        Kotonoha::SchoolDaysUpscalingPolicy::SelectPreset(draft, preset);
+  const char *presetLabel = draft.upscaling.shaderFiles.empty()
+                                ? Kotonoha::UpscalePresetName(draft.upscaling.preset)
+                                : "Custom GLSL (external file)";
+  if (ImGui::BeginCombo("Shader preset##sd", presetLabel)) {
+    namespace Catalog = Kotonoha::SchoolDaysShaderPresetCatalog;
+    for (const auto tier : Catalog::Tiers) {
+      ImGui::SetNextItemOpen(Catalog::Group(draft.upscaling.preset) == tier,
+                             ImGuiCond_Once);
+      if (!ImGui::TreeNode(Catalog::Name(tier))) continue;
+      for (const auto preset : Kotonoha::UpscalePresets()) {
+        if (Catalog::Group(preset) != tier) continue;
+        if (ImGui::Selectable(Kotonoha::UpscalePresetName(preset),
+                              draft.upscaling.shaderFiles.empty() &&
+                                  draft.upscaling.preset == preset)) {
+          // A preset replaces any custom override; otherwise the selected
+          // builtin would be shown but the external GLSL would keep running.
+          draft.upscaling.shaderFiles.clear();
+          Kotonoha::SchoolDaysUpscalingPolicy::SelectPreset(draft, preset);
+        }
       }
+      ImGui::TreePop();
+    }
     ImGui::EndCombo();
   }
   ImGui::TextDisabled("Choosing a shader preset selects OpenGL + MPV and >=2.0x.");
@@ -1130,6 +1235,15 @@ void Launcher::drawGraphicsOptions() {
     draft.renderer = "opengl";
     draft.upscaling.backend = Kotonoha::UpscaleBackend::MPV;
     draft.upscaling.factor = std::max(2.0f, draft.upscaling.factor);
+  }
+  ImGui::TextDisabled("Enter a .glsl / .hook / .frag FILE, not its folder.");
+  ImGui::TextDisabled("FSRCNNX x2 needs >1.4x; x3 >2.3x; x4 >3.3x.");
+  for (const auto &file : Kotonoha::UpscaleShaderFiles(draft.upscaling.shaderFiles)) {
+    if (!Kotonoha::SchoolDaysShaderPresetCatalog::SupportedShaderFile(file)) {
+      ImGui::TextColored({0.72f, 0.18f, 0.14f, 1.0f},
+                         "A folder name is not a shader. Select the .glsl FILE.");
+      break;
+    }
   }
   if (!draft.upscaling.shaderFiles.empty() &&
       !Kotonoha::SchoolDaysUpscalingPolicy::UsesShaders(draft))
@@ -1227,26 +1341,92 @@ void Launcher::drawLanguageOptions() {
   ImGui::Spacing();
   ImGui::SeparatorText("School Days HQ language");
   const auto beforeSelection = language();
-  const char *current = beforeSelection == Language::English
-                            ? "English (original)"
-                            : beforeSelection == Language::Spanish
-                                  ? "Spanish (JSON)"
-                            : beforeSelection == Language::ChineseSimplified
-                                  ? "Chinese - Simplified (JSON)"
-                                  : "Custom JSON (Translation tab)";
+  const char *current = "Custom JSON";
+  switch (beforeSelection) {
+  case Language::English: current = "English (retail, original)"; break;
+  case Language::EnglishGpk: current = "English (Script.GPK)"; break;
+  case Language::BrazilianGpk: current = "Português (Brasil) (Script.GPK)"; break;
+  case Language::SpanishGpk: current = "Español (Script.GPK)"; break;
+  case Language::ChineseGpk: current = "Chinese - Simplified (Script.GPK)"; break;
+  case Language::Spanish: current = "Spanish (legacy JSON)"; break;
+  case Language::ChineseSimplified: current = "Chinese (legacy JSON)"; break;
+  case Language::CustomJson: current = "Custom JSON (legacy)"; break;
+  }
   if (ImGui::BeginCombo("Language", current)) {
-    if (ImGui::Selectable("English (original)", beforeSelection == Language::English))
+    ImGui::SeparatorText("Native translated Script.GPK");
+    if (ImGui::Selectable("English (Script.GPK)",
+                          beforeSelection == Language::EnglishGpk))
+      setLanguage(Language::EnglishGpk);
+    if (ImGui::Selectable("Português (Brasil) (Script.GPK)",
+                          beforeSelection == Language::BrazilianGpk))
+      setLanguage(Language::BrazilianGpk);
+    // The original Spanish NSIS patch modifies controls and media paths.
+    // Enable this option only after certified, retail-compatible GPKs exist.
+    std::error_code spanishError;
+    const bool spanishPackReady = !getSettingsPath().empty() &&
+        fs::is_regular_file(Kotonoha::SchoolDaysGpkLanguageProfile::ScriptPath(
+            getSettingsPath(), "es"), spanishError) &&
+        fs::is_regular_file(Kotonoha::SchoolDaysGpkLanguageProfile::LxhPath(
+            getSettingsPath(), "es"), spanishError);
+    ImGui::BeginDisabled(!spanishPackReady);
+    if (ImGui::Selectable("Español (Script.GPK)",
+                          beforeSelection == Language::SpanishGpk))
+      setLanguage(Language::SpanishGpk);
+    ImGui::EndDisabled();
+    if (!spanishPackReady)
+      ImGui::TextDisabled("Spanish GPK requires certified HQ and LxH archives.");
+    // The downloaded Chinese GPK is an older, incompatible ORS dialect.
+    // Present the native choice only when a separately validated compatible
+    // archive AND seven translated LxH scenes have actually been installed.
+    std::error_code chineseError;
+    const bool chinesePackReady = !getSettingsPath().empty() &&
+        fs::is_regular_file(Kotonoha::SchoolDaysGpkLanguageProfile::ScriptPath(
+            getSettingsPath(), "zh-CN"), chineseError) &&
+        fs::is_regular_file(Kotonoha::SchoolDaysGpkLanguageProfile::LxhPath(
+            getSettingsPath(), "zh-CN"), chineseError);
+    ImGui::BeginDisabled(!chinesePackReady);
+    if (ImGui::Selectable("Chinese - Simplified (Script.GPK)",
+                          beforeSelection == Language::ChineseGpk))
+      setLanguage(Language::ChineseGpk);
+    ImGui::EndDisabled();
+    if (!chinesePackReady)
+      ImGui::TextDisabled("Chinese GPK needs format conversion; legacy JSON still works.");
+    ImGui::SeparatorText("Compatibility / original");
+    if (ImGui::Selectable("English (retail original)", beforeSelection == Language::English))
       setLanguage(Language::English);
-    if (ImGui::Selectable("Spanish (JSON)", beforeSelection == Language::Spanish))
+    if (ImGui::Selectable("Spanish (legacy JSON)", beforeSelection == Language::Spanish))
       setLanguage(Language::Spanish);
-    if (ImGui::Selectable("Chinese - Simplified (JSON)",
+    if (ImGui::Selectable("Chinese (legacy JSON)",
                           beforeSelection == Language::ChineseSimplified))
       setLanguage(Language::ChineseSimplified);
-    if (ImGui::Selectable("Custom JSON", beforeSelection == Language::CustomJson))
+    if (ImGui::Selectable("Custom JSON (legacy)", beforeSelection == Language::CustomJson))
       setLanguage(Language::CustomJson);
     ImGui::EndCombo();
   }
   const auto selected = language();
+  if (isGpkLanguage(selected)) {
+    const auto locale = gpkLocale(selected);
+    if (!getSettingsPath().empty()) {
+      const auto script = Kotonoha::SchoolDaysGpkLanguageProfile::ScriptPath(
+          getSettingsPath(), locale);
+      const auto epilogue = Kotonoha::SchoolDaysGpkLanguageProfile::LxhPath(
+          getSettingsPath(), locale);
+      if (locale == "en")
+        ImGui::TextDisabled("HQ: original Packs/Script.GPK (never duplicated).");
+      else
+        ImGui::TextWrapped("Base HQ GPK: %s", script.string().c_str());
+      ImGui::TextWrapped("Seven LxH endings GPK: %s", epilogue.string().c_str());
+      std::error_code ec;
+      if ((locale != "en" && !fs::is_regular_file(script, ec)) ||
+          !fs::is_regular_file(epilogue, ec))
+        ImGui::TextWrapped(
+            "Missing locale scripts in translations/scripts. This is separate "
+            "from the original Packs/LxH.GPK containing video/audio/cards.");
+    }
+    ImGui::TextDisabled("Original 29 retail GPKs and LxH media stay untouched.");
+    ImGui::TextDisabled("Language texts are read from scripts, not converted to JSON.");
+    return;
+  }
   if (selected == Language::English) {
     ImGui::TextDisabled("English uses the original School Days HQ dialogue.");
   } else {
@@ -1264,7 +1444,7 @@ void Launcher::drawLanguageOptions() {
       const auto initial = settings().translationPath.empty()
                                ? (getSettingsPath().empty() ? std::string{}
                                     : (fs::path(getSettingsPath()).parent_path() /
-                                       "translations").string())
+                                       "translations/jsons").string())
                                : fs::path(settings().translationPath)
                                      .parent_path().string();
       browseFile({{"Translation JSON (*.json)", "json"},
@@ -1288,7 +1468,7 @@ void Launcher::drawLanguageOptions() {
   if (ImGui::Button("Choose LxH JSON...")) {
     const auto initial = lxh.empty()
         ? (getSettingsPath().empty() ? std::string{}
-             : (fs::path(getSettingsPath()).parent_path() / "translations").string())
+             : (fs::path(getSettingsPath()).parent_path() / "translations/jsons").string())
         : fs::path(lxh).parent_path().string();
     browseFile({{"Translation JSON (*.json)", "json"}, {"All files (*)", "*"}},
                initial, [this](const std::string &path) { setLxhJsonPath(path); });
@@ -1355,6 +1535,13 @@ void Launcher::openOptions() {
   screen = Screen::Options;
   if (launcherWindow()) SDL_SetWindowSize(launcherWindow(), 950, 700);
 }
+
+#if defined(KOTONOHA_DISTRIBUTION_BUILD)
+void Launcher::promptForOriginalGameFiles() {
+  selectGameFilesTab = true;
+  openOptions();
+}
+#endif
 
 void Launcher::cancelOptions() {
   if (optionSnapshot) {
@@ -1424,7 +1611,14 @@ void Launcher::drawMainScreen() {
     ImGui::PopFont();
     return clicked;
   };
-  if (button("PLAY##school-days-main", 0)) (void)launch();
+  if (button("PLAY##school-days-main", 0)) {
+#if defined(KOTONOHA_DISTRIBUTION_BUILD)
+    if (!pathValid()) promptForOriginalGameFiles();
+    else (void)launch();
+#else
+    (void)launch();
+#endif
+  }
   if (button("OPTIONS##school-days-main", 1)) openOptions();
   if (button("QUIT##school-days-main", 2)) quit();
   ImGui::PopStyleColor(4);
@@ -1524,8 +1718,10 @@ void Launcher::drawOptionsScreen() {
     }
     if (ImGui::BeginTabItem("Graphics")) {
       drawGraphicsOptions();
+#if !defined(KOTONOHA_DISTRIBUTION_BUILD)
       if (ImGui::CollapsingHeader("Additional engine upscaling settings"))
         drawUpscaling();
+#endif
       ImGui::EndTabItem();
     }
     if (ImGui::BeginTabItem("Audio")) {
@@ -1546,6 +1742,26 @@ void Launcher::drawOptionsScreen() {
       drawLanguageOptions();
       ImGui::EndTabItem();
     }
+#if defined(KOTONOHA_DISTRIBUTION_BUILD)
+    if (ImGui::BeginTabItem("Game Files", nullptr,
+                            selectGameFilesTab ? ImGuiTabItemFlags_SetSelected
+                                               : ImGuiTabItemFlags_None)) {
+      ImGui::SeparatorText("School Days HQ original game files");
+      ImGui::TextWrapped(
+          "Select the folder of your legitimate School Days HQ installation "
+          "(or its Packs folder). Original game assets are not included.");
+      if (!pathValid())
+        ImGui::TextWrapped(
+            "IMPORTANT: Do NOT select this new distribution folder or add "
+            "\\Packs to its path. That folder contains no retail packs. "
+            "Click Folder... and select the ORIGINAL School Days HQ game "
+            "installation containing 29 GPKs and LxH.GPK. "
+            "No save files are required.");
+      drawPrimaryGamePath();
+      ImGui::EndTabItem();
+    }
+    selectGameFilesTab = false;
+#else
     if (ImGui::BeginTabItem("Advanced")) {
       ImGui::SeparatorText("Data files and routing");
       GameLauncher::drawGameOptions();
@@ -1564,6 +1780,7 @@ void Launcher::drawOptionsScreen() {
         drawAdvanced();
       ImGui::EndTabItem();
     }
+#endif
     ImGui::EndTabBar();
   }
   ImGui::EndChild();
@@ -1576,7 +1793,6 @@ void Launcher::drawOptionsScreen() {
   ImGui::SetCursorScreenPos({top.x + size.x - 261.0f, footerY});
   if (ImGui::Button("OK##school-days-options", {112.0f, 31.0f})) {
     if (apply()) {
-      savedNoticeAt = SDL_GetTicks();
       optionSnapshot.reset();
       screen = Screen::Main;
       if (launcherWindow()) SDL_SetWindowSize(launcherWindow(), 950, 600);
@@ -1599,13 +1815,21 @@ void Launcher::drawOptionsScreen() {
 
 bool Launcher::drawCustomContents() {
   if (!launcherWindow() || !launcherRenderer()) return false;
-  if (savedNoticeAt) {
-    if (getStatus() != "Settings saved") {
-      savedNoticeAt.reset();
-    } else if (savedNoticeExpired(*savedNoticeAt, SDL_GetTicks())) {
-      setStatus("", false);
-      savedNoticeAt.reset();
-    }
+  // The banner is a notification, not a modal window: show each new status
+  // for five seconds, including failed validation and reset notifications.
+  // Dismissing the message does not bypass apply()/launch() validation.
+  const std::string currentStatus = getStatus();
+  if (currentStatus != lastStatusNotice) {
+    lastStatusNotice = currentStatus;
+    statusNoticeAt = currentStatus.empty()
+                         ? std::nullopt
+                         : std::optional<std::uint64_t>(SDL_GetTicks());
+  }
+  if (statusNoticeAt &&
+      statusNoticeExpired(*statusNoticeAt, SDL_GetTicks())) {
+    setStatus("", false);
+    statusNoticeAt.reset();
+    lastStatusNotice.clear();
   }
   if (screen == Screen::Main)
     drawMainScreen();
@@ -1617,6 +1841,29 @@ bool Launcher::drawCustomContents() {
 bool Launcher::validate(std::string &error) {
   seedFirstRunDisplayIfPossible();
   if (!GameLauncher::validate(error)) return false;
+  // A folder such as "FSRCNNX" is not a valid shader. Previously it was
+  // persisted without complaint and the MPV loader silently fell back to a
+  // normal copy, making it look as if the user's shader did not work.
+  for (const auto &file : Kotonoha::UpscaleShaderFiles(settings().upscaling.shaderFiles)) {
+    if (!Kotonoha::SchoolDaysShaderPresetCatalog::SupportedShaderFile(file)) {
+      error = "Custom GLSL must be the full path to a .glsl/.hook/.frag file, "
+              "not a folder (e.g. FSRCNNX_x2_16-0-4-1.glsl).";
+      return false;
+    }
+    try {
+      const fs::path shaderPath = fs::u8path(file);
+      std::error_code ec;
+      const auto resolved = Kotonoha::FileResolver::findAsset(shaderPath);
+      if (!fs::is_regular_file(shaderPath, ec) &&
+          (!resolved || !fs::is_regular_file(*resolved, ec))) {
+        error = "Custom GLSL file not found: " + file;
+        return false;
+      }
+    } catch (const std::exception &) {
+      error = "Custom GLSL path is invalid; select an existing shader file.";
+      return false;
+    }
+  }
   if (Kotonoha::SchoolDaysUpscalingPolicy::IncompatibleMpvSelection(settings())) {
     error = "MPV/Anime4K/ArtCNN requires the OpenGL renderer. Select "
             "OpenGL or change Upscaler to Auto/Linear for Direct3D12.";
@@ -1662,6 +1909,73 @@ bool Launcher::validate(std::string &error) {
     }
   }
   const auto &translationFile = settings().translationPath;
+  if (isGpkLanguage(language())) {
+    if (getSettingsPath().empty()) {
+      error = "Native GPK languages need a persistent School Days settings path.";
+      return false;
+    }
+    if (!translationFile.empty()) {
+      error = "Native GPK mode cannot be combined with a base JSON dictionary.";
+      return false;
+    }
+    const auto locale = gpkLocale(language());
+    const auto scriptPath =
+        Kotonoha::SchoolDaysGpkLanguageProfile::ScriptPath(getSettingsPath(), locale);
+    const auto lxhPath =
+        Kotonoha::SchoolDaysGpkLanguageProfile::LxhPath(getSettingsPath(), locale);
+    Kotonoha::SchoolDaysGpkArchive base, epilogue;
+    std::string reason;
+    if (locale != "en") {
+      if (!base.Open(scriptPath, &reason)) {
+        error = "Base " + locale + " Script.GPK cannot be opened: " + reason;
+        return false;
+      }
+      if (base.EntryCount() < 1857 ||
+          base.Lookup("English/00/00-00-A00.ENG.ORS") !=
+              Kotonoha::SchoolDaysGpkLookupStatus::Present) {
+        error = "Selected translated Script.GPK is not compatible with the "
+                "School Days HQ retail ORS names. A converted pack is needed.";
+        return false;
+      }
+    }
+    if (!epilogue.Open(lxhPath, &reason)) {
+      error = "Missing or invalid " + locale + " LxH *language* script GPK at " +
+              lxhPath.string() + ": " + reason +
+              ". This is different from original Packs/LxH.GPK "
+              "(which contains videos, audio and cards). "
+              "Put the matching *-lxh.GPK in translations/scripts.";
+      return false;
+    }
+    if (epilogue.EntryCount() != 7) {
+      error = "LxH language GPK must contain exactly the seven extended ORS.";
+      return false;
+    }
+    for (const auto ending : Kotonoha::SchoolDaysLxhContent::Endings) {
+      const std::string logical =
+          "Script/English/05/" + std::string(ending) + ".ENG.ORS";
+      if (epilogue.Lookup(logical) != Kotonoha::SchoolDaysGpkLookupStatus::Present) {
+        error = "LxH language GPK missing translated ending " + logical;
+        return false;
+      }
+    }
+    // The translated packs contain text only; the media and original assets
+    // must still be present in the independent retail+LxH installation.
+    try {
+      SchoolDays::Assets sourceAssets(
+          Kotonoha::gameDataDirectory(path()), effectiveOverlayRoot().string());
+      bool mediaInstalled = false;
+      if (!checkIntegratedLxhContent(sourceAssets, &mediaInstalled, error))
+        return false;
+      if (!mediaInstalled) {
+        error = "Native GPK locale requires the original integrated LxH media.";
+        return false;
+      }
+    } catch (const std::exception &e) {
+      error = std::string("Cannot validate unchanged retail data: ") + e.what();
+      return false;
+    }
+    return true;
+  }
   if (language() != Language::English &&
       !regularTranslationFile(translationFile)) {
     error = "Selected non-English locale has no valid base JSON. Choose a "
@@ -1780,14 +2094,36 @@ void Launcher::save() {
       throw std::runtime_error("Cannot persist custom GLSL paths: " + error);
   }
   if (getSettingsPath().empty()) return;
+  const auto nativeProfile =
+      Kotonoha::SchoolDaysGpkLanguageProfile::Sidecar(getSettingsPath());
+  if (isGpkLanguage(language())) {
+    const std::string locale = gpkLocale(language());
+    Kotonoha::writeTextFileAtomically(
+        nativeProfile.string(),
+        std::string(Kotonoha::SchoolDaysGpkLanguageProfile::Version) +
+            "\n" + locale + "\n");
+  } else {
+    // Switching back to the original script or an existing JSON translation
+    // explicitly disables GPK overrides without deleting the user's packs.
+    std::error_code ec;
+    (void)fs::remove(nativeProfile, ec);
+    if (ec)
+      throw std::runtime_error("Cannot disable old GPK language profile: " +
+                               ec.message());
+  }
   if (!languagePreferenceFile.empty()) {
     const char *value = language() == Language::Spanish ? "spanish"
                         : language() == Language::ChineseSimplified ? "chinese"
-                        : language() == Language::English ? "english" : "custom";
+                        : language() == Language::English ? "english"
+                        : language() == Language::EnglishGpk ? "english-gpk"
+                        : language() == Language::BrazilianGpk ? "brazilian-gpk"
+                        : language() == Language::SpanishGpk ? "spanish-gpk"
+                        : language() == Language::ChineseGpk ? "chinese-gpk"
+                        : "custom";
     std::string payload = std::string(value) + "\n";
-    if (language() != Language::English)
+    if (language() != Language::English && !isGpkLanguage(language()))
       payload += settings().translationPath + "\n";
-    if (!manualLxhJsonPath().empty()) {
+    if (!isGpkLanguage(language()) && !manualLxhJsonPath().empty()) {
       if (language() == Language::English) payload += "\n";
       payload += "lxh-json=" + manualLxhJsonPath() + "\n";
     }

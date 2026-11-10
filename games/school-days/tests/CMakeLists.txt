@@ -22,6 +22,25 @@ add_test(NAME SchoolDaysBridgeTest COMMAND SchoolDaysBridgeTest
 set_tests_properties(SchoolDaysBridgeTest PROPERTIES FIXTURES_REQUIRED school_days_assets)
 
 add_executable(SchoolDaysSceneTimelineTest SchoolDaysSceneTimelineTest.cpp)
+add_executable(SchoolDaysShaderPresetCatalogTest SchoolDaysShaderPresetCatalogTest.cpp)
+target_link_libraries(SchoolDaysShaderPresetCatalogTest PRIVATE school_days)
+add_test(NAME SchoolDaysShaderPresetCatalogTest COMMAND SchoolDaysShaderPresetCatalogTest)
+add_executable(SchoolDaysGpkLanguageProfileTest SchoolDaysGpkLanguageProfileTest.cpp)
+target_link_libraries(SchoolDaysGpkLanguageProfileTest PRIVATE school_days)
+add_test(NAME SchoolDays.GpkLanguageProfile COMMAND SchoolDaysGpkLanguageProfileTest)
+add_executable(SchoolDaysTranslationLayoutTest SchoolDaysTranslationLayoutTest.cpp)
+target_link_libraries(SchoolDaysTranslationLayoutTest PRIVATE school_days)
+add_test(NAME SchoolDays.TranslationLayout COMMAND SchoolDaysTranslationLayoutTest)
+add_executable(SchoolDaysTranslatedGpkMountTest SchoolDaysTranslatedGpkMountTest.cpp)
+target_link_libraries(SchoolDaysTranslatedGpkMountTest PRIVATE school_days ZLIB::ZLIB)
+add_test(NAME SchoolDays.TranslatedGpkMount COMMAND SchoolDaysTranslatedGpkMountTest)
+add_executable(SchoolDaysLxhRetailSaveProbe SchoolDaysLxhRetailSaveProbe.cpp)
+target_link_libraries(SchoolDaysLxhRetailSaveProbe PRIVATE school_days)
+# Not registered in CTest: opt-in only for private retail packs and saves.
+add_executable(SchoolDaysExternalShaderGpuProbe SchoolDaysExternalShaderGpuProbe.cpp)
+target_link_libraries(SchoolDaysExternalShaderGpuProbe PRIVATE school_days)
+# Deliberately not registered as CTest: only opt-in machines with a real
+# Windows/OpenGL driver should run this executable with a trusted shader file.
 target_link_libraries(SchoolDaysSceneTimelineTest PRIVATE school_days)
 add_test(NAME SchoolDaysSceneTimelineTest COMMAND SchoolDaysSceneTimelineTest)
 

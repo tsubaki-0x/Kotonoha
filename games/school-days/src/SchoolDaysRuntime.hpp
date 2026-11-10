@@ -34,6 +34,7 @@
 #include <Kotonoha/routing/SchoolDaysSaveStorage.hpp>
 #include <Kotonoha/routing/SchoolDaysSaveProvenance.hpp>
 #include <Kotonoha/routing/SchoolDaysSystemUi.hpp>
+#include <array>
 #include <memory>
 #include <optional>
 #include <unordered_map>
@@ -283,12 +284,20 @@ class Runtime final : public Kotonoha::Runtime {
   // these fields. The Android panel above intentionally keeps its own flow.
   Kotonoha::EngineSettings desktopDisplayDraft;
   bool desktopDisplayDraftActive = false;
+  // Renderer changes selected while running Direct3D are persisted for restart.
+  std::optional<Kotonoha::EngineSettings> desktopPendingRendererRestart;
   enum class DesktopDisplayPopup : uint8_t {
     None, Resolution, Upscaler, Shader, GlslPath
   };
   DesktopDisplayPopup desktopDisplayPopup = DesktopDisplayPopup::None;
   int desktopDisplayPopupHover = -1;
   int desktopDisplayPopupScroll = 0;
+  // Expandable Low / Medium / High shader folders in the in-game Display UI.
+  std::array<bool, 3> desktopShaderExpanded{false, false, false};
+  // One player-selected folder is shown as a separate expandable shader group.
+  std::filesystem::path desktopShaderDirectory;
+  std::vector<std::filesystem::path> desktopShaderFiles;
+  bool desktopCustomShaderExpanded = false;
   std::string desktopDisplayPathEdit;
   std::vector<Kotonoha::DisplayModeChoice> desktopDisplayModes;
 #endif
@@ -393,7 +402,7 @@ class Runtime final : public Kotonoha::Runtime {
   MenuBarProjection menuBarProjection() const;
   void updateMenuBar(Kotonoha::SchoolDaysMenuBarPresenter &presenter, uint32_t nowMs);
   void loadCheckpoint(int selector);
-  void setStatus(std::string message);
+  void setStatus(std::string message, bool playerFacingFailure = false);
   bool modal() const;
   bool panelOpen() const;
   void closePanels();

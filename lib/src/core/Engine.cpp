@@ -8,9 +8,13 @@
 #include <Kotonoha/core/Engine.hpp>
 #include <Kotonoha/core/FileSystem.hpp>
 #include <Kotonoha/core/UI.hpp>
+#if !defined(KOTONOHA_DISTRIBUTION_BUILD)
 #include <Kotonoha/debug/DebugOverlay.hpp>
+#endif
 #include <Kotonoha/events/BackAction.hpp>
+#if !defined(KOTONOHA_DISTRIBUTION_BUILD)
 #include <Kotonoha/mcp/MCPServer.hpp>
+#endif
 #include <Kotonoha/mobile/AndroidDisplay.hpp>
 #include <Kotonoha/script/TimelinePlayer.hpp>
 
@@ -22,6 +26,7 @@
 
 namespace Kotonoha {
 
+#if !defined(KOTONOHA_DISTRIBUTION_BUILD)
 std::vector<DebugNode> Engine::debugNodes() {
   auto custom = runtime.debugNodes();
   if (!custom.empty())
@@ -88,6 +93,7 @@ void Engine::dumpKtrf(const std::string &path) {
   }
   SDL_LogInfo(LogCore, "Dumped KTRF: %s", path.c_str());
 }
+#endif
 
 std::string EngineOptions::assetOverlayDirectory() const {
   if (assetOverlaySpecified)
@@ -218,9 +224,12 @@ Engine::Engine(Runtime &run, EngineOptions options)
   audio.setUserVolumes(settings.channelVolumes);
   timeline = std::make_unique<TimelinePlayer>(*this);
   forcedSubtitles = std::make_unique<ForcedSubtitleRenderer>(*this);
+#if !defined(KOTONOHA_DISTRIBUTION_BUILD)
   debug = std::make_unique<DebugOverlay>(*this);
+#endif
   configureRenderSpace(RenderSpace::Novel);
   runtime.init(*this);
+#if !defined(KOTONOHA_DISTRIBUTION_BUILD)
   if (!options.dumpTranslationPath.empty()) {
     dumpTranslation(options.dumpTranslationPath);
     translationDumpComplete = true;
@@ -228,6 +237,7 @@ Engine::Engine(Runtime &run, EngineOptions options)
   if (options.enableMCP || options.mcpPort)
     mcp = std::make_unique<MCPServer>(*this, options.mcpFileRoot,
                                       options.mcpPort);
+#endif
   frameClock.reset();
   SDL_LogInfo(LogCore, "Engine started (%s renderer)",
               SDL_GetRendererName(renderer.get()));
@@ -402,8 +412,11 @@ void Engine::openSettings() {
 
 bool Engine::isStoryPaused() const {
   return agentPaused || runtime.hasPausingScene() ||
-         (settingsMenu && settingsMenu->isOpen()) ||
-         (debug && debug->pausesStory());
+         (settingsMenu && settingsMenu->isOpen())
+#if !defined(KOTONOHA_DISTRIBUTION_BUILD)
+         || (debug && debug->pausesStory())
+#endif
+      ;
 }
 
 void Engine::setAgentPaused(bool value) {
@@ -501,6 +514,7 @@ void Engine::synchronizeNodeClock(double delta) {
   }
 }
 
+#if !defined(KOTONOHA_DISTRIBUTION_BUILD)
 void Engine::advanceTimeline(double seconds) {
   if (!std::isfinite(seconds) || seconds < 0 || seconds > 60)
     throw std::invalid_argument(
@@ -543,6 +557,7 @@ void Engine::advanceTimeline(double seconds) {
   }
   frameClock.reset();
 }
+#endif
 
 void Engine::setTranslation(const std::string &section,
                             const std::string &original,
@@ -647,13 +662,17 @@ SDL_AppResult Engine::dispatchEvent(EventPtr event) {
     return SDL_APP_SUCCESS;
   const bool synthesizeTouch =
       !runtime.continuousTouch() && !settingsMenu->isOpen();
+#if !defined(KOTONOHA_DISTRIBUTION_BUILD)
   runtime.devInputProcessed(*event);
+#endif
   synchronizeTimeline();
+#if !defined(KOTONOHA_DISTRIBUTION_BUILD)
   const bool debugConsumed = debug->handleEvent(*event);
   if (debugConsumed) {
     timeline->setPaused(isStoryPaused());
     return SDL_APP_CONTINUE;
   }
+#endif
   configureRenderSpace(RenderSpace::Screen);
   SDL_Event screenEvent = *event;
   if (!SDL_ConvertEventToRenderCoordinates(renderer.get(), &screenEvent))
@@ -777,13 +796,19 @@ SDL_AppResult Engine::Iterate() {
     return SDL_APP_SUCCESS;
   configureRenderSpace(RenderSpace::Novel);
   synchronizeTimeline();
+#if !defined(KOTONOHA_DISTRIBUTION_BUILD)
   if (mcp && !mcp->pump())
     return SDL_APP_SUCCESS;
   if (!runtime.devPauseRequested() || runtime.devConsumeStep()) runtime.update();
   else runtime.devIdle();
+#else
+  runtime.update();
+#endif
   synchronizeNodeClock(0);
   forcedSubtitles->updateForActiveNode();
+#if !defined(KOTONOHA_DISTRIBUTION_BUILD)
   debug->update();
+#endif
 
   // Clear the native output first so the letterbox outside the fitted Novel
   // presentation remains deterministic even when the Novel itself is rendered
@@ -874,9 +899,11 @@ SDL_AppResult Engine::Iterate() {
     }
     configureRenderSpace(RenderSpace::Screen);
   }
+#if !defined(KOTONOHA_DISTRIBUTION_BUILD)
   debug->renderHUD(*renderer);
   debug->renderMenu(*renderer);
   runtime.devControlPump(*renderer);
+#endif
   SDL_RenderPresent(renderer.get());
   configureRenderSpace(RenderSpace::Novel);
   return SDL_APP_CONTINUE;

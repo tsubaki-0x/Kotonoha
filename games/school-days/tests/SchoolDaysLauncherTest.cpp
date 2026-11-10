@@ -159,11 +159,11 @@ int main(int argc, char **argv) {
       require(!Policy::UsesShaders(values),
               "Disabled backend must not advertise shader effects");
     }
-    require(!SchoolDays::Launcher::savedNoticeExpired(1000, 4999) &&
-                SchoolDays::Launcher::savedNoticeExpired(1000, 5000) &&
-                SchoolDays::Launcher::savedNoticeExpired(1000, 9000) &&
-                !SchoolDays::Launcher::savedNoticeExpired(1000, 999),
-            "Options success notice did not expire at the four-second boundary");
+    require(!SchoolDays::Launcher::statusNoticeExpired(1000, 5999) &&
+                SchoolDays::Launcher::statusNoticeExpired(1000, 6000) &&
+                SchoolDays::Launcher::statusNoticeExpired(1000, 9000) &&
+                !SchoolDays::Launcher::statusNoticeExpired(1000, 999),
+            "Launcher notification did not expire at the five-second boundary");
     require(argc == 4,
             "Usage: SchoolDaysLauncherTest route fixtures executable");
     const fs::path original = fs::absolute(argv[1]);
@@ -228,6 +228,38 @@ int main(int argc, char **argv) {
             "Custom route fixture must differ from the default");
     const auto settings = (temporary.path / "settings.json").string();
     const auto invalid = (temporary.path / "invalid.ktnroute").string();
+
+    // A user may reorganize installed dictionaries into translations/jsons
+    // while language.txt and settings.json still reference the old flat
+    // location. Rebind only the same filename, never to another locale.
+    {
+      const auto root = temporary.path / "json-layout";
+      const auto profile = (root / "settings.json").string();
+      const auto jsons = root / "translations/jsons";
+      write(jsons / "es.json", "{\"0\":{\"Hello\":\"Hola\"}}");
+      write(jsons / "es-lxh.json", "{\"0\":{\"Hello\":\"Hola\"}}");
+      write(jsons / "zh-CN.json", "{\"0\":{\"Hello\":\"你好\"}}");
+      const auto staleBase = (root / "translations/es.json").string();
+      const auto staleLxh = (root / "translations/es-lxh.json").string();
+      write(root / "language.txt",
+            "spanish\n" + staleBase + "\nlxh-json=" + staleLxh + "\n");
+      require(SchoolDays::Launcher::rememberedLocaleJsonPath(profile) ==
+                  fs::absolute(jsons / "es.json").string(),
+              "Old Spanish language.txt path failed to rebind into jsons");
+      require(SchoolDays::Launcher::resolveStoredTranslation(profile, "es.json") ==
+                  fs::absolute(jsons / "es.json").string() &&
+                  SchoolDays::Launcher::resolveStoredTranslation(profile, staleBase) ==
+                      fs::absolute(jsons / "es.json").string(),
+              "Old JSON basename or flat path failed new folder discovery");
+      require(SchoolDays::Launcher::rememberedLxhJsonPath(
+                  profile, (jsons / "es.json").string()) ==
+                  fs::absolute(jsons / "es-lxh.json").string(),
+              "Old Spanish LxH sidecar path failed new folder discovery");
+      require(SchoolDays::Launcher::resolveStoredTranslation(
+                  profile, "missing-other-locale.json") ==
+                  "missing-other-locale.json",
+              "Missing translated language silently fell back to another JSON");
+    }
 
     // Synthetic, no-display policy: the monitor's native mode seeds only a
     // fresh launcher profile. Persisted choices always survive restart.

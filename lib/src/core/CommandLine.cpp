@@ -12,12 +12,15 @@ CommandLine::CommandLine(std::string program, EngineOptions &engine)
   flag("--help", "Show engine and game options without opening the game",
        helpRequested);
   alias("--help", "-h");
+#if !defined(KOTONOHA_DISTRIBUTION_BUILD)
   option("--config", "FILE", "Load and save engine settings",
          engine.settingsPath);
   flag("--no-config", "Do not persist engine settings",
        [&engine] { engine.persistSettings = false; });
+#endif
   option("--renderer", "NAME", "SDL renderer override (requires restart)",
          engine.rendererOverride);
+#if !defined(KOTONOHA_DISTRIBUTION_BUILD)
   option("--log", "FILE", "Write engine logs to this file", engine.logPath);
   flag("--mcp", "Enable the stdio MCP interface", engine.enableMCP);
   option("--mcp-port", "PORT", "Serve MCP over TCP on 127.0.0.1:PORT",
@@ -66,6 +69,7 @@ CommandLine::CommandLine(std::string program, EngineOptions &engine)
              throw std::invalid_argument("--frames must be a positive integer");
            frames = count;
          });
+#endif
 }
 
 void CommandLine::option(std::string name, std::string value,

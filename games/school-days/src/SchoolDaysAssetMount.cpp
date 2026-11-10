@@ -1,6 +1,7 @@
 #include <Kotonoha/SchoolDaysAssetMount.hpp>
 #include <Kotonoha/SchoolDaysImageAssetResolver.hpp>
 #include <Kotonoha/core/AssetProvider.hpp>
+#include <Kotonoha/parsers/Documents.hpp>
 #include <Kotonoha/routing/SchoolDaysLxhContent.hpp>
 
 #include <algorithm>
@@ -13,7 +14,10 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <optional>
+#include <set>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace Kotonoha {
 namespace {
@@ -21,7 +25,279 @@ namespace {
 std::mutex gMountMutex;
 std::shared_ptr<const SchoolDaysGpkAssetStore> gMount;
 std::shared_ptr<const SchoolDaysGpkArchive> gIntegratedLxh;
+std::optional<SchoolDaysTranslatedGpkSelection> gTranslatedSelection;
+bool gTranslatedSelectionInvalid = false;
+std::shared_ptr<const SchoolDaysGpkArchive> gTranslatedScript;
+std::shared_ptr<const SchoolDaysGpkArchive> gTranslatedLxh;
 std::shared_ptr<const AssetOverlay> gOverlay;
+
+bool Fail(std::string *error, const char *text);
+bool Fail(std::string *error, const std::string &text);
+
+bool RejectTranslatedConfiguration(std::string *error,
+                                   const std::string &reason) {
+  // Even if a future caller accidentally ignores Configure's false return,
+  // the mount cannot silently start with the previous English retail assets.
+  std::lock_guard<std::mutex> guard(gMountMutex);
+  if (!gMount && !gIntegratedLxh) gTranslatedSelectionInvalid = true;
+  return Fail(error, reason);
+}
+
+struct TranslatedMountSnapshot {
+  std::shared_ptr<const SchoolDaysGpkArchive> script;
+  std::shared_ptr<const SchoolDaysGpkArchive> lxh;
+};
+
+TranslatedMountSnapshot CurrentTranslated() {
+  std::lock_guard<std::mutex> guard(gMountMutex);
+  return {gTranslatedScript, gTranslatedLxh};
+}
+
+bool AsciiStartsWith(std::string_view value, std::string_view prefix) {
+  if (value.size() < prefix.size()) return false;
+  for (size_t i = 0u; i < prefix.size(); ++i)
+    if (std::tolower(static_cast<unsigned char>(value[i])) !=
+        std::tolower(static_cast<unsigned char>(prefix[i]))) return false;
+  return true;
+}
+
+bool AsciiEndsWith(std::string_view value, std::string_view suffix) {
+  if (value.size() < suffix.size()) return false;
+  return AsciiStartsWith(value.substr(value.size() - suffix.size()), suffix);
+}
+
+std::string NormalizedLogical(std::string_view logical) {
+  std::string value(logical);
+  std::replace(value.begin(), value.end(), '\\', '/');
+  return value;
+}
+
+constexpr std::string_view kTranslatedScriptVirtualSuffix =
+    "/__sd_localized_script__";
+
+// A suffix preserves Script/English for Assets::listAsset prefix filtering,
+// while preventing the AssetProvider's loose overlay from shadowing translated
+// ORS: Assets::overlayId returns this marked logical path verbatim. The reader
+// removes the suffix before any validated GPK access; it is never on disk.
+std::string UnmarkTranslatedLogical(std::string_view logical) {
+  std::string path = NormalizedLogical(logical);
+  if (AsciiEndsWith(path, kTranslatedScriptVirtualSuffix))
+    path.resize(path.size() - kTranslatedScriptVirtualSuffix.size());
+  return path;
+}
+
+bool IsHqScriptOrs(std::string_view logical) {
+  const auto path = UnmarkTranslatedLogical(logical);
+  return AsciiStartsWith(path, "Script/English/") &&
+         AsciiEndsWith(path, ".ORS") &&
+         !SchoolDaysLxhContent::IsPackResource(path);
+}
+
+bool IsMarkedTranslatedScript(std::string_view logical) {
+  return AsciiEndsWith(NormalizedLogical(logical), kTranslatedScriptVirtualSuffix);
+}
+
+bool SameSelection(const std::optional<SchoolDaysTranslatedGpkSelection> &a,
+                   const std::optional<SchoolDaysTranslatedGpkSelection> &b) {
+  if (a.has_value() != b.has_value()) return false;
+  if (!a) return true;
+  return a->locale == b->locale && a->scriptGpk == b->scriptGpk &&
+         a->lxhGpk == b->lxhGpk;
+}
+
+bool IsLxhScriptOrs(std::string_view logical) {
+  const auto path = UnmarkTranslatedLogical(logical);
+  return SchoolDaysLxhContent::IsPackResource(path) &&
+         AsciiEndsWith(path, ".ORS");
+}
+
+std::string ScriptRelative(std::string_view logical) {
+  const std::string path = UnmarkTranslatedLogical(logical);
+  return AsciiStartsWith(path, "Script/") ? path.substr(7u) : std::string();
+}
+
+bool IsOrsName(const std::u16string &name) {
+  if (name.size() < 4u) return false;
+  constexpr char16_t suffix[] = u".ORS";
+  for (size_t i = 0u; i < 4u; ++i) {
+    char16_t actual = name[name.size() - 4u + i];
+    if (actual >= u'a' && actual <= u'z') actual -= (u'a' - u'A');
+    if (actual != suffix[i]) return false;
+  }
+  return true;
+}
+
+bool SameOrsStructure(const std::vector<uint8_t> &reference,
+                      const std::vector<uint8_t> &translation,
+                      std::string *error) {
+  OrsDocument original(Kotonoha_OrsParserBytes(reference.data(), reference.size()));
+  OrsDocument localized(Kotonoha_OrsParserBytes(translation.data(), translation.size()));
+  if (!original.get().data || !original.get().size ||
+      !localized.get().data || !localized.get().size)
+    return Fail(error, "Translated ORS or its reference could not be parsed");
+  if (original.get().size != localized.get().size)
+    return Fail(error, "Translated ORS event count differs from original");
+  const auto samePath = [](const char *left, const char *right) {
+    return left && right ? std::strcmp(left, right) == 0 : left == right;
+  };
+  const Kotonoha_orsEvent *a = original.get().data;
+  const Kotonoha_orsEvent *b = localized.get().data;
+  for (; a && b; a = a->next, b = b->next) {
+    if (a->command != b->command || a->startTick != b->startTick ||
+        a->endTick != b->endTick)
+      return Fail(error, "Translated ORS command sequence/timing differs from original");
+    if (a->command == SetSELECT &&
+        (!a->data.set_select || !b->data.set_select ||
+         a->data.set_select->size != b->data.set_select->size))
+      return Fail(error, "Translated ORS choice structure differs from original");
+    // A localization may change dialogue, speaker labels and choice wording.
+    // Timed commands, media filenames and non-text control arguments must
+    // remain intact, or the language pack could change the game's behavior.
+    switch (a->command) {
+    case CREATE_BG:
+      if (!a->data.create_bg || !b->data.create_bg ||
+          !samePath(a->data.create_bg->a, b->data.create_bg->a) ||
+          !samePath(a->data.create_bg->path, b->data.create_bg->path))
+        return Fail(error, "Translated ORS background command changed");
+      break;
+    case PLAY_SE:
+      if (!a->data.play_se || !b->data.play_se ||
+          a->data.play_se->a != b->data.play_se->a ||
+          !samePath(a->data.play_se->path, b->data.play_se->path))
+        return Fail(error, "Translated ORS sound effect command changed");
+      break;
+    case PLAY_MOVIE:
+      if (!a->data.play_movie || !b->data.play_movie ||
+          a->data.play_movie->a != b->data.play_movie->a ||
+          !samePath(a->data.play_movie->path, b->data.play_movie->path))
+        return Fail(error, "Translated ORS movie command changed");
+      break;
+    case PLAY_BGM:
+    case END_BGM:
+      if (!a->data.path_end || !b->data.path_end ||
+          !samePath(a->data.path_end->path, b->data.path_end->path))
+        return Fail(error, "Translated ORS BGM command changed");
+      break;
+    case PLAY_VOICE:
+      if (!a->data.play_voice || !b->data.play_voice ||
+          a->data.play_voice->a != b->data.play_voice->a ||
+          !samePath(a->data.play_voice->path, b->data.play_voice->path))
+        return Fail(error, "Translated ORS voice resource changed");
+      break;
+    case MOVE_SOM:
+      if (!a->data.move_som || !b->data.move_som ||
+          a->data.move_som->numeric != b->data.move_som->numeric)
+        return Fail(error, "Translated ORS animation command changed");
+      break;
+    case UNKNOWN:
+      if (!a->data.unknown || !b->data.unknown ||
+          !samePath(a->data.unknown->line, b->data.unknown->line))
+        return Fail(error, "Translated ORS contains different unknown commands");
+      break;
+    default: break;
+    }
+  }
+  return (!a && !b) ? true :
+      Fail(error, "Translated ORS linked event sequence differs from original");
+}
+
+bool InspectTranslatedEntry(const SchoolDaysGpkArchive &archive,
+                            size_t index, std::string *error) {
+  const auto &entry = archive.Index().Entries()[index];
+  if (!IsOrsName(entry.filename)) return true;
+  if (entry.storedLength == 0u ||
+      (!entry.IsRaw() && !entry.IsDeflate()))
+    return Fail(error, "Translated GPK contains an empty or unsupported ORS");
+  std::vector<uint8_t> decoded;
+  std::string failure;
+  if (!archive.ReadEntry(index, &decoded, &failure) || decoded.empty())
+    return Fail(error, "Translated GPK contains unreadable/empty ORS: " + failure);
+  return true;
+}
+
+std::vector<std::u16string> SortedEntryNames(const SchoolDaysGpkArchive &archive) {
+  std::vector<std::u16string> names;
+  names.reserve(archive.EntryCount());
+  for (const auto &entry : archive.Index().Entries())
+    names.push_back(entry.filename);
+  std::sort(names.begin(), names.end());
+  return names;
+}
+
+bool ValidateTranslatedScript(const SchoolDaysGpkArchive &selected,
+                              const SchoolDaysGpkArchive &retail,
+                              std::string *error) {
+  // Compare the complete PIDX path set, including each original subdirectory
+  // and filename. Matching only an arbitrary ORS subset would silently mix
+  // language assets from the translated GPK and the original retail GPK.
+  const auto expected = SortedEntryNames(retail);
+  if (selected.EntryCount() != retail.EntryCount() ||
+      SortedEntryNames(selected) != expected)
+    return Fail(error, "Translated Script.GPK must match the complete retail "
+                       "Script.GPK entry names and directory structure");
+  std::unordered_map<std::u16string, size_t> retailIndex;
+  const auto &retailEntries = retail.Index().Entries();
+  retailIndex.reserve(retailEntries.size());
+  for (size_t i = 0; i < retailEntries.size(); ++i)
+    retailIndex.emplace(retailEntries[i].filename, i);
+  bool foundOrs = false;
+  for (size_t i = 0u; i < selected.EntryCount(); ++i) {
+    const auto &entry = selected.Index().Entries()[i];
+    if (IsOrsName(entry.filename)) foundOrs = true;
+    if (!InspectTranslatedEntry(selected, i, error)) return false;
+    if (!IsOrsName(entry.filename)) continue;
+    const auto it = retailIndex.find(entry.filename);
+    if (it == retailIndex.end())
+      return Fail(error, "Translated ORS is absent from retail index");
+    std::vector<uint8_t> base, translated;
+    std::string failure;
+    if (!retail.ReadEntry(it->second, &base, &failure) ||
+        !selected.ReadEntry(i, &translated, &failure))
+      return Fail(error, "Cannot inspect corresponding ORS files: " + failure);
+    if (!SameOrsStructure(base, translated, &failure))
+      return Fail(error, "Translated Script.GPK ORS structure mismatch: " + failure);
+  }
+  return foundOrs ? true : Fail(error, "Translated Script.GPK contains no ORS");
+}
+
+bool ValidateTranslatedLxh(const SchoolDaysGpkArchive &selected,
+                           const SchoolDaysGpkArchive &original,
+                           std::string *error) {
+  std::set<std::u16string> expectedOrs;
+  std::set<std::u16string> expectedAll;
+  for (const std::string &logical : SchoolDaysLxhContent::PackEntries()) {
+    const std::u16string name(logical.begin(), logical.end()); // known ASCII paths
+    expectedAll.insert(name);
+    if (AsciiEndsWith(logical, ".ORS")) expectedOrs.insert(name);
+  }
+  std::set<std::u16string> actual;
+  for (size_t i = 0u; i < selected.EntryCount(); ++i) {
+    const auto &entry = selected.Index().Entries()[i];
+    actual.insert(entry.filename);
+    if (!InspectTranslatedEntry(selected, i, error)) return false;
+  }
+  // Language packs may ship just seven translated ORS, or an exact 28-entry
+  // mirror. Even for a 28-entry mirror, all media remain owned by LxH.GPK.
+  if (actual.size() != selected.EntryCount() ||
+      (actual != expectedOrs && actual != expectedAll))
+    return Fail(error, "Translated LxH GPK must contain exactly the seven "
+                       "expected ORS (or the exact original 28-entry layout)");
+  for (const auto &path : SchoolDaysLxhContent::PackEntries()) {
+    if (!AsciiEndsWith(path, ".ORS")) continue;
+    size_t selectedIndex = 0, originalIndex = 0;
+    if (selected.Lookup(path, &selectedIndex) != SchoolDaysGpkLookupStatus::Present ||
+        original.Lookup(path, &originalIndex) != SchoolDaysGpkLookupStatus::Present)
+      return Fail(error, "Translated LxH GPK has an ambiguous or missing epilogue ORS: " + path);
+    std::vector<uint8_t> base, translated;
+    std::string failure;
+    if (!original.ReadEntry(originalIndex, &base, &failure) ||
+        !selected.ReadEntry(selectedIndex, &translated, &failure))
+      return Fail(error, "Cannot compare LxH ORS structure " + path + ": " + failure);
+    if (!SameOrsStructure(base, translated, &failure))
+      return Fail(error, "Translated LxH ORS structure mismatch " + path + ": " + failure);
+  }
+  return true;
+}
 
 std::shared_ptr<const SchoolDaysGpkAssetStore> CurrentMount() {
   std::lock_guard<std::mutex> guard(gMountMutex);
@@ -153,9 +429,19 @@ MountedResolverLookup(const std::string &logicalPath, std::string *reference) {
                ? SchoolDaysAssetResolutionStatus::Present
                : status == SchoolDaysGpkLookupStatus::Collision
                      ? SchoolDaysAssetResolutionStatus::Collision
-                     : status == SchoolDaysGpkLookupStatus::Invalid
-                           ? SchoolDaysAssetResolutionStatus::Invalid
-                           : SchoolDaysAssetResolutionStatus::Missing;
+                     : SchoolDaysAssetResolutionStatus::Invalid;
+  }
+  // The locale's HQ scripts take priority even over leftover loose text
+  // overlays. No readable fallback is silently substituted for a missing ORS.
+  if (IsHqScriptOrs(logicalPath) && CurrentTranslated().script) {
+    const auto status = LookupMountedSchoolDaysAsset(logicalPath);
+    if (status == SchoolDaysGpkLookupStatus::Present && reference)
+      *reference = MakeSchoolDaysGpkUri(CanonicalGpkLogical(logicalPath));
+    return status == SchoolDaysGpkLookupStatus::Present
+               ? SchoolDaysAssetResolutionStatus::Present
+               : status == SchoolDaysGpkLookupStatus::Collision
+                     ? SchoolDaysAssetResolutionStatus::Collision
+                     : SchoolDaysAssetResolutionStatus::Invalid;
   }
   std::string physical;
   if (ResolveSchoolDaysOverlayFile(logicalPath, &physical)) {
@@ -276,6 +562,77 @@ bool ReadFilesystem(std::string_view reference, std::vector<uint8_t> *out,
 
 } // namespace
 
+bool ConfigureSchoolDaysTranslatedGpks(
+    const SchoolDaysTranslatedGpkSelection &selection,
+    std::string *error) {
+  if (error != nullptr) error->clear();
+  if (selection.locale.empty() ||
+      selection.locale.find_first_of("/\\\r\n") != std::string::npos ||
+      selection.locale.find('\0') != std::string::npos)
+    return RejectTranslatedConfiguration(
+        error, "School Days GPK translation locale is invalid");
+  if (selection.locale == "zh-CN" || selection.locale == "zh-cn" ||
+      selection.locale == "zh_CN")
+    return RejectTranslatedConfiguration(
+        error, "zh-CN raw Script.GPK is incompatible (different scene "
+               "names, GB18030 and event structure); certified conversion required");
+  if (selection.locale != "en" && selection.locale != "pt-BR" &&
+      selection.locale != "es")
+    return RejectTranslatedConfiguration(
+        error, "Unknown or unverified translated GPK locale");
+  const bool english = selection.locale == "en";
+  if (english && !selection.scriptGpk.empty())
+    return RejectTranslatedConfiguration(
+        error, "English HQ scripts must come exclusively from Packs/Script.GPK; "
+               "do not select a translated English Script.GPK");
+  if (!english && (selection.scriptGpk.empty() || selection.lxhGpk.empty()))
+    return RejectTranslatedConfiguration(
+        error, "Non-English GPK locale requires both translated "
+               "Script.GPK and LxH GPK; no retail text fallback");
+  if (selection.locale == "pt-BR" &&
+      (selection.scriptGpk.filename().u8string() != "Script - Brazilian.GPK" ||
+       selection.lxhGpk.filename().u8string() != "pt-BR-lxh.GPK"))
+    return RejectTranslatedConfiguration(
+        error, "pt-BR requires Script - Brazilian.GPK and pt-BR-lxh.GPK");
+  if (selection.locale == "es" &&
+      (selection.scriptGpk.filename().u8string() != "Script - Spanish.GPK" ||
+       selection.lxhGpk.filename().u8string() != "es-lxh.GPK"))
+    return RejectTranslatedConfiguration(
+        error, "es requires certified Script - Spanish.GPK and es-lxh.GPK");
+  const auto validatePath = [&](const std::filesystem::path &path,
+                                const char *kind) {
+    if (path.empty()) return true;
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec) || ec)
+      return RejectTranslatedConfiguration(
+          error, std::string("Selected translated ") + kind +
+                     " GPK is missing or not a regular file");
+    return true;
+  };
+  if (!validatePath(selection.scriptGpk, "Script") ||
+      !validatePath(selection.lxhGpk, "LxH")) return false;
+  std::lock_guard<std::mutex> guard(gMountMutex);
+  if (gMount || gIntegratedLxh)
+    return Fail(error, "Unmount retail GPKs before changing translated packs");
+  gTranslatedSelection = selection;
+  gTranslatedSelectionInvalid = false;
+  gTranslatedScript.reset();
+  gTranslatedLxh.reset();
+  return true;
+}
+
+bool ClearSchoolDaysTranslatedGpks(std::string *error) {
+  if (error != nullptr) error->clear();
+  std::lock_guard<std::mutex> guard(gMountMutex);
+  if (gMount || gIntegratedLxh)
+    return Fail(error, "Unmount retail GPKs before clearing translated packs");
+  gTranslatedSelection.reset();
+  gTranslatedSelectionInvalid = false;
+  gTranslatedScript.reset();
+  gTranslatedLxh.reset();
+  return true;
+}
+
 bool MountSchoolDaysRetailGpks(const std::filesystem::path &gameOrPacksRoot,
                                std::string *error) {
   if (error != nullptr)
@@ -285,6 +642,17 @@ bool MountSchoolDaysRetailGpks(const std::filesystem::path &gameOrPacksRoot,
   if (!std::filesystem::is_regular_file(packs / "BGM.GPK", ec)) {
     ec.clear();
     packs /= "Packs";
+  }
+
+  std::optional<SchoolDaysTranslatedGpkSelection> requested;
+  {
+    std::lock_guard<std::mutex> guard(gMountMutex);
+    if (gMount || gIntegratedLxh)
+      return Fail(error, "School Days GPKs are already mounted");
+    if (gTranslatedSelectionInvalid)
+      return Fail(error, "Selected translated GPK configuration failed; "
+                         "select valid archives or explicitly clear selection");
+    requested = gTranslatedSelection;
   }
 
   auto candidate = std::make_shared<SchoolDaysGpkAssetStore>();
@@ -308,10 +676,61 @@ bool MountSchoolDaysRetailGpks(const std::filesystem::path &gameOrPacksRoot,
         entry.storedLength == 0u)
       return Fail(error, "Integrated LxH.GPK must use non-empty seekable raw entry: " + logical);
   }
+  std::shared_ptr<SchoolDaysGpkArchive> translatedScript;
+  std::shared_ptr<SchoolDaysGpkArchive> translatedLxh;
+  if (requested) {
+    const auto sameArchive = [&](const std::filesystem::path &selected,
+                                 const std::filesystem::path &retail) {
+      if (selected.empty()) return false;
+      std::error_code sameError;
+      return std::filesystem::equivalent(selected, retail, sameError) &&
+             !sameError;
+    };
+    if (!requested->scriptGpk.empty()) {
+      // The retail Script archive is the reference authority for filenames.
+      const SchoolDaysGpkArchive *retail = nullptr;
+      for (size_t i = 0; i < SchoolDaysRetailGpkSpecs().size(); ++i)
+        if (std::string_view(SchoolDaysRetailGpkSpecs()[i].filename) ==
+            "Script.GPK") {
+          retail = candidate->Archive(i);
+          break;
+        }
+      if (!retail)
+        return Fail(error, "Mounted retail Script.GPK is unavailable");
+      if (sameArchive(requested->scriptGpk, packs / "Script.GPK") &&
+          requested->locale != "en")
+        return Fail(error, "Translated Script.GPK must differ from the retail "
+                           "Script.GPK for a non-English locale");
+      translatedScript = std::make_shared<SchoolDaysGpkArchive>();
+      std::string reason;
+      if (!translatedScript->Open(requested->scriptGpk, &reason))
+        return Fail(error, "Selected translated Script.GPK is invalid: " + reason);
+      if (!ValidateTranslatedScript(*translatedScript, *retail, &reason))
+        return Fail(error, "Selected translated Script.GPK rejected: " + reason);
+    }
+    if (!requested->lxhGpk.empty()) {
+      if (sameArchive(requested->lxhGpk, packs / "LxH.GPK") &&
+          requested->locale != "en")
+        return Fail(error, "Translated LxH GPK must differ from the original "
+                           "LxH.GPK for a non-English locale");
+      translatedLxh = std::make_shared<SchoolDaysGpkArchive>();
+      std::string reason;
+      if (!translatedLxh->Open(requested->lxhGpk, &reason))
+        return Fail(error, "Selected translated LxH GPK is invalid: " + reason);
+      if (!ValidateTranslatedLxh(*translatedLxh, *integrated, &reason))
+        return Fail(error, "Selected translated LxH GPK rejected: " + reason);
+    }
+  }
   {
     std::lock_guard<std::mutex> guard(gMountMutex);
+    // A concurrent configuration change invalidates the pending candidate.
+    if (gMount || gIntegratedLxh || gTranslatedSelectionInvalid ||
+        !SameSelection(gTranslatedSelection, requested))
+      return Fail(error, "School Days GPK language selection changed during mount");
     gMount = std::move(candidate);
     gIntegratedLxh = std::move(integrated);
+    gTranslatedScript = std::move(translatedScript);
+    gTranslatedLxh = std::move(translatedLxh);
   }
   return true;
 }
@@ -338,6 +757,8 @@ bool ResolveSchoolDaysOverlayFile(std::string_view logical,
   // Only the packaged installation is authoritative. Extracted developer
   // fixtures can still supply synthetic grafts through a loose overlay.
   if (CurrentIntegratedLxh() && SchoolDaysLxhContent::IsPackResource(logical))
+    return false;
+  if (CurrentTranslated().script && IsHqScriptOrs(logical))
     return false;
   auto overlay = CurrentOverlay();
   if (!overlay)
@@ -375,6 +796,10 @@ void UnmountSchoolDaysRetailGpks() {
   std::lock_guard<std::mutex> guard(gMountMutex);
   gMount.reset();
   gIntegratedLxh.reset();
+  gTranslatedScript.reset();
+  gTranslatedLxh.reset();
+  gTranslatedSelection.reset();
+  gTranslatedSelectionInvalid = false;
 }
 
 void InstallMountedSchoolDaysAssetResolver() {
@@ -407,58 +832,89 @@ size_t MountedSchoolDaysGpkEntryCount() {
 
 SchoolDaysGpkLookupStatus
 LookupMountedSchoolDaysAsset(std::string_view logicalPath) {
-  if (SchoolDaysLxhContent::IsPackResource(logicalPath)) {
+  const std::string logical = UnmarkTranslatedLogical(logicalPath);
+  const auto translation = CurrentTranslated();
+  if (IsMarkedTranslatedScript(logicalPath) && !translation.script)
+    return SchoolDaysGpkLookupStatus::Missing;
+  if (IsLxhScriptOrs(logical) && translation.lxh)
+    return translation.lxh->Lookup(CanonicalGpkLogical(logical));
+  if (SchoolDaysLxhContent::IsPackResource(logical)) {
     const auto integrated = CurrentIntegratedLxh();
-    return integrated ? integrated->Lookup(CanonicalGpkLogical(logicalPath))
+    return integrated ? integrated->Lookup(CanonicalGpkLogical(logical))
                       : SchoolDaysGpkLookupStatus::Missing;
   }
-  if (ResolveSchoolDaysOverlayFile(logicalPath, nullptr))
+  if (IsHqScriptOrs(logical) && translation.script)
+    return translation.script->Lookup(ScriptRelative(logical));
+  if (IsMarkedTranslatedScript(logicalPath))
+    return SchoolDaysGpkLookupStatus::Missing;
+  if (ResolveSchoolDaysOverlayFile(logical, nullptr))
     return SchoolDaysGpkLookupStatus::Present;
   const auto mount = CurrentMount();
-  return mount != nullptr ? mount->Lookup(CanonicalGpkLogical(logicalPath))
+  return mount != nullptr ? mount->Lookup(CanonicalGpkLogical(logical))
                           : SchoolDaysGpkLookupStatus::Missing;
 }
 
 bool ReadMountedSchoolDaysAsset(std::string_view logicalPath,
                                 std::vector<uint8_t> *out, std::string *error) {
-  if (SchoolDaysLxhContent::IsPackResource(logicalPath)) {
+  const std::string logical = UnmarkTranslatedLogical(logicalPath);
+  const auto translation = CurrentTranslated();
+  if (IsMarkedTranslatedScript(logicalPath) && !translation.script)
+    return Fail(error, "Translated Script.GPK is unavailable; no retail fallback");
+  if (IsLxhScriptOrs(logical) && translation.lxh)
+    return translation.lxh->Read(CanonicalGpkLogical(logical), out, error);
+  if (SchoolDaysLxhContent::IsPackResource(logical)) {
     const auto integrated = CurrentIntegratedLxh();
-    return integrated ? integrated->Read(CanonicalGpkLogical(logicalPath), out, error)
+    return integrated ? integrated->Read(CanonicalGpkLogical(logical), out, error)
                       : Fail(error, "Mandatory integrated LxH.GPK not mounted");
   }
+  if (IsHqScriptOrs(logical) && translation.script)
+    return translation.script->Read(ScriptRelative(logical), out, error);
+  if (IsMarkedTranslatedScript(logicalPath))
+    return Fail(error, "Translated Script.GPK resource is invalid");
   std::string physical;
-  if (ResolveSchoolDaysOverlayFile(logicalPath, &physical))
+  if (ResolveSchoolDaysOverlayFile(logical, &physical))
     return ReadFilesystem(physical, out, error);
   const auto mount = CurrentMount();
   if (mount == nullptr)
     return Fail(error, "School Days retail GPKs are not mounted");
-  return mount->Read(CanonicalGpkLogical(logicalPath), out, error);
+  return mount->Read(CanonicalGpkLogical(logical), out, error);
 }
 
 std::unique_ptr<AssetStream> OpenMountedSchoolDaysAssetStream(
     std::string_view logicalPath) {
-    if (SchoolDaysLxhContent::IsPackResource(logicalPath)) {
-      const auto integrated = CurrentIntegratedLxh();
-      if (integrated == nullptr) return {};
-      size_t idx = 0;
-      if (integrated->Lookup(CanonicalGpkLogical(logicalPath), &idx) !=
-              SchoolDaysGpkLookupStatus::Present ||
-          idx >= integrated->Index().Entries().size()) return {};
-      const auto& entry = integrated->Index().Entries()[idx];
-      if (!entry.IsRaw() || static_cast<uint64_t>(entry.offset) +
-              entry.PhysicalBodyLength() > integrated->PidxOffset()) return {};
+    const std::string logical = UnmarkTranslatedLogical(logicalPath);
+    const auto translation = CurrentTranslated();
+    const auto openRaw = [](const std::shared_ptr<const SchoolDaysGpkArchive> &archive,
+                            const std::string &relative) -> std::unique_ptr<AssetStream> {
+      if (!archive) return {};
+      size_t idx = 0u;
+      if (archive->Lookup(relative, &idx) != SchoolDaysGpkLookupStatus::Present ||
+          idx >= archive->Index().Entries().size()) return {};
+      const auto &entry = archive->Index().Entries()[idx];
+      const uint64_t end = static_cast<uint64_t>(entry.offset) +
+                           static_cast<uint64_t>(entry.PhysicalBodyLength());
+      if (!entry.IsRaw() || end < entry.offset || end > archive->PidxOffset() ||
+          entry.inlinePrefix.size() > entry.storedLength) return {};
       try {
         return std::make_unique<MountedRawAssetStream>(
-            integrated, integrated->Path(), entry.inlinePrefix, entry.offset,
+            archive, archive->Path(), entry.inlinePrefix, entry.offset,
             static_cast<uint64_t>(entry.storedLength));
       } catch (...) { return {}; }
-    }
-    if (ResolveSchoolDaysOverlayFile(logicalPath, nullptr)) return {};
+    };
+    if (IsMarkedTranslatedScript(logicalPath) && !translation.script) return {};
+    if (IsLxhScriptOrs(logical) && translation.lxh)
+      return openRaw(translation.lxh, CanonicalGpkLogical(logical));
+    if (SchoolDaysLxhContent::IsPackResource(logical))
+      return openRaw(CurrentIntegratedLxh(), CanonicalGpkLogical(logical));
+    if (IsHqScriptOrs(logical) && translation.script)
+      return openRaw(translation.script, ScriptRelative(logical));
+    if (IsMarkedTranslatedScript(logicalPath) ||
+        ResolveSchoolDaysOverlayFile(logical, nullptr)) return {};
     const auto mount = CurrentMount();
     if (mount == nullptr) return {};
     size_t archiveIndex = 0u;
     size_t entryIndex = 0u;
-    const std::string canonical = CanonicalGpkLogical(logicalPath);
+    const std::string canonical = CanonicalGpkLogical(logical);
     if (mount->Lookup(canonical, &archiveIndex, &entryIndex) !=
         SchoolDaysGpkLookupStatus::Present) {
         return {};
@@ -484,9 +940,18 @@ std::unique_ptr<AssetStream> OpenMountedSchoolDaysAssetStream(
 
 std::string MakeSchoolDaysGpkUri(std::string_view logicalPath) {
   std::string result(kSchoolDaysGpkUriPrefix);
-  result.reserve(result.size() + logicalPath.size());
+  // Preserve the opaque "/__sd_localized_script__" marker through
+  // SchoolDaysLogicalFromGpkUri so the AssetProvider cannot shadow selected
+  // translated ORS with a loose Script/English file from an old overlay.
+  const bool mark = IsHqScriptOrs(logicalPath) && CurrentTranslated().script &&
+                    !IsMarkedTranslatedScript(logicalPath);
+  result.reserve(result.size() + logicalPath.size() +
+                 (mark ? kTranslatedScriptVirtualSuffix.size() : 0u));
   for (char ch : logicalPath)
     result.push_back(ch == '\\' ? '/' : ch);
+  if (mark)
+    result.append(kTranslatedScriptVirtualSuffix.data(),
+                  kTranslatedScriptVirtualSuffix.size());
   return result;
 }
 

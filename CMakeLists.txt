@@ -21,6 +21,11 @@ option(KOTONOHA_BUILD_SUMMER "Build the Summer Radish Vacation!! port" ON)
 option(KOTONOHA_BUILD_DDLC "Build the Doki Doki Literature Club! port" ON)
 option(KOTONOHA_BUILD_SCHOOL_DAYS "Build the School Days port" ON)
 option(KOTONOHA_DEV_CONTROL "Enable local School Days automation bridge" OFF)
+option(KOTONOHA_DISTRIBUTION_BUILD
+    "Produce a player-facing build without the developer overlay, MCP or QA controls" OFF)
+if(KOTONOHA_DISTRIBUTION_BUILD AND KOTONOHA_DEV_CONTROL)
+    message(FATAL_ERROR "Distribution builds must disable KOTONOHA_DEV_CONTROL")
+endif()
 
 option(KOTONOHA_BUILD_AIR "Build the AIR Standard Edition port" ON)
 

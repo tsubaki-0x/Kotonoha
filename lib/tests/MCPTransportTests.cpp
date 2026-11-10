@@ -16,8 +16,11 @@
 #include <Kotonoha/mcp/MCPServer.hpp>
 
 #include <filesystem>
+#include <chrono>
+#include <iostream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 namespace {
 #ifdef _WIN32
@@ -118,16 +121,63 @@ void sendLine(Socket &client, const std::string &line) {
   }
 }
 
-std::string receiveLine(Socket &client) {
+std::string receiveLine(Socket &client, const char *stage) {
   std::string response;
   char bytes[1024];
   while (response.find('\n') == std::string::npos) {
     const auto read = recv(client.handle, bytes, sizeof(bytes), 0);
-    require(read > 0 && response.size() + static_cast<std::size_t>(read) <= 65536,
+    if (read <= 0) {
+#ifdef _WIN32
+      throw std::runtime_error(std::string("Receive MCP response (") + stage +
+                               ") failed: recv=" +
+                               std::to_string(read) + " WSA=" +
+                               std::to_string(WSAGetLastError()));
+#else
+      throw std::runtime_error(std::string("Receive MCP response (") + stage +
+                               ") failed: recv=" +
+                               std::to_string(read));
+#endif
+    }
+    require(response.size() + static_cast<std::size_t>(read) <= 65536,
             "Receive bounded MCP response");
     response.append(bytes, static_cast<std::size_t>(read));
   }
   return response.substr(0, response.find('\n'));
+}
+
+bool socketReadable(Socket &client) {
+  fd_set ready;
+  FD_ZERO(&ready);
+  FD_SET(client.handle, &ready);
+  timeval noWait{0, 0};
+#ifdef _WIN32
+  const int result = select(0, &ready, nullptr, nullptr, &noWait);
+#else
+  const int result = select(client.handle + 1, &ready, nullptr, nullptr, &noWait);
+#endif
+  require(result >= 0, "Cannot poll reconnect socket");
+  return result > 0 && FD_ISSET(client.handle, &ready);
+}
+
+void pumpUntilResponse(Kotonoha::MCPServer &server, Socket &client,
+                       const char *stage) {
+  // TCP connect(), send() and receive readiness are asynchronous even on
+  // loopback. Do not assume one zero-delay engine tick always sees packets.
+  // This tests prompt processing without artificial sleep or blocking the
+  // engine on socket I/O. A real game pumps continuously every frame.
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::seconds(2);
+  unsigned pumps = 0;
+  do {
+    require(server.pump(), "TCP MCP must not exit the engine");
+    ++pumps;
+    if (socketReadable(client))
+      return;
+    std::this_thread::yield();
+  } while (std::chrono::steady_clock::now() < deadline);
+  throw std::runtime_error(std::string("MCP ") + stage +
+                           " did not respond within 2s after " +
+                           std::to_string(pumps) + " pump iterations");
 }
 
 struct EmptyRuntime : Kotonoha::Runtime {
@@ -148,14 +198,14 @@ void testSocket() {
   Socket first;
   connectTo(first, port);
   sendLine(first, R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}})");
-  require(server.pump(), "TCP MCP must not exit the engine");
-  require(receiveLine(first).find("kotonoha-engine") != std::string::npos,
+  pumpUntilResponse(server, first, "first.initialize");
+  require(receiveLine(first, "first.initialize").find("kotonoha-engine") != std::string::npos,
           "TCP initializes using the native engine dispatcher");
 
   sendLine(first, R"({"jsonrpc":"2.0","method":"notifications/initialized"})");
   sendLine(first, R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})");
-  require(server.pump(), "TCP MCP handles multiple requests per tick");
-  require(receiveLine(first).find("engine_state") != std::string::npos,
+  pumpUntilResponse(server, first, "first.tools/list");
+  require(receiveLine(first, "first.tools/list").find("engine_state") != std::string::npos,
           "TCP exposes native engine MCP tools");
 
   first.shutdown();
@@ -164,15 +214,16 @@ void testSocket() {
   sendLine(second, R"({"jsonrpc":"2.0","id":3,"method":"tools/list"})");
   // Reconnect before pumping the closed first socket. Accept-before-read
   // used to reset this connection with WSAECONNRESET on Windows.
-  // Pump several frames without waiting: TCP FIN delivery can lag the new
-  // connection, which must stay queued instead of being reset in that case.
-  for (int frame = 0; frame < 32; ++frame)
-    require(server.pump(), "TCP MCP accepts immediate reconnect without exiting");
-  require(receiveLine(second).find("-32002") != std::string::npos,
+  // Pump until the new socket has an actual response, not an arbitrary number
+  // of CPU-speed frames. On Windows a FIN can be delivered after 32 tight
+  // iterations even though ordinary engine frames are spaced at ~16 ms.
+  // Yield rather than sleeping: reconnect must not need an artificial delay.
+  pumpUntilResponse(server, second, "second.uninitialized.tools/list");
+  require(receiveLine(second, "second.uninitialized.tools/list").find("-32002") != std::string::npos,
           "Immediate reconnect must remain open with fresh MCP handshake");
   sendLine(second, R"({"jsonrpc":"2.0","id":4,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"reconnect-test","version":"1"}}})");
-  require(server.pump(), "Reconnected client can initialize without sleep");
-  require(receiveLine(second).find("kotonoha-engine") != std::string::npos,
+  pumpUntilResponse(server, second, "second.initialize");
+  require(receiveLine(second, "second.initialize").find("kotonoha-engine") != std::string::npos,
           "Reconnected client shares the native MCP dispatcher");
 }
 } // namespace
@@ -181,7 +232,8 @@ int main() {
   try {
     testSocket();
     return 0;
-  } catch (const std::exception &) {
+  } catch (const std::exception &error) {
+    std::cerr << "MCPTransportTests failure: " << error.what() << '\n';
     return 1;
   }
 }

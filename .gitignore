@@ -295,7 +295,8 @@ mono_crash.*
 !lib/src/debug/
 !lib/src/debug/**
 !lib/include/Kotonoha/debug/
-!lib/include/Kotonoha/debug/**![Gg]ames/school-days/include/Kotonoha/[Dd]ebug/
+!lib/include/Kotonoha/debug/**
+![Gg]ames/school-days/include/Kotonoha/[Dd]ebug/
 ![Gg]ames/school-days/include/Kotonoha/[Dd]ebug/**
 [Dd]ebugPublic/
 [Rr]elease/
@@ -726,3 +727,10 @@ Xcode/Python.xcframework
 /CMakeSettings.json
 .opencode
 forced_subtitles/
+
+# School Days HQ: never accidentally stage commercial archives or personal
+# progress saved outside the standard local Packs/Save directories.
+*.[Gg][Pp][Kk]
+**/[Ss]ave[Ff]ile*.DAT
+**/[Gg]lobal[Ff]lag.DAT
+**/[Cc]onfig.DAT

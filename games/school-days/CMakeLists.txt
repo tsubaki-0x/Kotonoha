@@ -81,6 +81,13 @@ target_link_libraries(SchoolDays PRIVATE school_days)
 kotonoha_configure_app(SchoolDays
     BUNDLE_ID me.hirameki.kotonoha.schooldays GAME school-days)
 
+# A player-facing Windows build is a GUI application: the SDL callback entry
+# point opens our launcher directly. Never attach a second console window just
+# to display SDL logging. Keep the development executable's console for QA.
+if(WIN32 AND NOT ANDROID AND KOTONOHA_DISTRIBUTION_BUILD)
+    set_target_properties(SchoolDays PROPERTIES WIN32_EXECUTABLE TRUE)
+endif()
+
 # The Windows executable uses the black-and-white icon supplied specifically
 # for School Days HQ. Only register the resource once the approved artwork has
 # been converted to an .ico; a missing icon must not break existing L4 builds.

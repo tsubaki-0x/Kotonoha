@@ -13,6 +13,29 @@ namespace Kotonoha {
 
 class AssetStream;
 
+// Configure language-specific script archives before opening the retail pack
+// mount. Locale "en" MUST leave scriptGpk empty: its HQ scripts always come
+// from the original Packs/Script.GPK; an optional en-lxh.GPK changes only the
+// seven epilogue ORS. Locale "pt-BR" requires Script - Brazilian.GPK and
+// pt-BR-lxh.GPK. Other non-English locales also require both GPKs.
+// Raw zh-CN is incompatible and rejected pending a separately certified
+// conversion of its scene names, encoding and event structure. No GPK is
+// modified: the 29 retail archives and Packs/LxH.GPK remain authoritative.
+struct SchoolDaysTranslatedGpkSelection {
+  std::string locale = "en";
+  std::filesystem::path scriptGpk;
+  std::filesystem::path lxhGpk;
+};
+
+// Rejects changes while mounted; call before MountSchoolDaysRetailGpks.
+// Archive structure, name compatibility and content readability are validated
+// again by MountSchoolDaysRetailGpks against the actual retail installation.
+bool ConfigureSchoolDaysTranslatedGpks(
+    const SchoolDaysTranslatedGpkSelection &selection,
+    std::string *error = nullptr);
+// Restores the default English/retail selection. Call only after unmounting.
+bool ClearSchoolDaysTranslatedGpks(std::string *error = nullptr);
+
 // Process-wide School Days retail resource mount.  KTRF has one outer game
 // session at a time, while media decoders may read concurrently; the
 // implementation publishes immutable stores only after all 29 retail packs

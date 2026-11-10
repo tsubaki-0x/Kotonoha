@@ -27,4 +27,4 @@ explicit alternate --asset-overlay was selected. The other Kotonoha games
 are not affected. Any explicitly chosen alternative overlay must include the
 Option replacement PNGs if those overrides are wanted.
 
-See games/school-days/docs/GENERAL_SOUND_EXTERNAL_ART_2026-11-05.md.
+See games/school-days/docs/configuration/GENERAL_SOUND_EXTERNAL_ART_2026-11-05.md.

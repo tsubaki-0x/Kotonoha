@@ -5,6 +5,8 @@
 #include <Kotonoha/routing/SchoolDaysMediaCancellationPool.hpp>
 #include <Kotonoha/routing/SchoolDaysTranslationCoverage.hpp>
 #include <Kotonoha/routing/SchoolDaysUpscalingPolicy.hpp>
+#include <Kotonoha/routing/SchoolDaysShaderPresetCatalog.hpp>
+#include <Kotonoha/routing/SchoolDaysCustomShaderFolder.hpp>
 #include <Kotonoha/componentes/TextInputDialog.hpp>
 #include <Kotonoha/componentes/DisplayModeCatalog.hpp>
 #include <Kotonoha/events/BackAction.hpp>
@@ -1035,8 +1037,10 @@ void Runtime::traceDev(const char *event) {
 void Runtime::init(Kotonoha::Engine &owner) {
   if (engine != &owner) {
     engine = &owner;
+#if !defined(KOTONOHA_DISTRIBUTION_BUILD)
     engine->GetDebug().getSettings().showFPS = false;
     engine->GetDebug().getSettings().showNodeClock = false;
+#endif
 #if defined(_WIN32) && !defined(__ANDROID__)
     // Only a fresh profile tracks the monitor's desktop resolution. A chosen
     // size is persisted in settings.json and must survive subsequent launches
@@ -1174,7 +1178,15 @@ void Runtime::finishSplash() {
   Kotonoha::Runtime::init(*engine);
 }
 
-void Runtime::setStatus(std::string message) {
+void Runtime::setStatus(std::string message, bool playerFacingFailure) {
+#if defined(KOTONOHA_DISTRIBUTION_BUILD)
+  // Suppress routine engine banners (save/config success, missing media, QA).
+  // Preserve explicit failures such as an unsuccessful save/load.
+  // Persistence and script behavior are unaffected; dev keeps all diagnostics.
+  if (!playerFacingFailure) return;
+#else
+  (void)playerFacingFailure;
+#endif
   status = std::move(message);
   statusTime = SDL_GetTicks();
 }
@@ -3824,7 +3836,18 @@ void Runtime::discardDesktopDisplayDraft() {
 void Runtime::resetDesktopDisplayDraft() {
   discardDesktopDisplayDraft();
   if (!engine) return;
-  desktopDisplayDraft = engine->GetSettings();
+  desktopDisplayDraft = desktopPendingRendererRestart
+                            ? *desktopPendingRendererRestart
+                            : engine->GetSettings();
+  desktopShaderDirectory.clear();
+  desktopShaderFiles.clear();
+  if (const auto saved = Kotonoha::SchoolDaysCustomShaderFolder::ReadSidecar(
+          physicalSettingsPath); !saved.empty()) {
+    if (auto folder = Kotonoha::SchoolDaysCustomShaderFolder::Scan(saved)) {
+      desktopShaderDirectory = std::move(folder->directory);
+      desktopShaderFiles = std::move(folder->shaders);
+    }
+  }
   desktopDisplayDraftActive = true;
 }
 
@@ -3877,30 +3900,49 @@ void Runtime::activateDesktopDisplayControl(int control) {
     break;
   }
   case 10: {
-    // Always show the preset list. The previous gate made the list appear
-    // broken when Launcher had saved Direct3D12 + Auto (which resolves to
-    // Linear). A selection can only apply on a live OpenGL renderer; the
-    // popup explains this rather than pretending D3D12 supports GLSL.
-    const auto &presets = Kotonoha::UpscalePresets();
-    const auto it = std::find(presets.begin(), presets.end(), draft.upscaling.preset);
-    openPopup(DesktopDisplayPopup::Shader,
-              it == presets.end() ? 0 : static_cast<int>(it - presets.begin()));
+    // Only the player's current quality group opens by default. Other groups
+    // are three expandable folders, not a single flat list of 15 presets.
+    // Keep the native OpenGL compatibility check when selecting a leaf.
+    namespace Catalog = Kotonoha::SchoolDaysShaderPresetCatalog;
+    namespace Custom = Kotonoha::SchoolDaysCustomShaderFolder;
+    desktopShaderExpanded = {false, false, false};
+    desktopCustomShaderExpanded = false;
+    int selected = -1;
+    if (!draft.upscaling.shaderFiles.empty() && !desktopShaderDirectory.empty()) {
+      const auto active = std::filesystem::u8path(draft.upscaling.shaderFiles)
+                              .lexically_normal();
+      desktopCustomShaderExpanded = std::any_of(
+          desktopShaderFiles.begin(), desktopShaderFiles.end(),
+          [&](const auto &shader) { return shader.lexically_normal() == active; });
+    }
+    if (!desktopCustomShaderExpanded) {
+      desktopShaderExpanded[Catalog::Index(Catalog::Group(draft.upscaling.preset))] = true;
+      selected = Catalog::VisibleIndexOf(draft.upscaling.preset, desktopShaderExpanded);
+    } else {
+      const Custom::Folder folder{desktopShaderDirectory, desktopShaderFiles};
+      const auto rows = Custom::VisibleRows(desktopShaderExpanded, true, &folder);
+      for (std::size_t i = 0; i < rows.size(); ++i)
+        if (rows[i].type == Custom::Row::Type::CustomFile &&
+            rows[i].shader.lexically_normal() ==
+                std::filesystem::u8path(draft.upscaling.shaderFiles).lexically_normal()) {
+          selected = static_cast<int>(i);
+          break;
+        }
+    }
+    openPopup(DesktopDisplayPopup::Shader, std::max(0, selected));
     break;
   }
   case 11:
   case 12:
-    if (!engine->GetUpscaler().supports(Kotonoha::UpscaleBackend::MPV)) {
-      setStatus("Custom GLSL requires OpenGL. Change renderer in launcher "
-                "and restart the game.");
-      return;
-    }
-    // BROWSE deliberately opens the keyboard/paste path editor. There is no
-    // native file picker in this game-owned runtime, and no global SettingsMenu.
-    desktopDisplayPathEdit = draft.upscaling.shaderFiles;
+    // A directory or a single file can be pasted here. The selected folder is
+    // then exposed as a distinct expandable group inside Shader preset.
+    desktopDisplayPathEdit = desktopShaderDirectory.empty()
+        ? draft.upscaling.shaderFiles : desktopShaderDirectory.u8string();
     desktopDisplayPopup = DesktopDisplayPopup::GlslPath;
     desktopDisplayPopupHover = -1;
     SDL_StartTextInput(&engine->GetWindow());
-    if (control == 12) setStatus("BROWSE: paste a GLSL file path and press Enter");
+    if (control == 12)
+      setStatus("BROWSE: paste a shader folder or file path and press Enter");
     break;
   case 13: case 14: case 15: case 16:
   case 17: case 18: case 19:
@@ -3932,6 +3974,23 @@ void Runtime::activateDesktopDisplayControl(int control) {
     break;
   case 21:
     try {
+      if (draft.renderer != engine->GetSettings().renderer &&
+          Kotonoha::SchoolDaysUpscalingPolicy::IsOpenGLRenderer(draft.renderer)) {
+        // SDL renderers cannot be changed while the game is running. Save the
+        // complete OpenGL/MPV choice for the next launch without calling the
+        // engine's live applySettings (which explicitly rejects this switch).
+        if (physicalSettingsPath.empty())
+          throw std::runtime_error("Cannot persist OpenGL restart without settings path");
+        draft.validate();
+        std::string shaderError;
+        if (!SchoolDays::Launcher::persistShaderPaths(
+                physicalSettingsPath, draft.upscaling.shaderFiles, &shaderError))
+          throw std::runtime_error(shaderError);
+        draft.save(physicalSettingsPath);
+        desktopPendingRendererRestart = draft;
+        setStatus("Shader saved for OpenGL/MPV. Restart game to activate.");
+        break;
+      }
       // An explicit non-desktop resolution while Borderless is selected must
       // become Exclusive: Borderless cannot change the monitor's desktop
       // mode. Both are FULL in the native General page, so this preserves its
@@ -3973,6 +4032,7 @@ void Runtime::activateDesktopDisplayControl(int control) {
       const bool shaderPathsSaved = physicalSettingsPath.empty() ||
           SchoolDays::Launcher::persistShaderPaths(
               physicalSettingsPath, draft.upscaling.shaderFiles, &shaderError);
+      desktopPendingRendererRestart.reset();
       resetDesktopDisplayDraft();
       if (shaderPathsSaved)
         setStatus("Display Options applied and saved");
@@ -3980,7 +4040,7 @@ void Runtime::activateDesktopDisplayControl(int control) {
         setStatus("Display applied but external GLSL path was not saved: " +
                   shaderError);
     } catch (const std::exception &error) {
-      setStatus(std::string("Display Options APPLY failed: ") + error.what());
+      setStatus(std::string("Display Options APPLY failed: ") + error.what(), true);
     }
     break;
   default: return;
@@ -4063,8 +4123,10 @@ void Runtime::renderDesktopDisplayPanel(Kotonoha::RendererRef renderer) {
   else if (engine->GetUpscaler().resolve(draft.upscaling.backend) !=
            Kotonoha::UpscaleBackend::MPV)
     draw("GLSL inactive: select MPV upscaler", 254.0f, 350.0f, 488.0f);
-  draw(draft.upscaling.shaderFiles.empty()
-           ? "(none)" : DisplayClipText(draft.upscaling.shaderFiles, 48),
+  draw(!desktopShaderDirectory.empty()
+           ? DisplayClipText("Folder: " + desktopShaderDirectory.u8string(), 48)
+           : draft.upscaling.shaderFiles.empty()
+               ? "(none)" : DisplayClipText(draft.upscaling.shaderFiles, 48),
        254.0f, 281.0f, 371.0f);
 
   if (desktopDisplayPopup == DesktopDisplayPopup::None) return;
@@ -4078,7 +4140,7 @@ void Runtime::renderDesktopDisplayPanel(Kotonoha::RendererRef renderer) {
     ui.text(renderer, value, rect.x, rect.y, rect.w, light);
   };
   if (desktopDisplayPopup == DesktopDisplayPopup::GlslPath) {
-    popupText("CUSTOM GLSL FILE - Enter to accept / Esc to cancel",
+    popupText("CUSTOM GLSL FOLDER OR FILE - Enter / Esc",
               kDesktopPopupX + 13, kDesktopPopupY + 13, kDesktopPopupWidth - 26);
     const auto field = canvas.map(kDesktopPopupX + 12, kDesktopPopupY + 61,
                                   kDesktopPopupWidth - 24, 52);
@@ -4087,10 +4149,12 @@ void Runtime::renderDesktopDisplayPanel(Kotonoha::RendererRef renderer) {
                                  kDesktopPopupWidth - 38, 28);
     ui.text(renderer, DisplayClipText(desktopDisplayPathEdit + "|", 58),
             line.x, line.y, line.w, ink);
-    popupText("Paste full path to an existing .glsl / .hook / .frag file",
+    popupText("Paste an existing folder or .glsl / .hook / .frag file",
               kDesktopPopupX + 13, kDesktopPopupY + 131, kDesktopPopupWidth - 26);
-    popupText("Empty input clears the custom shader override.",
+    popupText("Folders show their shader files inside Shader preset.",
               kDesktopPopupX + 13, kDesktopPopupY + 159, kDesktopPopupWidth - 26);
+    popupText("Empty input clears the custom shader and folder.",
+              kDesktopPopupX + 13, kDesktopPopupY + 188, kDesktopPopupWidth - 26);
     const auto ok = canvas.map(kDesktopPopupX + 40, kDesktopPopupY + 248, 185, 45);
     const auto cancel = canvas.map(kDesktopPopupX + 283, kDesktopPopupY + 248, 185, 45);
     ui.button(renderer, ok, "OK (ENTER)", desktopDisplayPopupHover == 0);
@@ -4117,10 +4181,27 @@ void Runtime::renderDesktopDisplayPanel(Kotonoha::RendererRef renderer) {
     }
   } else {
     title = engine->GetUpscaler().supports(Kotonoha::UpscaleBackend::MPV)
-        ? "SHADER PRESET - 15 MPV GLSL PROFILES"
-        : "SHADERS INACTIVE - OPENGL REQUIRED (RESTART)";
-    for (const auto preset : Kotonoha::UpscalePresets())
-      names.push_back(Kotonoha::UpscalePresetName(preset));
+        ? "SHADERS: OPEN QUALITY / CUSTOM FOLDERS"
+        : "SHADERS: OPENGL SHADER SELECTION NEEDS RESTART";
+    namespace Catalog = Kotonoha::SchoolDaysShaderPresetCatalog;
+    namespace Custom = Kotonoha::SchoolDaysCustomShaderFolder;
+    const Custom::Folder folder{desktopShaderDirectory, desktopShaderFiles};
+    for (const auto &row : Custom::VisibleRows(
+             desktopShaderExpanded, desktopCustomShaderExpanded,
+             desktopShaderDirectory.empty() ? nullptr : &folder)) {
+      if (row.type == Custom::Row::Type::BuiltinFolder) {
+        const bool expanded = desktopShaderExpanded[Catalog::Index(row.tier)];
+        names.push_back(std::string(expanded ? "[-] " : "[+] ") + Catalog::Name(row.tier));
+      } else if (row.type == Custom::Row::Type::BuiltinPreset) {
+        names.push_back(std::string("    ") +
+                        Kotonoha::UpscalePresetName(row.preset));
+      } else if (row.type == Custom::Row::Type::CustomFolder) {
+        names.push_back(std::string(desktopCustomShaderExpanded ? "[-] " : "[+] ") +
+                        "CUSTOM / " + DisplayClipText(folder.directory.filename().u8string(), 38));
+      } else {
+        names.push_back("    " + DisplayClipText(row.shader.filename().u8string(), 47));
+      }
+    }
   }
   const int maxScroll = std::max(0, static_cast<int>(names.size()) - kDesktopPopupRows);
   desktopDisplayPopupScroll = std::clamp(desktopDisplayPopupScroll, 0, maxScroll);
@@ -4137,7 +4218,7 @@ void Runtime::renderDesktopDisplayPanel(Kotonoha::RendererRef renderer) {
   }
   if (desktopDisplayPopup == DesktopDisplayPopup::Shader &&
       !engine->GetUpscaler().supports(Kotonoha::UpscaleBackend::MPV)) {
-    popupText("OPENGL REQUIRED - CHANGE RENDERER IN LAUNCHER",
+    popupText("OPENGL WILL BE ACTIVATED AFTER RESTART",
               kDesktopPopupX + 12, kDesktopPopupY + 309,
               kDesktopPopupWidth - 24);
   } else if (maxScroll > 0) {
@@ -4162,10 +4243,16 @@ bool Runtime::handleDesktopDisplayPanel(Kotonoha::EventRef event) {
     desktopDisplayPopupHover = -1;
     desktopDisplayPopupScroll = 0;
   };
+  namespace Custom = Kotonoha::SchoolDaysCustomShaderFolder;
+  const Custom::Folder folder{desktopShaderDirectory, desktopShaderFiles};
+  const auto shaderRows = Custom::VisibleRows(
+      desktopShaderExpanded, desktopCustomShaderExpanded,
+      desktopShaderDirectory.empty() ? nullptr : &folder);
   const int count = popup == DesktopDisplayPopup::Resolution
                         ? static_cast<int>(desktopDisplayModes.size())
                     : popup == DesktopDisplayPopup::Upscaler ? 5
-                    : popup == DesktopDisplayPopup::Shader ? 15 : 2;
+                    : popup == DesktopDisplayPopup::Shader
+                        ? static_cast<int>(shaderRows.size()) : 2;
   const int maxScroll = std::max(0, count - kDesktopPopupRows);
   const auto choose = [&](int choice) {
     if (editingPath) {
@@ -4174,30 +4261,70 @@ bool Runtime::handleDesktopDisplayPanel(Kotonoha::EventRef event) {
         playSound(Ui::UiSfxCue::Cancel);
         return;
       }
+      std::filesystem::path chosenFile;
       if (!desktopDisplayPathEdit.empty()) {
         try {
           const std::filesystem::path path =
               std::filesystem::u8path(desktopDisplayPathEdit);
           std::error_code ec;
-          std::string extension = path.extension().string();
-          std::transform(extension.begin(), extension.end(), extension.begin(),
-                         [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-          const bool suffix = extension == ".glsl" || extension == ".hook" ||
-                              extension == ".frag";
-          if (!suffix || !std::filesystem::is_regular_file(path, ec)) {
-            setStatus("GLSL path must point to an existing .glsl, .hook or .frag file");
+          if (std::filesystem::is_directory(path, ec) && !ec) {
+            std::string message;
+            auto selected = Custom::Scan(path, &message);
+            if (!selected) {
+              setStatus(message);
+              return;
+            }
+            if (!Custom::SaveSidecar(physicalSettingsPath, selected->directory,
+                                     &message)) {
+              setStatus("Could not save shader folder: " + message);
+              return;
+            }
+            desktopShaderDirectory = std::move(selected->directory);
+            desktopShaderFiles = std::move(selected->shaders);
+            desktopShaderExpanded = {false, false, false};
+            desktopCustomShaderExpanded = true;
+            finishPopup();
+            desktopDisplayPopup = DesktopDisplayPopup::Shader;
+            desktopDisplayPopupHover = 3; // three built-in folder headings
+            desktopDisplayPopupScroll = 0;
+            setStatus("Shader folder detected: choose a GLSL file in Shader preset");
+            playSound(Ui::UiSfxCue::Click);
+            return;
+          }
+          if (!Kotonoha::SchoolDaysShaderPresetCatalog::SupportedShaderFile(
+                  path.filename().u8string()) ||
+              !std::filesystem::is_regular_file(path, ec) || ec) {
+            setStatus("Choose an existing folder or .glsl/.hook/.frag file");
+            return;
+          }
+          chosenFile = std::filesystem::absolute(path, ec).lexically_normal();
+          if (ec) {
+            setStatus("Cannot resolve the GLSL file path");
             return;
           }
         } catch (const std::exception &) {
           setStatus("GLSL path contains invalid characters");
           return;
         }
+      } else {
+        std::string message;
+        if (!Custom::SaveSidecar(physicalSettingsPath, {}, &message)) {
+          setStatus("Could not clear shader folder: " + message);
+          return;
+        }
+        desktopShaderDirectory.clear();
+        desktopShaderFiles.clear();
+        desktopCustomShaderExpanded = false;
       }
-      desktopDisplayDraft.upscaling.shaderFiles = desktopDisplayPathEdit;
+      desktopDisplayDraft.upscaling.shaderFiles = chosenFile.empty()
+          ? std::string{} : chosenFile.u8string();
       if (!desktopDisplayPathEdit.empty()) {
+        if (!engine->GetUpscaler().supports(Kotonoha::UpscaleBackend::MPV))
+          desktopDisplayDraft.renderer = "opengl";
         desktopDisplayDraft.upscaling.backend = Kotonoha::UpscaleBackend::MPV;
         desktopDisplayDraft.upscaling.factor =
-            std::max(2.0f, desktopDisplayDraft.upscaling.factor);
+            Custom::RecommendedFactor(chosenFile,
+                                      desktopDisplayDraft.upscaling.factor);
       }
       finishPopup();
       // GLSL editor confirmation must behave like every other Display choice:
@@ -4237,19 +4364,43 @@ bool Runtime::handleDesktopDisplayPanel(Kotonoha::EventRef event) {
       }
       desktopDisplayDraft.upscaling.backend = backend;
     } else if (popup == DesktopDisplayPopup::Shader) {
-      if (!engine->GetUpscaler().supports(Kotonoha::UpscaleBackend::MPV)) {
-        setStatus("Preset needs MPV/OpenGL, unavailable on this renderer. "
-                  "Select OpenGL in the launcher and restart.");
-        finishPopup();
-        playSound(Ui::UiSfxCue::Cancel);
+      const auto &row = shaderRows[static_cast<std::size_t>(choice)];
+      if (row.type == Custom::Row::Type::BuiltinFolder ||
+          row.type == Custom::Row::Type::CustomFolder) {
+        // Expanding/collapsing must not apply settings or close the popup.
+        namespace Catalog = Kotonoha::SchoolDaysShaderPresetCatalog;
+        auto &expanded = row.type == Custom::Row::Type::CustomFolder
+            ? desktopCustomShaderExpanded
+            : desktopShaderExpanded[Catalog::Index(row.tier)];
+        expanded = !expanded;
+        desktopDisplayPopupHover = choice;
+        const auto newCount = static_cast<int>(
+            Custom::VisibleRows(desktopShaderExpanded, desktopCustomShaderExpanded,
+                                desktopShaderDirectory.empty() ? nullptr : &folder).size());
+        desktopDisplayPopupScroll = std::clamp(
+            desktopDisplayPopupScroll, 0,
+            std::max(0, newCount - kDesktopPopupRows));
+        playSound(Ui::UiSfxCue::Click);
         return;
       }
+      if (!engine->GetUpscaler().supports(Kotonoha::UpscaleBackend::MPV))
+        desktopDisplayDraft.renderer = "opengl";
       desktopDisplayDraft.upscaling.backend = Kotonoha::UpscaleBackend::MPV;
-      desktopDisplayDraft.upscaling.factor =
-          std::max(2.0f, desktopDisplayDraft.upscaling.factor);
-      desktopDisplayDraft.upscaling.preset =
-          Kotonoha::UpscalePresets()[static_cast<size_t>(choice)];
-      desktopDisplayDraft.upscaling.shaderFiles.clear();
+      if (row.type == Custom::Row::Type::CustomFile) {
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(row.shader, ec) || ec) {
+          setStatus("GLSL file is missing. Reopen the shader folder.");
+          return;
+        }
+        desktopDisplayDraft.upscaling.factor = Custom::RecommendedFactor(
+            row.shader, desktopDisplayDraft.upscaling.factor);
+        desktopDisplayDraft.upscaling.shaderFiles = row.shader.u8string();
+      } else {
+        desktopDisplayDraft.upscaling.factor =
+            std::max(2.0f, desktopDisplayDraft.upscaling.factor);
+        desktopDisplayDraft.upscaling.preset = row.preset;
+        desktopDisplayDraft.upscaling.shaderFiles.clear();
+      }
     }
     finishPopup();
     // Resolution, backend, shader and GLSL selections are also immediate.
@@ -6267,7 +6418,7 @@ void Runtime::handlePanel(const Ui::Output &output) {
           // SaveLoad owner (test/debug and engine fallback paths).
           loadSlot(result.slot);
         }
-      } catch (const std::exception &error) { setStatus(error.what()); }
+      } catch (const std::exception &error) { setStatus(error.what(), true); }
       break;
     case Action::SaveSlotRequested:
       try {
@@ -6276,7 +6427,7 @@ void Runtime::handlePanel(const Ui::Output &output) {
       } catch (const std::exception &error) {
         SDL_LogError(Kotonoha::LogUI, "School Days save slot %d: %s",
                      result.slot, error.what());
-        setStatus(error.what());
+        setStatus(error.what(), true);
       }
       saveLoadPage = -1;
       break;
@@ -6430,6 +6581,7 @@ std::string Runtime::debugNode() const {
   return temporaryPlaybackActive() ? scene.sceneKey : bridge.CurrentScene().sceneKey;
 }
 
+#if !defined(KOTONOHA_DISTRIBUTION_BUILD)
 std::vector<Kotonoha::DebugNode> Runtime::debugNodes() const {
   const auto *document = bridge.Session().Adapter()->document;
   std::vector<Kotonoha::DebugNode> nodes;
@@ -6501,5 +6653,13 @@ void Runtime::dumpKtrf(const std::string &path) const {
   Kotonoha::writeTextFileAtomically(path,
       std::string(reinterpret_cast<const char *>(document->bytes), document->size));
 }
+#else
+// The virtual API is retained for ABI compatibility with the generic Runtime,
+// but a commercial binary has no jump, route editing or script export logic.
+std::vector<Kotonoha::DebugNode> Runtime::debugNodes() const { return {}; }
+void Runtime::debugJumpToNode(const std::string &) {}
+void Runtime::loadKtrf(const std::string &) {}
+void Runtime::dumpKtrf(const std::string &) const {}
+#endif
 
 } // namespace SchoolDays

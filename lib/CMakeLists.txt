@@ -151,6 +151,12 @@ if(KOTONOHA_STATIC_ENGINE)
 else()
     set(kotonoha_engine_linkage SHARED)
 endif()
+set(KOTONOHA_DEVELOPER_SOURCES)
+if(NOT KOTONOHA_DISTRIBUTION_BUILD)
+    list(APPEND KOTONOHA_DEVELOPER_SOURCES
+        src/debug/DebugOverlay.cpp
+        src/mcp/MCPServer.cpp)
+endif()
 add_library(KotonohaEngine ${kotonoha_engine_linkage}
     src/core/AssetProvider.cpp
     src/core/AssetOverlay.cpp
@@ -187,7 +193,6 @@ add_library(KotonohaEngine ${kotonoha_engine_linkage}
     src/events/BackAction.cpp
     src/events/BacklogEvents.cpp
     src/events/InputActions.cpp
-    src/debug/DebugOverlay.cpp
     src/debug/ImGuiTheme.cpp
     src/localization/Encoding.cpp
     src/localization/Translation.cpp
@@ -203,7 +208,7 @@ add_library(KotonohaEngine ${kotonoha_engine_linkage}
     src/media/upscaling/MPVCompatibleUpscaler.cpp
     src/media/upscaling/MetalFXUpscaler.mm
     src/mobile/AndroidDisplay.cpp
-    src/mcp/MCPServer.cpp
+    ${KOTONOHA_DEVELOPER_SOURCES}
     src/script/Timeline.cpp
     src/script/TimelinePlayer.cpp
     src/script/KtrfScript.cpp
@@ -218,6 +223,9 @@ add_library(KotonohaEngine ${kotonoha_engine_linkage}
 add_library(Kotonoha::Engine ALIAS KotonohaEngine)
 add_library(kotonoha ALIAS KotonohaEngine)
 target_compile_features(KotonohaEngine PUBLIC cxx_std_17)
+if(KOTONOHA_DISTRIBUTION_BUILD)
+    target_compile_definitions(KotonohaEngine PUBLIC KOTONOHA_DISTRIBUTION_BUILD=1)
+endif()
 set_target_properties(KotonohaEngine kotonoha_imgui PROPERTIES
     CXX_EXTENSIONS OFF
     VERSION ${PROJECT_VERSION}

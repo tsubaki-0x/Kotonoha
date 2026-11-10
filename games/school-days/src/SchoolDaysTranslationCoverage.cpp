@@ -3,6 +3,7 @@
 #include "SchoolDaysAssets.hpp"
 #include <Kotonoha/core/FileSystem.hpp>
 #include <Kotonoha/parsers/Documents.hpp>
+#include <Kotonoha/routing/SchoolDaysGpkLanguageProfile.hpp>
 #include <Kotonoha/routing/SchoolDaysLxhContent.hpp>
 #include <Kotonoha/routing/SchoolDaysKtrfSession.hpp>
 
@@ -123,6 +124,36 @@ bool ReviewedReason(const std::string *value) {
       "genuinely_bilingual_term", "honorific", "emoticon", "sound_effect",
       "brand_name", "location_name", "nickname", "foreign_name"};
   return approved.find(reason) != approved.end();
+}
+
+std::vector<std::filesystem::path> LocaleJsonDirectories(
+    const std::filesystem::path &baseFile) {
+  namespace fs = std::filesystem;
+  const auto folder = baseFile.parent_path().empty()
+                          ? fs::path(".") : baseFile.parent_path();
+  // A previously selected flat locale moves to translations/jsons. Probe
+  // the organized directory FIRST, then legacy flat, no matter where the
+  // saved base JSON still resides. For a custom external JSON, only its
+  // adjacent sidecar may be automatically matched.
+  if (folder.filename() == "translations")
+    return {folder / "jsons", folder};
+  if (folder.filename() == "jsons" &&
+      folder.parent_path().filename() == "translations")
+    return {folder, folder.parent_path()};
+  return {folder};
+}
+
+std::optional<std::filesystem::path> FindExactLocaleJson(
+    const std::vector<std::filesystem::path> &folders,
+    const std::vector<std::string> &names) {
+  // Preference is by folder (organized first), then exact filename casing.
+  // No case-insensitive choice of an unrelated locale is ever permitted.
+  for (const auto &folder : folders)
+    for (const auto &name : names)
+      if (auto path = SchoolDaysGpkLanguageProfile::detail::ExactFile(
+              folder, name))
+        return path;
+  return std::nullopt;
 }
 } // namespace
 
@@ -388,20 +419,10 @@ Translation SchoolDaysTranslationGate::LoadReviewedIdentities(
   if (localeJsonPath.empty()) return reviewed;
   const auto resolved = FileResolver::findAsset(localeJsonPath)
                             .value_or(std::filesystem::path(localeJsonPath));
-  const auto manifest = resolved.parent_path() /
-      (resolved.stem().string() + "-reviewed-identities.json");
-  std::error_code error;
-  if (!std::filesystem::exists(manifest, error)) {
-    if (error) throw std::runtime_error(
-        "Cannot inspect School Days locale identity manifest: " +
-        manifest.string());
-    return reviewed;
-  }
-  if (!std::filesystem::is_regular_file(manifest, error) || error)
-    throw std::runtime_error(
-        "Invalid School Days locale identity manifest: " +
-        manifest.string());
-  reviewed.load(manifest.string());
+  const auto name = resolved.stem().string() + "-reviewed-identities.json";
+  if (const auto manifest = FindExactLocaleJson(
+          LocaleJsonDirectories(resolved), {name}))
+    reviewed.load(manifest->string());
   return reviewed;
 }
 
@@ -431,23 +452,31 @@ std::string SchoolDaysTranslationGate::DlcJsonPath(
     // Preserve the selected base JSON's casing for adjacent LxH discovery:
     // zh-CN.json pairs with zh-CN-lxh.json on case-sensitive filesystems.
     // The canonical lower-case locale remains the fallback for prior packs.
-    for (const auto &filename : {base.stem().string() + "-lxh.json", name}) {
-      const auto adjacent = base.parent_path() / filename;
-      std::error_code error;
-      if (std::filesystem::is_regular_file(adjacent, error))
-        return adjacent.string();
-      // MSVC may report ENOENT for a missing adjacent optional sidecar.
-      if (error && error != std::errc::no_such_file_or_directory)
-        throw std::runtime_error("Cannot access School Days DLC JSON: " +
-                                 adjacent.string());
-    }
+    if (const auto adjacent = FindExactLocaleJson(
+            LocaleJsonDirectories(base),
+            {base.stem().string() + "-lxh.json", name}))
+      return adjacent->string();
+    const auto folder = base.parent_path();
+    const bool installedLocale =
+        folder.filename() == "translations" ||
+        (folder.filename() == "jsons" &&
+         folder.parent_path().filename() == "translations");
+    // An explicitly chosen external/custom HQ JSON must not silently inherit
+    // an installed game's different-revision LxH dictionary. Only a sidecar
+    // adjacent to that custom source is considered a valid automatic pair.
+    if (!installedLocale) return {};
   }
-  if (const auto installed = FileResolver::findGameAsset(
-          "school-days", "translations/" + name)) {
-    if (!std::filesystem::is_regular_file(*installed))
-      throw std::runtime_error("School Days DLC JSON is not a file: " +
+  for (const auto &relative : {"translations/jsons/" + name,
+                               "translations/" + name}) {
+    if (const auto installed = FileResolver::findGameAsset(
+            "school-days", relative)) {
+      if (auto exact = SchoolDaysGpkLanguageProfile::detail::ExactFile(
+              installed->parent_path(), name))
+        return exact->string();
+      // The game resolver must not reinterpret a case-mismatched locale path.
+      throw std::runtime_error("School Days DLC JSON filename mismatch: " +
                                installed->string());
-    return installed->string();
+    }
   }
   return {};
 }
