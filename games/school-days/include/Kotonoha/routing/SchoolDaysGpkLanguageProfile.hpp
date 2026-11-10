@@ -24,7 +24,7 @@ inline constexpr const char *Version = "SchoolDaysTranslationPack.v1";
 
 inline bool Supported(const std::string &locale) {
   return locale == "en" || locale == "pt-BR" ||
-         locale == "es" || locale == "zh-CN";
+         locale == "es" || locale == "zh-CN" || locale == "ru";
 }
 
 inline fs::path Sidecar(const std::string &settingsFile) {
@@ -198,6 +198,7 @@ inline fs::path ScriptPath(const std::string &settingsFile,
   if (locale == "en") return {};
   const char *name = locale == "pt-BR" ? "Script - Brazilian.GPK"
                       : locale == "es" ? "Script - Spanish.GPK"
+                      : locale == "ru" ? "Script - Russian.GPK"
                                        : "Script - chinese-compatible.GPK";
   // The downloaded Chinese pack is retained byte-for-byte as
   // "Script - chinese.GPK". It uses older GB18030/quoted-comma ORS records

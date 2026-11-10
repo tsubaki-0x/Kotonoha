@@ -20,7 +20,7 @@ public:
   // GPK locales are opt-in and never silently replace legacy user JSONs.
   enum class Language {
     English, Spanish, ChineseSimplified, CustomJson,
-    EnglishGpk, BrazilianGpk, ChineseGpk, SpanishGpk
+    EnglishGpk, BrazilianGpk, ChineseGpk, SpanishGpk, RussianGpk
   };
 
   static bool validateRoute(const std::string &path, std::string &info);
@@ -36,7 +36,7 @@ public:
   static bool nonNativeLanguagePreferenceSelected(const std::string &settingsPath);
   static std::string rememberedLxhJsonPath(const std::string &settingsPath,
                                            const std::string &baseJsonPath);
-  // Empty for legacy profiles, otherwise "en", "pt-BR", "es" or "zh-CN".
+  // Empty for legacy profiles, otherwise "en", "pt-BR", "es", "zh-CN" or "ru".
   // Throws on a corrupt native-pack profile instead of falling back to EN.
   static std::string rememberedGpkLocale(const std::string &settingsPath);
   // Used by direct --no-launcher startup after generic settings were loaded.

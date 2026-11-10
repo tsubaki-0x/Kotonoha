@@ -45,6 +45,7 @@ class Subtitles final : public Kotonoha::SubtitleScene {
   const Kotonoha::Translation *dlcDictionary_ = nullptr;
   std::optional<std::size_t> lxhFirstEvent_;
   std::string locale_ = "en";
+  bool nativeGpk_ = false;
   void refreshLocalizedCues();
 protected:
   bool replacesPreviousCue() const override { return true; }
@@ -60,11 +61,11 @@ public:
       const Kotonoha::Translation &dictionary,
       const Kotonoha::Translation *dlc = nullptr,
       std::optional<std::size_t> lxhFirstEvent = std::nullopt,
-      std::string_view locale = "en");
+      std::string_view locale = "en", bool nativeGpk = false);
   void bind(const Kotonoha_orsData &script, int nodeId,
             const Kotonoha::Translation *dlc = nullptr,
             std::optional<std::size_t> lxhFirstEvent = std::nullopt,
-            std::string locale = "en");
+            std::string locale = "en", bool nativeGpk = false);
   void translationChanged(const std::string &original,
                           const std::string &previous,
                           const std::string &translated) override;

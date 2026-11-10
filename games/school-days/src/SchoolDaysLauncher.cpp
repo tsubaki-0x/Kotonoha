@@ -121,7 +121,8 @@ bool isGpkLanguage(SchoolDays::Launcher::Language language) {
   return language == Language::EnglishGpk ||
          language == Language::BrazilianGpk ||
          language == Language::SpanishGpk ||
-         language == Language::ChineseGpk;
+         language == Language::ChineseGpk ||
+         language == Language::RussianGpk;
 }
 
 std::string gpkLocale(SchoolDays::Launcher::Language language) {
@@ -131,6 +132,7 @@ std::string gpkLocale(SchoolDays::Launcher::Language language) {
   case Language::BrazilianGpk: return "pt-BR";
   case Language::SpanishGpk: return "es";
   case Language::ChineseGpk: return "zh-CN";
+  case Language::RussianGpk: return "ru";
   default: return {};
   }
 }
@@ -352,7 +354,8 @@ Launcher::Launcher(std::string settingsPath, std::string directory,
       selectedLanguage = nativeLocale == "en" ? Language::EnglishGpk
           : nativeLocale == "pt-BR" ? Language::BrazilianGpk
           : nativeLocale == "es" ? Language::SpanishGpk
-                                  : Language::ChineseGpk;
+          : nativeLocale == "zh-CN" ? Language::ChineseGpk
+                                     : Language::RussianGpk;
       settings().translationPath.clear();
       selectedLocaleBaseJsonPath.clear();
       selectedManualLxhJsonPath.clear();
@@ -1348,6 +1351,7 @@ void Launcher::drawLanguageOptions() {
   case Language::BrazilianGpk: current = "Português (Brasil) (Script.GPK)"; break;
   case Language::SpanishGpk: current = "Español (Script.GPK)"; break;
   case Language::ChineseGpk: current = "Chinese - Simplified (Script.GPK)"; break;
+  case Language::RussianGpk: current = "Russian / Русский (Script.GPK)"; break;
   case Language::Spanish: current = "Spanish (legacy JSON)"; break;
   case Language::ChineseSimplified: current = "Chinese (legacy JSON)"; break;
   case Language::CustomJson: current = "Custom JSON (legacy)"; break;
@@ -1360,6 +1364,19 @@ void Launcher::drawLanguageOptions() {
     if (ImGui::Selectable("Português (Brasil) (Script.GPK)",
                           beforeSelection == Language::BrazilianGpk))
       setLanguage(Language::BrazilianGpk);
+    std::error_code russianError;
+    const bool russianPackReady = !getSettingsPath().empty() &&
+        fs::is_regular_file(Kotonoha::SchoolDaysGpkLanguageProfile::ScriptPath(
+            getSettingsPath(), "ru"), russianError) && !russianError &&
+        fs::is_regular_file(Kotonoha::SchoolDaysGpkLanguageProfile::LxhPath(
+            getSettingsPath(), "ru"), russianError) && !russianError;
+    ImGui::BeginDisabled(!russianPackReady);
+    if (ImGui::Selectable("Russian / Русский (Script.GPK + LxH)",
+                          beforeSelection == Language::RussianGpk))
+      setLanguage(Language::RussianGpk);
+    ImGui::EndDisabled();
+    if (!russianPackReady)
+      ImGui::TextDisabled("Russian requires Script - Russian.GPK and ru-lxh.GPK.");
     // The original Spanish NSIS patch modifies controls and media paths.
     // Enable this option only after certified, retail-compatible GPKs exist.
     std::error_code spanishError;
@@ -2119,6 +2136,7 @@ void Launcher::save() {
                         : language() == Language::BrazilianGpk ? "brazilian-gpk"
                         : language() == Language::SpanishGpk ? "spanish-gpk"
                         : language() == Language::ChineseGpk ? "chinese-gpk"
+                        : language() == Language::RussianGpk ? "russian-gpk"
                         : "custom";
     std::string payload = std::string(value) + "\n";
     if (language() != Language::English && !isGpkLanguage(language()))

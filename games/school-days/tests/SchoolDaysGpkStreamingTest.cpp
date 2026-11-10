@@ -216,6 +216,15 @@ void CheckIntegratedReadAndSeek(SchoolDays::Assets& assets,
   const auto decoded = assets.read(reference);
   Require(decoded == expected, "Integrated asset bytes drifted: " + logical);
   auto stream = assets.openStream(reference);
+  const bool media = logical.size() >= 4u &&
+      (logical.compare(logical.size() - 4u, 4u, ".wmv") == 0 ||
+       logical.compare(logical.size() - 4u, 4u, ".ogg") == 0);
+  if (media) {
+    // FFmpeg now receives these seek-heavy LxH inputs from exact in-memory
+    // bytes, so a second raw GPK stream must not stay open for playback.
+    Require(!stream, "Integrated LxH media unexpectedly exposed raw stream: " + logical);
+    return;
+  }
   Require(stream && stream->size() == expected.size(),
           "Integrated LxH raw stream unavailable: " + logical);
   std::array<Uint8, 16> chunk{};

@@ -109,6 +109,26 @@ void TestNativeBoundariesAndLayers() {
               localized[1].assText,
           "LxH subtitle localization changed the canonical ASS speakers");
 
+  // Native GPK locales already embed every localized HQ+LxH PRINT_TEXT in
+  // their seven ORS grafts. An empty JSON is intentional, not a missing LxH
+  // translation; the previous live SubtitleScene threw on the first line and
+  // a Title LOAD silently returned to the menu in every native-GPK language.
+  const auto nativeCues = SchoolDays::Subtitles::TranslateCues(
+      originalCues, ordinals, 23, enBase, nullptr, first, "ru", true);
+  Require(nativeCues.size() == originalCues.size() &&
+              nativeCues[0].text == "HQ original." &&
+              nativeCues[1].text == "LxH fuente." &&
+              nativeCues[2].text == "LxH fuente." &&
+              nativeCues[1].speaker == "Kotonoha",
+          "Native-GPK LxH subtitles must read pretranslated ORS without JSON");
+  bool rejectedUntranslatedDlc = false;
+  try {
+    (void)SchoolDays::Subtitles::TranslateCues(
+        originalCues, ordinals, 23, enBase, nullptr, first, "ru", false);
+  } catch (const std::runtime_error &) { rejectedUntranslatedDlc = true; }
+  Require(rejectedUntranslatedDlc,
+          "JSON mode must still reject an unprovided LxH translation");
+
   // Missing LxH text is an error even when English HQ has no JSON loaded.
   enDlc.mutableSections()["23"].erase(Gate::ContextKey(ordinals[2], 0));
   enDlc.mutableSections()["23"].erase("LxH fuente.");

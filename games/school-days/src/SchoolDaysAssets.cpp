@@ -302,6 +302,20 @@ std::string Assets::localPathAsset(const std::string &id) const {
 std::unique_ptr<Kotonoha::AssetStream> Assets::openStream(const std::string &id) const {
   std::string logical;
   if (!Kotonoha::SchoolDaysLogicalFromGpkUri(id, &logical)) return {};
+  // The seven additional LxH WMV/OGG resources are small, seek-heavy
+  // FFmpeg inputs embedded in an independent 28-entry GPK. Read the exact
+  // indexed bytes into memory instead of exposing a second live file cursor;
+  // MediaPlayer::open/prepareInput automatically calls read() when a stream is
+  // unavailable. This is intentionally limited to LxH media, not HQ movies.
+  if (Kotonoha::SchoolDaysLxhContent::IsPackResource(logical)) {
+    std::string folded = logical;
+    std::transform(folded.begin(), folded.end(), folded.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (folded.size() >= 4u &&
+        (folded.compare(folded.size() - 4u, 4u, ".wmv") == 0 ||
+         folded.compare(folded.size() - 4u, 4u, ".ogg") == 0))
+      return {};
+  }
   return Kotonoha::OpenMountedSchoolDaysAssetStream(logical);
 }
 

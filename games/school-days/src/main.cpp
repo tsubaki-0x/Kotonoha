@@ -78,7 +78,7 @@ struct Application {
         throw std::runtime_error(
             "GPK locale conflicts with a stored JSON translation. "
             "Select one language in the launcher.");
-      runtime.setLxhTranslation({}, nativeGpkLocale);
+      runtime.setLxhTranslation({}, nativeGpkLocale, true);
       return;
     }
     const auto &dictionary = engine.GetTranslation();

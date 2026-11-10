@@ -36,12 +36,25 @@ base em espanhol com HQ nas sete cenas e formato ORS compatível, passando
 encontrado na Release examinada; gerar apenas o sufixo espanhol com HQ
 em inglês seria incorreto.
 
-ZH-CN: o GPK chinês observado usa GB18030, nomes sem subpasta English e
-ORS entre aspas com campos separados por vírgula, diferentes do parser L4
-de campos TAB. O gerador bloqueia zh-CN deliberadamente, mesmo com as
-273 entradas JSON presentes. Antes de habilitá-lo, é necessária uma
-conversão própria comprovada de todas as 1859 cenas, com chaves, timing,
-charset, semântica e runtime testados.
+ZH-CN: o GPK chinês bruto usa GB18030, caminhos incompatíveis e outra ordem
+de eventos; **nunca o montar diretamente**. O conversor dedicado
+`build_chinese_compatible_gpk.py` usa o `Packs/Script.GPK` retail autenticado
+como autoridade dos 1859 caminhos e de todos os comandos, ticks, mídias e
+escolhas. Aplica os 30.968 textos/opções de `zh-CN.json` (sem fallback
+inglês) e a fala da única cena extra fora da KTRF localizada por tick/
+falante na fonte chinesa bruta. O arquivo derivado é gravado somente em
+`tools/qa-lab/state/chinese-compatible/run-ID/Script - chinese-compatible.GPK`.
+Com esse GPK como `--base-gpk zh-CN=...`, o gerador L×H pode produzir
+`zh-CN-lxh.GPK` (7 ORS/273 falas) em `tools/qa-lab/state/lxh-locales/`.
+Exemplo de reconstrução chinesa a partir dos arquivos pessoais instalados:
+
+    python games/school-days/tools/build_chinese_compatible_gpk.py --retail-gpk "build/school-days-dev-control4/games/school-days/Release/Packs/Script.GPK" --chinese-gpk "build/school-days-dev-control4/games/school-days/Release/translations/scripts/Script - chinese.GPK" --zh-json "build/school-days-dev-control4/games/school-days/Release/translations/jsons/zh-CN.json" --ktrf "games/school-days/game-assets/school-days-hq.ktnroute" --build
+
+O montador do Windows continua comparando todas as cenas traduzidas com o
+Script.GPK retail; se os comandos/timings divergirem a inicialização falha
+explicitamente. A tradução russa usa `Script - Russian.GPK` e `ru-lxh.GPK`;
+uma legenda extra de Taisuke (cena 03-KB-D10, frames 403–577), sem alteração
+de áudio/controle, é reconhecida exclusivamente para `ru` nessa cena.
 
 Testes com ORS e GPKs sintéticos, sem modificar assets licenciados:
 

@@ -119,6 +119,7 @@ class Runtime final : public Kotonoha::Runtime {
   Kotonoha::Engine *engine = nullptr;
   Kotonoha::Translation lxhTranslation;
   std::string lxhSubtitleLocale = "en";
+  bool nativeGpkTranslation = false;
   std::optional<std::size_t> lxhFirstTranslationEvent;
   std::string translateText(std::size_t ordinal, std::size_t slot,
                             const std::string &original) const;
@@ -451,7 +452,7 @@ public:
   // Frozen at startup, before gameplay begins; used by subtitles, choices and
   // BackLog through one context-sensitive translator.
   void setLxhTranslation(Kotonoha::Translation translation,
-                         std::string locale = "en");
+                         std::string locale = "en", bool nativeGpk = false);
   void shutdown();
   // SDL close/quit requests are routed through the retail EXIT confirmation.
   // Returns true when the native request was consumed by School Days.

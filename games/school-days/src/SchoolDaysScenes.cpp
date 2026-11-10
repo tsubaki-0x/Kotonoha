@@ -125,11 +125,12 @@ std::string Subtitles::displayCueText(const std::string &text) const {
 void Subtitles::bind(const Kotonoha_orsData &script, int nodeId,
                      const Kotonoha::Translation *dlc,
                      std::optional<std::size_t> lxhFirstEvent,
-                     std::string locale) {
+                     std::string locale, bool nativeGpk) {
   nodeId_ = nodeId;
   dlcDictionary_ = dlc;
   lxhFirstEvent_ = lxhFirstEvent;
   locale_ = std::move(locale);
+  nativeGpk_ = nativeGpk;
   originalCues_.clear();
   cueOrdinals_.clear();
   std::size_t ordinal = 0;
@@ -154,7 +155,7 @@ std::vector<Kotonoha::SubtitleCue> Subtitles::TranslateCues(
     const Kotonoha::Translation &dictionary,
     const Kotonoha::Translation *dlc,
     std::optional<std::size_t> lxhFirstEvent,
-    std::string_view locale) {
+    std::string_view locale, bool nativeGpk) {
   if (original.size() != ordinals.size())
     throw std::invalid_argument("School Days subtitle event ordinals mismatch");
   auto localized = original;
@@ -163,9 +164,13 @@ std::vector<Kotonoha::SubtitleCue> Subtitles::TranslateCues(
     auto &cue = localized[i];
     const auto source = cue.text;
     const bool epilogue = lxhFirstEvent && ordinals[i] >= *lxhFirstEvent;
-    cue.text = Kotonoha::SchoolDaysTranslationGate::TranslateLayered(
-        dictionary, dlc ? *dlc : empty, nodeId, ordinals[i], 0, cue.text,
-        epilogue);
+    // In a selected native Script.GPK locale, every HQ and LxH PRINT_TEXT is
+    // already localized in the ORS itself. Requiring an additional JSON key
+    // for the epilogue would throw during LOAD and return the player to Title.
+    if (!nativeGpk)
+      cue.text = Kotonoha::SchoolDaysTranslationGate::TranslateLayered(
+          dictionary, dlc ? *dlc : empty, nodeId, ordinals[i], 0, cue.text,
+          epilogue);
     if (epilogue && Kotonoha::SchoolDaysDisplayNarrativeMarkup::SuppressLxhCredit(
                         source, cue.text, locale))
       cue.text = "\xE2\x80\x8B";
@@ -176,7 +181,7 @@ std::vector<Kotonoha::SubtitleCue> Subtitles::TranslateCues(
 void Subtitles::refreshLocalizedCues() {
   auto localized = TranslateCues(originalCues_, cueOrdinals_, nodeId_,
                                 engine.GetTranslation(), dlcDictionary_,
-                                lxhFirstEvent_, locale_);
+                                lxhFirstEvent_, locale_, nativeGpk_);
   for (auto &cue : localized)
     cue.text = Kotonoha::SchoolDaysDisplayNarrativeMarkup::Project(cue.text);
   // Do not pass speaker labels through Translation::text. A live JSON edit

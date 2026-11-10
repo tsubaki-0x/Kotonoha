@@ -59,6 +59,12 @@ SchoolDaysGpkLookupStatus LookupMountedSchoolDaysAsset(
 bool ReadMountedSchoolDaysAsset(std::string_view logicalPath,
                                std::vector<uint8_t>* out,
                                std::string* error = nullptr);
+// Ending scripts are a dedicated resource of Packs/LxH.GPK (or the selected
+// locale's *-lxh.GPK), never the same-named base Script.GPK entry. Bypass
+// generic retail/overlay lookup when creating one of the seven endings.
+bool ReadMountedSchoolDaysEndingOrs(std::string_view logicalPath,
+                                   std::vector<uint8_t>* out,
+                                   std::string* error = nullptr);
 // Opens raw (uncompressed) GPK entries as direct seekable streams. Compressed
 // entries intentionally return null so callers can use the normal decoded
 // memory path instead.
