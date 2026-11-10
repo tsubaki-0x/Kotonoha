@@ -5235,8 +5235,10 @@ bool Runtime::onScreenEvent(Kotonoha::EventRef event) {
   if (transportFade.InputLocked()) return true;
   if (exitTransition.InputLocked()) return true;
   if (systemPanelTransition.InputLocked()) return true;
-  if (loadTransition.InputLocked() && FrontendInputEvent(event.type)) return true;
 #if defined(__ANDROID__) || defined(ANDROID)
+  // Mobile swipes must not turn Save/Replay pages while the load transition
+  // owns input. Keep desktop load-transition behavior untouched.
+  if (loadTransition.InputLocked() && FrontendInputEvent(event.type)) return true;
   if (currentState == Kotonoha::GameState::Gameplay && !modal() &&
       !frontendTransition.Active(SDL_GetTicks()) &&
       !transportFade.InputLocked() && !exitTransition.Active() &&

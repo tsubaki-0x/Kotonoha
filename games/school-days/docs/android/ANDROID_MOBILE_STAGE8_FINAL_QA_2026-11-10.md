@@ -10,8 +10,8 @@ Não foram executados o EXE retail nem o instalador Windows. Saves existentes,
 
 | Variante | APK no build local | Bytes | SHA-256 |
 |---|---|---:|---|
-| DEV, assinada apenas com chave Android Debug | `Android/app/build/outputs/apk/schoolDays/dev/app-schoolDays-dev.apk` | 42.905.229 | `1CA340BEBD7609B29CB80E4B8B102E2CD73CFB1451FE5877B6A4F843AAFE12EB` |
-| Comercial, **unsigned** | `Android/app/build/outputs/apk/schoolDays/dist/app-schoolDays-dist-unsigned.apk` | 24.273.379 | `5E81788462789D3BC9FD497CC656DF3B9468C892F3F31CDA9BDEFE761016ABD0` |
+| DEV, assinada apenas com chave Android Debug | `Android/app/build/outputs/apk/schoolDays/dev/app-schoolDays-dev.apk` | 42.905.229 | `A893F10BDA83263E436B79C10DC2B817E5E49EDB4D00FA68910357BA1BDF7E70` |
+| Comercial, **unsigned** | `Android/app/build/outputs/apk/schoolDays/dist/app-schoolDays-dist-unsigned.apk` | 24.273.379 | `A1466486198B4BCAB98C3E39CBEA3D4ACEEADE3943F4B9255C6A4566EC3C4F7C` |
 
 **Não publicar ou compartilhar o APK unsigned como produto instalável**: deve
 receber uma assinatura release de quem detém a chave. Não foi introduzido
@@ -59,6 +59,9 @@ Persistem identificadores internos de depuração em tipos/RTTI do motor, mas
    marcadores `pending`/`ready` para recuperar uma instalação interrompida
    sem sobrescrever dados. Depois da importação concluída, uma nova abertura
    não restaura saves que o usuário excluiu.
+5. O bloqueio de toque durante a transição de Load foi restrito
+   explicitamente ao Android; o caminho de entrada Windows anterior ficou
+   intacto. DEV e DIST foram recompilados após essa última correção.
 5. A roda sintética Android foi alinhada ao sentido natural do arrasto:
    dedo para cima avança conteúdo/páginas. Movimentos longos emitem passos
    proporcionais; fades, carregamentos e transições bloqueiam paginação
