@@ -101,18 +101,9 @@ if(ANDROID)
     target_link_libraries(kotonoha_ffmpeg INTERFACE ${FFMPEG_LIBRARIES})
     set(kotonoha_ffmpeg_target kotonoha_ffmpeg)
     set(kotonoha_json_target json-c::json-c)
-    # libass is a static vcpkg library on Android; include its private
-    # FreeType/HarfBuzz/FriBidi dependencies in the final shared engine.
-    # The NDK toolchain supplies the selected C++ runtime. HarfBuzz's .pc
-    # exports -lc++, which FindPkgConfig can resolve to a host archive.
-    get_target_property(_ass_libraries PkgConfig::LIBASS INTERFACE_LINK_LIBRARIES)
-    list(FILTER _ass_libraries EXCLUDE REGEX "(^|[/\\\\])libc\\+\\+\\.(a|so)$|^c\\+\\+$")
-    set_property(TARGET PkgConfig::LIBASS PROPERTY
-        INTERFACE_LINK_LIBRARIES "${_ass_libraries}")
-    list(REMOVE_ITEM LIBASS_STATIC_LIBRARIES c++)
-    target_link_directories(PkgConfig::LIBASS INTERFACE ${LIBASS_STATIC_LIBRARY_DIRS})
-    target_link_libraries(PkgConfig::LIBASS INTERFACE ${LIBASS_STATIC_LIBRARIES})
-    target_link_options(PkgConfig::LIBASS INTERFACE ${LIBASS_STATIC_LDFLAGS_OTHER})
+    # Android deliberately does not create PkgConfig::LIBASS: the interface
+    # target above links the NDK's native libass/FriBidi/FreeType/HarfBuzz
+    # archives without pulling a host libc++ archive from pkg-config.
 else()
     pkg_check_modules(LIBASS REQUIRED IMPORTED_TARGET libass>=0.17)
     set(kotonoha_ass_target PkgConfig::LIBASS)
