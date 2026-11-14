@@ -7,6 +7,7 @@
 #include <Kotonoha/routing/SchoolDaysGpkLanguageProfile.hpp>
 #include <Kotonoha/routing/SchoolDaysKtrfGameplayBridge.hpp>
 #include <Kotonoha/routing/SchoolDaysKtrfSession.hpp>
+#include <Kotonoha/parsers/Ors.h>
 
 #include <array>
 #include <filesystem>
@@ -37,12 +38,12 @@ struct Ending {
 };
 constexpr std::array<Ending, 7> Endings{{
     {"SaveFile000.DAT", "05/05-A2-Z00"},
-    {"SaveFile001.DAT", "05/05-A2-F00"},
-    {"SaveFile002.DAT", "05/05-G0-L03"},
-    {"SaveFile0012.DAT", "05/05-KC-F00"},
-    {"SaveFile0013.DAT", "05/05-SC-L03"},
-    {"SaveFile0017.DAT", "05/05-SB-E01"},
-    {"SaveFile0019.DAT", "05/05-B0-F00"},
+    {"SaveFile001.DAT", "05/05-SB-E01"},
+    {"SaveFile002.DAT", "05/05-B0-F00"},
+    {"SaveFile003.DAT", "05/05-A2-E00"},
+    {"SaveFile004.DAT", "05/05-SC-L03"},
+    {"SaveFile005.DAT", "05/05-G0-L03"},
+    {"SaveFile006.DAT", "05/05-KC-F00"},
 }};
 
 // Replay the actual transactional bridge LOAD without a renderer or game GUI.
@@ -122,22 +123,49 @@ int main(int argc, char **argv) {
         const auto ors = assets.read(asset);
         const std::string text(ors.begin(), ors.end());
         const std::string marker =
-            "LxH/Media/" + std::string(save.scene).substr(3) + "-LXH";
-        Check(text.find(marker) != std::string::npos,
-              std::string("Saved ending did not resolve to LxH extended ORS: ") +
-                  load.scene.sceneKey);
+            "LxH/Media/" + load.scene.sceneKey.substr(3) + "-LXH";
+        const bool extended = text.find(marker) != std::string::npos;
+        auto script = Kotonoha_OrsParserBytes(ors.data(), ors.size());
+        int nextCount = 0, endRollCount = 0, movieCount = 0;
+        uint32_t nextTick = 0, creditEnd = 0, movieStart = 0;
+        for (const auto *event = script.data; event; event = event->next) {
+          if (event->command == Next) { ++nextCount; nextTick = event->startTick; }
+          if (event->command == END_ROLL) { ++endRollCount; creditEnd = event->endTick; }
+          if (event->command == PLAY_MOVIE && event->data.play_movie &&
+              std::string(event->data.play_movie->path).find(marker) != std::string::npos) {
+            ++movieCount; movieStart = event->startTick;
+          }
+        }
+        Check(nextCount == 1 &&
+                  (load.scene.sceneKey == "05/05-A2-E00" ||
+                   (extended && endRollCount == 1 && movieCount == 1 &&
+                    creditEnd <= movieStart && movieStart < nextTick)),
+              std::string("Saved ending has no complete LxH timeline: ") +
+                  save.filename);
+        if (extended) {
+          const auto code = load.scene.sceneKey.substr(3);
+          for (const auto &logical : {
+                   "LxH/" + code + "-LXH.png",
+                   "LxH/Media/" + code + "-LXH.wmv",
+                   "LxH/Media/" + code + "-LXH.ogg"})
+            Check(Kotonoha::IsSchoolDaysGpkUri(assets.resolve(logical)),
+                  "LxH asset is missing: " + logical);
+        }
         routeError = Kotonoha_KtrfError{};
         Kotonoha::SchoolDaysKtrfGameplayBridge::StepResult restored;
         Check(bridge.LoadSave(bytes, &restored, &routeError),
               std::string("Actual bridge LOAD failed for ") + save.filename +
                   ": " + routeError.message);
-        Check(restored.scene.sceneKey == save.scene &&
-                  bridge.CurrentScene().sceneKey == save.scene &&
+        Check(restored.scene.sceneKey == load.scene.sceneKey &&
+                  bridge.CurrentScene().sceneKey == load.scene.sceneKey &&
                   bridge.CurrentGameplay() != nullptr,
               std::string("Actual LOAD did not activate saved ending: ") +
                   save.filename);
         std::cout << "LXH_RETAIL_SAVE_OK " << save.filename << " => "
-                  << load.scene.sceneKey << " bytes=" << ors.size() << '\n';
+                  << load.scene.sceneKey << " bytes=" << ors.size()
+                  << " extended=" << extended << " next=" << nextCount
+                  << ":" << nextTick << " credits=" << endRollCount << ":" << creditEnd
+                  << " movie=" << movieCount << ":" << movieStart << '\n';
       }
     }
     Kotonoha::ClearSchoolDaysTranslatedGpks();

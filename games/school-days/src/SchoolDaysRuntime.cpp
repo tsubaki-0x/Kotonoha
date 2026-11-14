@@ -905,11 +905,12 @@ Runtime::Runtime(std::shared_ptr<Assets> source, std::string route,
 Runtime::~Runtime() { shutdown(); }
 
 void Runtime::setLxhTranslation(Kotonoha::Translation translation,
-                                std::string locale) {
+                                std::string locale, bool nativeGpk) {
   if (currentState == Kotonoha::GameState::Gameplay)
     throw std::runtime_error("Cannot change LxH language during gameplay");
   lxhTranslation = std::move(translation);
   lxhSubtitleLocale = std::move(locale);
+  nativeGpkText = nativeGpk;
 }
 
 std::string Runtime::translateText(std::size_t ordinal, std::size_t slot,
@@ -917,9 +918,12 @@ std::string Runtime::translateText(std::size_t ordinal, std::size_t slot,
   if (!engine) return original;
   const bool epilogue =
       lxhFirstTranslationEvent && ordinal >= *lxhFirstTranslationEvent;
-  const auto translated = Kotonoha::SchoolDaysTranslationGate::TranslateLayered(
-      engine->GetTranslation(), lxhTranslation, translationRoute(), ordinal,
-      slot, original, epilogue);
+  // Selected native Script.GPK/LxH GPK already contain the localized ORS.
+  // Other locale modes still require complete per-event JSON coverage.
+  const auto translated = nativeGpkText ? original :
+      Kotonoha::SchoolDaysTranslationGate::TranslateLayered(
+          engine->GetTranslation(), lxhTranslation, translationRoute(), ordinal,
+          slot, original, epilogue);
   // Preserve the immutable GPK and translation keys, but never present the
   // Spanish-only LxH attribution in an English or Chinese playback. This is
   // a display projection used by BackLog/PlayData as well as native cues.
@@ -1957,7 +1961,8 @@ void Runtime::bindScene(const Kotonoha::SchoolDaysKtrfScene &next,
   for (auto *event = script.data; event != nullptr; event = event->next)
     event->eventPrepared = false;
     if (subtitles) subtitles->bind(script, translationRoute(), &lxhTranslation,
-                                  lxhFirstTranslationEvent, lxhSubtitleLocale);
+                                  lxhFirstTranslationEvent, lxhSubtitleLocale,
+                                  nativeGpkText);
   // Native ScriptChange truncates abandoned-branch BackLog messages. Replay
   // Data owns an isolated transient history; ordinary HScene Replay owns none.
   const bool playData = playDataPlayback && playDataPlayback->IsOpen();

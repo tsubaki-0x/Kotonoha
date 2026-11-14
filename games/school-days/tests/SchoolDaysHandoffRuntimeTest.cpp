@@ -2,6 +2,8 @@
 #include "SchoolDaysRuntime.hpp"
 
 #include <Kotonoha/core/Engine.hpp>
+#include <Kotonoha/SchoolDaysAssetMount.hpp>
+#include <Kotonoha/routing/SchoolDaysGpkLanguageProfile.hpp>
 
 #include <array>
 #include <filesystem>
@@ -125,8 +127,15 @@ struct Application {
   Kotonoha::Engine engine;
 
   Application(const std::shared_ptr<SchoolDays::Assets> &assets,
-              const char *route, const fs::path &documents)
+              const char *route, const fs::path &documents,
+              const fs::path &lxhJson = {}, const std::string &nativeLocale = {})
       : runtime(assets, route, documents), engine(runtime, Options(assets)) {
+    if (!lxhJson.empty()) {
+      Kotonoha::Translation translation;
+      translation.load(lxhJson.string());
+      runtime.setLxhTranslation(std::move(translation), "en");
+    }
+    if (!nativeLocale.empty()) runtime.setLxhTranslation({}, nativeLocale, true);
     runtime.SetState(Kotonoha::GameState::Gameplay);
   }
   ~Application() { runtime.shutdown(); }
@@ -266,6 +275,12 @@ public:
   }
 
   static void LoadSlot(Runtime &runtime, int slot) { runtime.loadSlot(slot); }
+  static void SaveSlot(Runtime &runtime, int slot) { runtime.saveSlot(slot, u""); }
+  static bool LxhFadeEnabled(const Runtime &runtime) { return runtime.lxhFade.Enabled(); }
+  static uint32_t NextTick(const Runtime &runtime) {
+    const auto next = runtime.timeline.NextTick();
+    return next ? *next : 0u;
+  }
   static void StartFresh(Runtime &runtime) { runtime.reset(); }
 
   static bool MeterLatch(Runtime &runtime) {
@@ -812,6 +827,54 @@ void TestTerminalRelease(const char *route, const fs::path &root) {
 
 int main(int argc, char **argv) {
   try {
+    if (argc == 4 || argc == 5) {
+      const std::string locale = argc == 5 ? argv[4] : "en";
+      if (locale != "en") {
+        const std::string settings = (fs::path(argv[2]) / "settings.json").string();
+        const Kotonoha::SchoolDaysTranslatedGpkSelection selection{
+            locale,
+            Kotonoha::SchoolDaysGpkLanguageProfile::ScriptPath(settings, locale),
+            Kotonoha::SchoolDaysGpkLanguageProfile::LxhPath(settings, locale)};
+        std::string error;
+        Require(Kotonoha::ConfigureSchoolDaysTranslatedGpks(selection, &error), error);
+      }
+      auto assets = std::make_shared<SchoolDays::Assets>(argv[2]);
+      Application app(assets, argv[1], argv[3],
+                      locale == "en"
+                          ? fs::path(argv[2]) / "translations/jsons/en-lxh.json"
+                          : fs::path{}, locale == "en" ? "" : locale);
+      const std::array<const char *, 7> scenes{{
+          "05/05-A2-Z00", "05/05-SB-E01", "05/05-B0-F00",
+          "05/05-A2-E00", "05/05-SC-L03", "05/05-G0-L03",
+          "05/05-KC-F00"}};
+      for (int slot = 0; slot < 7; ++slot) {
+        SchoolDays::RuntimeHandoffTestAccess::LoadSlot(app.runtime, slot);
+        app.runtime.update();
+        Require(app.runtime.debugNode() == scenes[slot] &&
+                    app.runtime.GetState() == Kotonoha::GameState::Gameplay &&
+                    SchoolDays::RuntimeHandoffTestAccess::LxhFadeEnabled(app.runtime) ==
+                        (slot != 3) &&
+                    SchoolDays::RuntimeHandoffTestAccess::NextTick(app.runtime) > 0u &&
+                    !SchoolDays::RuntimeHandoffTestAccess::Pending(app.runtime),
+                "Ending LOAD returned to menu or lost its LxH timeline");
+        std::cout << "LXH_RUNTIME_LOAD " << slot << " scene="
+                  << app.runtime.debugNode() << " state="
+                  << static_cast<int>(app.runtime.GetState()) << " fade="
+                  << SchoolDays::RuntimeHandoffTestAccess::LxhFadeEnabled(app.runtime)
+                  << " next=" << SchoolDays::RuntimeHandoffTestAccess::NextTick(app.runtime)
+                  << " pending=" << SchoolDays::RuntimeHandoffTestAccess::Pending(app.runtime)
+                  << '\n';
+      }
+      app.runtime.debugJumpToNode("05/05-A2-F00");
+      SchoolDays::RuntimeHandoffTestAccess::SaveSlot(app.runtime, 7);
+      SchoolDays::RuntimeHandoffTestAccess::LoadSlot(app.runtime, 7);
+      Require(app.runtime.debugNode() == "05/05-A2-F00" &&
+                  app.runtime.GetState() == Kotonoha::GameState::Gameplay &&
+                  SchoolDays::RuntimeHandoffTestAccess::LxhFadeEnabled(app.runtime),
+              "Generated seventh ending save did not reopen its LxH timeline");
+      std::cout << "LXH_RUNTIME_LOAD 7 scene=05/05-A2-F00 generated=1\n";
+      return 0;
+    }
     Require(argc == 3,
             "Usage: SchoolDaysHandoffRuntimeTest route fixture-root");
     TemporaryDirectory temporary;

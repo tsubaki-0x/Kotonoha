@@ -109,6 +109,15 @@ void TestNativeBoundariesAndLayers() {
               localized[1].assText,
           "LxH subtitle localization changed the canonical ASS speakers");
 
+  // A validated native Script.GPK/LxH GPK already owns localized ORS text.
+  // It must not require an unrelated JSON sidecar at LOAD-time cue binding.
+  const auto native = SchoolDays::Subtitles::TranslateCues(
+      originalCues, ordinals, 23, empty, nullptr, first, "pt-BR", true);
+  Require(native[0].text == "HQ original." &&
+              native[1].text == "LxH fuente." &&
+              native[1].speaker == "Kotonoha",
+          "Native GPK subtitle text was translated again or lost its speaker");
+
   // Missing LxH text is an error even when English HQ has no JSON loaded.
   enDlc.mutableSections()["23"].erase(Gate::ContextKey(ordinals[2], 0));
   enDlc.mutableSections()["23"].erase("LxH fuente.");
