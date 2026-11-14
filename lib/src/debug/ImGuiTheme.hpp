@@ -18,6 +18,8 @@ ImVec4 error();
 ImVec4 muted();
 void statusText(const char *text, bool error);
 bool primaryButton(const char *label, ImVec2 size = {});
+void sectionHeader(const char *label);
+void badge(const char *label, ImVec4 color);
 
 class ShaderFilePicker {
   struct State;

@@ -1,8 +1,7 @@
 #include "DdlcSession.hpp"
 #include "Ddlc/Replay.hpp"
 #include "Ddlc/Runtime.hpp"
-#include <Kotonoha/componentes/VNSave.hpp>
-#include <iomanip>
+#include <Kotonoha/components/VNSave.hpp>
 
 #include <Kotonoha/core/Engine.hpp>
 #include <Kotonoha/core/FileSystem.hpp>
@@ -24,6 +23,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iomanip>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -147,7 +147,7 @@ struct TextTex {
 
 class TextEngine {
 public:
-  const GameAssets *assets = nullptr;
+  const Kotonoha::Providers::DdlcAssets *assets = nullptr;
   uint64_t frame = 0;
 
   ~TextEngine() {
@@ -416,7 +416,8 @@ struct Fading {
 
 class Host : public Backend {
 public:
-  Host(Kotonoha::Engine &engine, const GameAssets &assets, TextEngine &text)
+  Host(Kotonoha::Engine &engine, const Kotonoha::Providers::DdlcAssets &assets,
+       TextEngine &text)
       : engine_(engine), assets_(assets), text_(text) {
     directory_ = userDirectory();
     seedCharacters(directory_, assets.source().dir(), &assets.source());
@@ -705,7 +706,9 @@ public:
       positions_[a.channel] = a.position;
     }
   }
-  std::filesystem::path savesDirectory() const { return directory_ / "saves"; }
+  // directory_ is the engine-wide singular `save` directory.  DDLC slots
+  // belong directly there instead of creating the old save/saves nesting.
+  std::filesystem::path savesDirectory() const { return directory_; }
   std::vector<std::string> savedGames() override {
     std::vector<std::string> result;
     std::error_code error;
@@ -781,7 +784,7 @@ private:
   }
 
   Kotonoha::Engine &engine_;
-  const GameAssets &assets_;
+  const Kotonoha::Providers::DdlcAssets &assets_;
   TextEngine &text_;
   std::filesystem::path directory_, persistentPath_;
   std::map<std::string, std::pair<int, int>> sizes_;
@@ -965,7 +968,7 @@ TextStyle navStyle(bool hover, bool insensitive) {
 
 struct Game {
   Kotonoha::Engine &engine;
-  std::shared_ptr<GameAssets> assets;
+  std::shared_ptr<Kotonoha::Providers::DdlcAssets> assets;
   const Script &script;
   TextEngine text;
   Host host;
@@ -1030,7 +1033,8 @@ struct Game {
   SDL_Texture *maskTex = nullptr;
   int canvasW = 0, canvasH = 0, rtW = 0, rtH = 0, maskW = 0, maskH = 0;
 
-  Game(Kotonoha::Engine &engine, std::shared_ptr<GameAssets> assets)
+  Game(Kotonoha::Engine &engine,
+       std::shared_ptr<Kotonoha::Providers::DdlcAssets> assets)
       : engine(engine), assets(std::move(assets)),
         script(this->assets->script()), host(engine, *this->assets, text) {
     text.assets = this->assets.get();
@@ -1894,7 +1898,7 @@ struct Game {
       return scriptHash;
     uint64_t hash = 1469598103934665603ull;
     for (const auto &file : assets->source().names()) {
-      if (!file.ends_with(".rpyc"))
+      if (file.size() < 5 || file.compare(file.size() - 5, 5, ".rpyc") != 0)
         continue;
       for (auto c : file)
         hash = (hash ^ static_cast<unsigned char>(c)) * 1099511628211ull;
@@ -2904,12 +2908,14 @@ namespace Ddlc {
 
 struct GameSession::Impl {
   Game game;
-  Impl(Kotonoha::Engine &engine, std::shared_ptr<GameAssets> assets)
+  Impl(Kotonoha::Engine &engine,
+       std::shared_ptr<Kotonoha::Providers::DdlcAssets> assets)
       : game(engine, std::move(assets)) {}
 };
 
-GameSession::GameSession(Kotonoha::Engine &engine,
-                         std::shared_ptr<GameAssets> assets)
+GameSession::GameSession(
+    Kotonoha::Engine &engine,
+    std::shared_ptr<Kotonoha::Providers::DdlcAssets> assets)
     : impl_(std::make_unique<Impl>(engine, std::move(assets))) {}
 
 GameSession::~GameSession() = default;
@@ -3019,6 +3025,15 @@ std::string GameSession::debugNode() const {
   const Node &node = *game.vm->currentNode();
   return node.file + ":" + std::to_string(node.line) + " | route " +
          std::to_string(node.route);
+}
+
+std::string GameSession::nodeClockKey() const {
+  const auto &game = impl_->game;
+  if (!game.vm || !game.vm->currentNode())
+    return {};
+  // All positions within the same script file share the node clock; only the
+  // event clock resets between lines/events of a file.
+  return game.vm->currentNode()->file;
 }
 
 void GameSession::debugJump(const std::string &label) {

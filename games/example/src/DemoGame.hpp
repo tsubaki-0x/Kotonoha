@@ -1,7 +1,7 @@
 #pragma once
 
 #include "DemoStory.hpp"
-#include <Kotonoha/componentes/VNSave.hpp>
+#include <Kotonoha/components/VNSave.hpp>
 #include <Kotonoha/core/Runtime.hpp>
 #include <memory>
 #include <optional>
@@ -37,6 +37,7 @@ public:
   void update() override;
   void saveGame(const std::string &path) override;
   void loadGame(const std::string &path) override;
+  bool continuousTouch() const override { return true; }
 };
 
 } // namespace KotonohaExample

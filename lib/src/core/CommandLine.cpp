@@ -70,6 +70,16 @@ CommandLine::CommandLine(std::string program, EngineOptions &engine)
            frames = count;
          });
 #endif
+  // These path overrides also let a packaged build run with isolated data.
+#if defined(KOTONOHA_DISTRIBUTION_BUILD)
+  option("--config", "FILE", "Load and save engine settings",
+         engine.settingsPath);
+  flag("--no-config", "Do not persist engine settings",
+       [&engine] { engine.persistSettings = false; });
+  flag("--launcher", "Open the game selection launcher", engine.launcher);
+  flag("--no-launcher", "Start the game directly",
+       [&engine] { engine.launcher = false; });
+#endif
 }
 
 void CommandLine::option(std::string name, std::string value,

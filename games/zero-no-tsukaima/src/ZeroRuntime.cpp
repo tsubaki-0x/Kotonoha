@@ -8,7 +8,8 @@
 #include <stdexcept>
 
 namespace ZeroNoTsukaima {
-ZeroRuntime::ZeroRuntime(std::shared_ptr<DiscAssetProvider> disc)
+ZeroRuntime::ZeroRuntime(
+    std::shared_ptr<Kotonoha::Providers::ZeroDiscAssets> disc)
     : Runtime("Zero no Tsukaima", "0.1.0",
               "me.hirameki.kotonoha.zeronotsukaima"),
       disc_(std::move(disc)) {
@@ -176,6 +177,13 @@ std::string ZeroRuntime::debugNode() const {
     text += ' ' + label;
   return text + " | scene " + std::to_string(game->SceneIndex()) + " | tag " +
          std::to_string(game->Pc());
+}
+std::string ZeroRuntime::nodeClockKey() const {
+  if (!session_ || !session_->Playing())
+    return {};
+  // All positions within the same script share the node clock; only the
+  // event clock resets between scenes/tags of a script.
+  return session_->Story()->ScriptName();
 }
 
 void ZeroRuntime::saveGame(const std::string &path) {

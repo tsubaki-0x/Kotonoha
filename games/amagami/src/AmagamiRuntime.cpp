@@ -1,6 +1,6 @@
 #include "AmagamiRuntime.hpp"
-#include <Kotonoha/componentes/SettingsMenu.hpp>
-#include <Kotonoha/componentes/SubtitleScene.hpp>
+#include <Kotonoha/components/SettingsMenu.hpp>
+#include <Kotonoha/components/SubtitleScene.hpp>
 #include <Kotonoha/core/Engine.hpp>
 #include <Kotonoha/core/FileSystem.hpp>
 #include <Kotonoha/core/UI.hpp>
@@ -142,12 +142,17 @@ void AmagamiChoices::renderOption(Kotonoha::RendererRef r, size_t i,
                                   bool focused) {
   auto b = options[i].hitBox;
   if (focused) {
-    auto &tex = assets_.texture(r, "sysgraph/cursor_base.tm2");
-    SDL_SetTextureColorMod(&tex, 255, 145, 165);
-    SDL_SetTextureAlphaMod(&tex, 140);
-    Kotonoha::RenderUpscaledTexture(&r, &tex, nullptr, &b);
-    SDL_SetTextureColorMod(&tex, 255, 255, 255);
-    SDL_SetTextureAlphaMod(&tex, 255);
+    // Seletor programático (triângulo à esquerda) em vez da textura
+    // cursor_base.tm2, que pode não estar adequada no disco.
+    SDL_SetRenderDrawColor(&r, 255, 145, 165, 255);
+    const float cx = b.x + 8;
+    const float cy = b.y + b.h / 2;
+    SDL_RenderLine(&r, cx - 6, cy - 4, cx, cy);
+    SDL_RenderLine(&r, cx - 6, cy + 4, cx, cy);
+    SDL_RenderLine(&r, cx - 6, cy - 4, cx - 6, cy + 4);
+    SDL_SetRenderDrawColor(&r, 255, 145, 165, 60);
+    SDL_FRect highlight{b.x, b.y, b.w, b.h};
+    SDL_RenderFillRect(&r, &highlight);
   }
   engine.GetVNUI().textSized(r, options[i].label, b.x + 4, b.y + 3, b.w - 8,
                              24);
@@ -310,14 +315,7 @@ bool AmagamiBacklog::onEvent(Kotonoha::EventRef input) {
       break;
     }
   }
-  const bool isLeftClick = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
-                            event.type == SDL_EVENT_MOUSE_BUTTON_UP) &&
-                           event.button.button == SDL_BUTTON_LEFT;
-  const bool isTouchAct = event.button.which == SDL_TOUCH_MOUSEID
-                              ? event.type == SDL_EVENT_MOUSE_BUTTON_UP
-                              : event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
-  if (isLeftClick && isTouchAct && event.button.x >= 44 &&
-      event.button.x < 596 && event.button.y >= 16 && event.button.y < 432) {
+  if (Kotonoha::UI::clicked(event, {44, 16, 552, 416})) {
     const float y = event.button.y - 16 + scroll;
     for (size_t i = 0; i < rows_.size(); ++i)
       if (y >= rows_[i].top && y < rows_[i].top + rows_[i].height) {
@@ -459,13 +457,8 @@ bool AmagamiEventMap::onEvent(Kotonoha::EventRef input) {
       return false;
     }
   }
-  const bool isLeftClick = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
-                            event.type == SDL_EVENT_MOUSE_BUTTON_UP) &&
-                           event.button.button == SDL_BUTTON_LEFT;
-  const bool isTouchAct = event.button.which == SDL_TOUCH_MOUSEID
-                              ? event.type == SDL_EVENT_MOUSE_BUTTON_UP
-                              : event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
-  if (isLeftClick && isTouchAct) {
+  if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+      event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
     for (size_t i = 0; i < options.size(); ++i)
       if (Kotonoha::UI::clicked(event, options[i].hitBox)) {
         if (selected == i)
@@ -632,8 +625,9 @@ void AmagamiRuntime::syncDialogue() {
                             : text);
 }
 
-AmagamiRuntime::AmagamiRuntime(std::shared_ptr<Assets> assets,
-                               std::string start)
+AmagamiRuntime::AmagamiRuntime(
+    std::shared_ptr<Kotonoha::Providers::AmagamiAssets> assets,
+    std::string start)
     : Runtime("Amagami", "0.1.0", "me.hirameki.kotonoha.amagami"),
       assets_(std::move(assets)), start_(std::move(start)) {}
 AmagamiRuntime::~AmagamiRuntime() { shutdown(); }
@@ -1316,6 +1310,13 @@ void AmagamiRuntime::activate(size_t i) {
     return;
   }
   if (session_->ended()) {
+    if (session_->campaignActive()) {
+      // Keep the campaign session alive: syncCampaignMap() will show the
+      // event map on the next update so the player can pick the next event
+      // or advance the calendar period. Returning to the menu here would end
+      // the campaign prematurely.
+      return;
+    }
     shutdown();
     SetState(Kotonoha::GameState::Menu);
     focus_ = 0;
@@ -1469,14 +1470,7 @@ bool AmagamiRuntime::onEvent(Kotonoha::EventRef event) {
         return true;
       }
     }
-    const bool isLeftClick = (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
-                              e.type == SDL_EVENT_MOUSE_BUTTON_UP) &&
-                             e.button.button == SDL_BUTTON_LEFT;
-    const bool isTouchAct = e.button.which == SDL_TOUCH_MOUSEID
-                                ? e.type == SDL_EVENT_MOUSE_BUTTON_UP
-                                : e.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
-    if (isLeftClick && isTouchAct && error_.empty() && e.button.x >= 0 &&
-        e.button.x < 640 && e.button.y >= 0 && e.button.y < 448) {
+    if (error_.empty() && Kotonoha::UI::clicked(e, {0, 0, 640, 448})) {
       if (backlog_) {
         backlog_ = false;
         return true;
@@ -1574,6 +1568,11 @@ SDL_FPoint AmagamiRuntime::sceneSize(const Kotonoha::Scene &scene) const {
 }
 std::string AmagamiRuntime::debugNode() const {
   return session_ ? session_->location() : "title";
+}
+std::string AmagamiRuntime::nodeClockKey() const {
+  // All positions within the same scenario share the node clock; only the
+  // event clock resets between blocks/events of a scenario.
+  return session_ ? session_->name() : "title";
 }
 std::vector<Kotonoha::DebugNode> AmagamiRuntime::debugNodes() const {
   std::vector<Kotonoha::DebugNode> out;

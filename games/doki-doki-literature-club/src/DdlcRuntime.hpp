@@ -1,6 +1,6 @@
 #pragma once
 
-#include "DdlcAssets.hpp"
+#include <Ddlc/DdlcAssets.hpp>
 
 #include <Kotonoha/core/Runtime.hpp>
 
@@ -12,12 +12,12 @@ class GameSession;
 
 class GameRuntime final : public Kotonoha::Runtime {
 public:
-  explicit GameRuntime(std::shared_ptr<GameAssets> assets);
+  explicit GameRuntime(std::shared_ptr<Kotonoha::Providers::DdlcAssets> assets);
   ~GameRuntime() override;
 
   void shutdown();
-  void saveGame(const std::string&path)override;
-  void loadGame(const std::string&path)override;
+  void saveGame(const std::string &path) override;
+  void loadGame(const std::string &path) override;
   GameSession *session() { return session_.get(); }
 
   void initGlobal(Kotonoha::Engine &engine) override;
@@ -30,14 +30,19 @@ public:
   int translationRoute() const override;
   void render(Kotonoha::RendererRef renderer, float scale) override;
   SDL_Point viewport() const override { return {1280, 720}; }
+  // DDLC advances on a completed tap. Continuous pointer translation turns a
+  // finger-down into an immediate mouse click, which also makes a two-finger
+  // Back gesture accidentally advance the story before it opens the menu.
+  bool continuousTouch() const override { return false; }
   Kotonoha::Translation::SourceTexts translationSources() const override;
   std::string debugNode() const override;
+  std::string nodeClockKey() const override;
   std::vector<Kotonoha::DebugNode> debugNodes() const override;
   void debugJumpToNode(const std::string &id) override;
 
 private:
   void addGameScenes();
-  std::shared_ptr<GameAssets> assets_;
+  std::shared_ptr<Kotonoha::Providers::DdlcAssets> assets_;
   Kotonoha::Engine *engine_ = nullptr;
   std::unique_ptr<GameSession> session_;
   std::unique_ptr<Kotonoha::Scene> stage_, menu_, dialogue_, choices_, pause_;

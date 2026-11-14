@@ -146,7 +146,13 @@ set(KOTONOHA_DEVELOPER_SOURCES)
 if(NOT KOTONOHA_DISTRIBUTION_BUILD)
     list(APPEND KOTONOHA_DEVELOPER_SOURCES
         src/debug/DebugOverlay.cpp
+        src/debug/VoiceDubbingApplet.cpp
         src/mcp/MCPServer.cpp)
+endif()
+if(KOTONOHA_DISTRIBUTION_BUILD AND KOTONOHA_ENABLE_PLAYER_DUBBING)
+    list(APPEND KOTONOHA_DEVELOPER_SOURCES
+        src/debug/DubbingOverlay.cpp
+        src/debug/VoiceDubbingApplet.cpp)
 endif()
 add_library(KotonohaEngine ${kotonoha_engine_linkage}
     src/core/AssetProvider.cpp
@@ -216,6 +222,9 @@ add_library(kotonoha ALIAS KotonohaEngine)
 target_compile_features(KotonohaEngine PUBLIC cxx_std_17)
 if(KOTONOHA_DISTRIBUTION_BUILD)
     target_compile_definitions(KotonohaEngine PUBLIC KOTONOHA_DISTRIBUTION_BUILD=1)
+endif()
+if(KOTONOHA_DISTRIBUTION_BUILD AND KOTONOHA_ENABLE_PLAYER_DUBBING)
+    target_compile_definitions(KotonohaEngine PUBLIC KOTONOHA_PLAYER_DUBBING=1)
 endif()
 set_target_properties(KotonohaEngine kotonoha_imgui PROPERTIES
     CXX_EXTENSIONS OFF

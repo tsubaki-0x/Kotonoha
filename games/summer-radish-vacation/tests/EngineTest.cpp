@@ -1,11 +1,11 @@
 #include "SummerBacklog.hpp"
 #include "SummerRuntime.hpp"
-#include <Kotonoha/componentes/ChoiceQuestionScene.hpp>
-#include <Kotonoha/componentes/InGameMenu.hpp>
-#include <Kotonoha/componentes/TextInputForm.hpp>
-#include <Kotonoha/componentes/VNBacklog.hpp>
-#include <Kotonoha/componentes/VNSave.hpp>
-#include <Kotonoha/componentes/VNTextBox.hpp>
+#include <Kotonoha/components/ChoiceQuestionScene.hpp>
+#include <Kotonoha/components/InGameMenu.hpp>
+#include <Kotonoha/components/TextInputForm.hpp>
+#include <Kotonoha/components/VNBacklog.hpp>
+#include <Kotonoha/components/VNSave.hpp>
+#include <Kotonoha/components/VNTextBox.hpp>
 #include <Kotonoha/core/Engine.hpp>
 #include <Kotonoha/media/PcmPlayer.hpp>
 #include <SummerRadish/Script.hpp>
@@ -70,7 +70,7 @@ int main(int argc, char **argv) {
     auto prefs = std::filesystem::temp_directory_path() /
                  ("summer-system-" + std::to_string(SDL_GetTicksNS()));
     SDL_setenv_unsafe("SUMMER_SAVE_DIR", prefs.string().c_str(), 1);
-    auto assets = std::make_shared<SummerRadish::SummerAssets>(argv[1]);
+    auto assets = std::make_shared<Kotonoha::Providers::SummerAssets>(argv[1]);
     SummerRadish::SummerRuntime game(assets);
     EngineOptions options;
     options.assets = assets;

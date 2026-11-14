@@ -831,7 +831,7 @@ size_t MountedSchoolDaysGpkEntryCount() {
 }
 
 SchoolDaysGpkLookupStatus
-LookupMountedSchoolDaysAsset(std::string_view logicalPath) {
+LookupMountedSchoolDaysAsset(std::string_view logicalPath, bool ignoreOverlay) {
   const std::string logical = UnmarkTranslatedLogical(logicalPath);
   const auto translation = CurrentTranslated();
   if (IsMarkedTranslatedScript(logicalPath) && !translation.script)
@@ -847,7 +847,7 @@ LookupMountedSchoolDaysAsset(std::string_view logicalPath) {
     return translation.script->Lookup(ScriptRelative(logical));
   if (IsMarkedTranslatedScript(logicalPath))
     return SchoolDaysGpkLookupStatus::Missing;
-  if (ResolveSchoolDaysOverlayFile(logical, nullptr))
+  if (!ignoreOverlay && ResolveSchoolDaysOverlayFile(logical, nullptr))
     return SchoolDaysGpkLookupStatus::Present;
   const auto mount = CurrentMount();
   return mount != nullptr ? mount->Lookup(CanonicalGpkLogical(logical))
@@ -855,7 +855,8 @@ LookupMountedSchoolDaysAsset(std::string_view logicalPath) {
 }
 
 bool ReadMountedSchoolDaysAsset(std::string_view logicalPath,
-                                std::vector<uint8_t> *out, std::string *error) {
+                                std::vector<uint8_t> *out, std::string *error,
+                                bool ignoreOverlay) {
   const std::string logical = UnmarkTranslatedLogical(logicalPath);
   const auto translation = CurrentTranslated();
   if (IsMarkedTranslatedScript(logicalPath) && !translation.script)
@@ -872,7 +873,7 @@ bool ReadMountedSchoolDaysAsset(std::string_view logicalPath,
   if (IsMarkedTranslatedScript(logicalPath))
     return Fail(error, "Translated Script.GPK resource is invalid");
   std::string physical;
-  if (ResolveSchoolDaysOverlayFile(logical, &physical))
+  if (!ignoreOverlay && ResolveSchoolDaysOverlayFile(logical, &physical))
     return ReadFilesystem(physical, out, error);
   const auto mount = CurrentMount();
   if (mount == nullptr)
@@ -881,7 +882,7 @@ bool ReadMountedSchoolDaysAsset(std::string_view logicalPath,
 }
 
 std::unique_ptr<AssetStream> OpenMountedSchoolDaysAssetStream(
-    std::string_view logicalPath) {
+    std::string_view logicalPath, bool ignoreOverlay) {
     const std::string logical = UnmarkTranslatedLogical(logicalPath);
     const auto translation = CurrentTranslated();
     const auto openRaw = [](const std::shared_ptr<const SchoolDaysGpkArchive> &archive,
@@ -909,7 +910,7 @@ std::unique_ptr<AssetStream> OpenMountedSchoolDaysAssetStream(
     if (IsHqScriptOrs(logical) && translation.script)
       return openRaw(translation.script, ScriptRelative(logical));
     if (IsMarkedTranslatedScript(logicalPath) ||
-        ResolveSchoolDaysOverlayFile(logical, nullptr)) return {};
+        (!ignoreOverlay && ResolveSchoolDaysOverlayFile(logical, nullptr))) return {};
     const auto mount = CurrentMount();
     if (mount == nullptr) return {};
     size_t archiveIndex = 0u;

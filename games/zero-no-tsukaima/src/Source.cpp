@@ -28,13 +28,35 @@ bool SceneSource::ReadEntry(const Kotonoha::DiscImage::Entry &bin,
 }
 
 bool SceneSource::Open(const std::string &discPath, std::string *error) {
+  // A source can be reopened for a different disc; never retain its tables.
+  pictureBin_ = sceneBin_ = voiceBin_ = soundBin_ = normalBin_ = nullptr;
+  pictureIndex_.clear();
+  sceneIndex_.clear();
+  voiceIndex_.clear();
+  soundIndex_.clear();
+  normalIndex_.clear();
+  names_.clear();
+  startupScene_ = "START.KS";
+  normalNames_.clear();
+  scenedatNames_.clear();
+  soundNames_.clear();
+  systemVoices_.clear();
+  movies_.clear();
+  catalog_ = ImageCatalog{};
   if (!disc_->tryOpen(discPath, error))
     return false;
+  // Symphony inserted ENVIMAGE and a SYSTEM list; its archive indices differ
+  // from Nocturne even though both use the same compiled Squirrel format.
+  const bool symphony = disc_->find("SLPS_258.98") != nullptr;
+  const bool concerto = disc_->find("SLPS_257.09") != nullptr;
+  edition_ = concerto   ? Edition::Concerto
+             : symphony ? Edition::Symphony
+                        : Edition::Nocturne;
   const Kotonoha::DiscImage::Entry *sysBin = disc_->find("SYSTEM.BIN");
   const Kotonoha::DiscImage::Entry *sysHd = disc_->find("SYSTEM.HD");
   sceneBin_ = disc_->find("SCENE_ID.BIN");
   const Kotonoha::DiscImage::Entry *sceneHd = disc_->find("SCENE_ID.HD");
-  if (!sysBin || !sysHd || !sceneBin_ || !sceneHd) {
+  if ((!concerto && (!sysBin || !sysHd)) || !sceneBin_ || !sceneHd) {
     if (error)
       *error = "SYSTEM / SCENE_ID archives not found on the disc";
     return false;
@@ -58,39 +80,81 @@ bool SceneSource::Open(const std::string &discPath, std::string *error) {
     if (bin && h && disc_->readInto(*h, 0, h->size, raw))
       *index = ParseArchiveIndex(raw);
   }
-  hd.clear();
-  disc_->readInto(*sysHd, 0, sysHd->size, hd);
-  const auto sysIndex = ParseArchiveIndex(hd);
-  std::vector<uint8_t> nut;
-  if (!ReadEntry(*sysBin, sysIndex, 32, &nut) ||
-      !ParseSceneNames(nut, &names_)) {
-    if (error)
-      *error = "cannot read the scene name table (SYSTEM #32)";
-    return false;
-  }
-  std::vector<uint8_t> env, main;
-  if (ReadEntry(*sysBin, sysIndex, 31, &env) &&
-      ReadEntry(*sysBin, sysIndex, 35, &main)) {
-    std::vector<uint32_t> sizes;
-    for (const ArchiveEntry &e : pictureIndex_)
-      sizes.push_back(e.size);
-    catalog_.Build(env, main, sizes);
-  }
   normalBin_ = disc_->find("NORMAL.BIN");
   if (const Kotonoha::DiscImage::Entry *h = disc_->find("NORMAL.HD")) {
     std::vector<uint8_t> raw;
     if (normalBin_ && disc_->readInto(*h, 0, h->size, raw))
       normalIndex_ = ParseArchiveIndex(raw);
   }
+  if (concerto) {
+    // Concerto stores CP932 Squirrel source and references archive entries by
+    // numeric ID. It has no SYSTEM archive or compiled scene-name table.
+    if (sceneIndex_.empty()) {
+      if (error)
+        *error = "empty Concerto SCENE_ID archive";
+      return false;
+    }
+    startupScene_ = "0005.KS"; // Prologue; entries 0..4 are engine/menu code.
+    for (const char *movie : {"ZERO.PSS", "ZEROED.PSS"}) {
+      if (!disc_->find(std::string("MOVIE/") + movie))
+        break;
+      movies_.emplace_back(movie);
+    }
+    for (size_t i = 0; i < sceneIndex_.size(); ++i) {
+      char name[32];
+      std::snprintf(name, sizeof(name), "%04zu.KS", i);
+      names_.emplace_back(name);
+    }
+    const auto numberEntries = [](size_t count, auto &table) {
+      for (size_t i = 0; i < count; ++i)
+        table.emplace(std::to_string(i), int(i));
+    };
+    numberEntries(normalIndex_.size(), normalNames_);
+    numberEntries(pictureIndex_.size(), scenedatNames_);
+    numberEntries(soundIndex_.size(), soundNames_);
+    // Concerto's standalone UI images (the remaining controls use atlases).
+    for (const auto &[name, index] :
+         std::map<std::string, int>{{"MMV_LOGO", 16},
+                                    {"TITLE_COPYRIGHT", 17},
+                                    {"TITLE_TITLELOGO", 18},
+                                    {"TITLE_STARTBUTTON", 19},
+                                    {"TITLE_TITLEBG", 13},
+                                    {"SYSTEM_BG02", 13},
+                                    {"SYSTEM_BG00", 14},
+                                    {"MAIN_MESSAGEBASE", 66}})
+      normalNames_[name] = index;
+    return true;
+  }
+  hd.clear();
+  disc_->readInto(*sysHd, 0, sysHd->size, hd);
+  const auto sysIndex = ParseArchiveIndex(hd);
+  std::vector<uint8_t> nut;
+  if (!ReadEntry(*sysBin, sysIndex, symphony ? 33 : 32, &nut) ||
+      !ParseSceneNames(nut, &names_)) {
+    if (error)
+      *error = "cannot read the scene name table (SYSTEM #32)";
+    return false;
+  }
+  std::vector<uint8_t> env, main;
+  if (ReadEntry(*sysBin, sysIndex, symphony ? 32 : 31, &env) &&
+      ReadEntry(*sysBin, sysIndex, symphony ? 36 : 35, &main)) {
+    std::vector<uint32_t> sizes;
+    for (const ArchiveEntry &e : pictureIndex_)
+      sizes.push_back(e.size);
+    catalog_.Build(env, main, sizes);
+  }
   std::vector<uint8_t> list;
   if (normalBin_) {
     for (auto [entry, table] :
          {std::pair{9, &scenedatNames_}, std::pair{10, &soundNames_},
           std::pair{11, &normalNames_}})
-      if (ReadEntry(*normalBin_, normalIndex_, size_t(entry), &list))
+      if (ReadEntry(*normalBin_, normalIndex_,
+                    size_t(entry + (symphony ? 1 : 0)), &list))
         *table = ParseNameList(list);
-    if (ReadEntry(*normalBin_, normalIndex_, 247, &list))
-      for (size_t o = 0; o + 14 <= list.size(); o += 14) {
+    const size_t movieRecordSize = symphony ? 20 : 14;
+    if (ReadEntry(*normalBin_, normalIndex_, symphony ? 13 : 247, &list))
+      for (size_t o = 0; o + movieRecordSize <= list.size();
+           o += movieRecordSize) {
         std::string name(reinterpret_cast<const char *>(list.data() + o), 14);
         name.resize(name.find('\0') == std::string::npos ? name.size()
                                                          : name.find('\0'));
@@ -102,7 +166,8 @@ bool SceneSource::Open(const std::string &discPath, std::string *error) {
   // NORMAL #8 is SCENE_ID.LST ("[SCENE_ID]" then "SCENE\\NAME.nut" per entry):
   // the real entry order. The SCENES.NUT literal pool read above is only hash
   // ordered.
-  if (normalBin_ && ReadEntry(*normalBin_, normalIndex_, 8, &list)) {
+  if (normalBin_ &&
+      ReadEntry(*normalBin_, normalIndex_, symphony ? 9 : 8, &list)) {
     std::vector<std::string> names;
     std::string text(list.begin(), list.end()), line;
     std::istringstream in(text);
@@ -127,11 +192,37 @@ bool SceneSource::Open(const std::string &discPath, std::string *error) {
                    "SCENES.NUT\n",
                    names.size(), sceneIndex_.size());
   }
-  if (ReadEntry(*sysBin, sysIndex, 36, &list))
+  if (ReadEntry(*sysBin, sysIndex, symphony ? 40 : 36, &list))
     if (auto table = EvalNutTable(list))
       for (const auto &[k, v] : table->fields)
         if (v && v->kind == NutValue::Integer)
           systemVoices_[k] = v->value;
+  catalog_.BindArchiveNames(scenedatNames_);
+  if (symphony) {
+    // These are different retail filenames, not missing Nocturne assets.
+    for (const auto &[oldName, actual] : std::map<std::string, std::string>{
+             {"SYSTEM_BG02", "GAMEMODE_BG"},
+             {"GAMEMODE_TITLE_GAMEMODE", "GAMEMODE_TITLE"},
+             {"GAMEMODE_GAME_NEW_ON", "GAMEMODE_NEW_ON"},
+             {"GAMEMODE_GAME_NEW_OFF", "GAMEMODE_NEW_OFF"},
+             {"GAMEMODE_GAME_LOAD_ON", "GAMEMODE_LOAD_ON"},
+             {"GAMEMODE_GAME_LOAD_OFF", "GAMEMODE_LOAD_OFF"},
+             {"GAMEMODE_GAME_OPTI_ON", "GAMEMODE_OPTI_ON"},
+             {"GAMEMODE_GAME_OPTI_OFF", "GAMEMODE_OPTI_OFF"},
+             {"GAMEMODE_GAME_GALL_ON", "GAMEMODE_GALL_ON"},
+             {"GAMEMODE_GAME_GALL_OFF", "GAMEMODE_GALL_OFF"},
+             {"GAMEMODE_GAME_SCEE_ON", "GAMEMODE_SCAN_ON"},
+             {"GAMEMODE_GAME_SCEE_OFF", "GAMEMODE_SCEN_OFF"},
+             {"GAMEMODE_GAME_SOUND_ON", "GAMEMODE_SOUN_ON"},
+             {"GAMEMODE_GAME_SOUND_OFF", "GAMEMODE_SOUN_OFF"},
+             {"MAIN_MESSAGEBASE", "MAIN_WIN"},
+             {"MAIN_MESSAGECURSOR", "MAIN_CURSOR"},
+             {"MAIN_AUTOPLAY", "MAIN_AUTO"}}) {
+      const int index = NormalIndex(actual);
+      if (index >= 0)
+        normalNames_[oldName] = index;
+    }
+  }
   return true;
 }
 

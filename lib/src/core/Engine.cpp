@@ -11,6 +11,9 @@
 #if !defined(KOTONOHA_DISTRIBUTION_BUILD)
 #include <Kotonoha/debug/DebugOverlay.hpp>
 #endif
+#if defined(KOTONOHA_PLAYER_DUBBING)
+#include <Kotonoha/debug/DubbingOverlay.hpp>
+#endif
 #include <Kotonoha/events/BackAction.hpp>
 #if !defined(KOTONOHA_DISTRIBUTION_BUILD)
 #include <Kotonoha/mcp/MCPServer.hpp>
@@ -66,6 +69,48 @@ void Engine::debugJumpToNode(const std::string &id) {
   resetNodeClock();
 }
 
+void Engine::debugRestartScene() {
+  if (settingsMenu->isOpen())
+    throw std::logic_error("Close engine settings before restarting the scene");
+  if (!runtime.debugNode().empty()) {
+    runtime.debugRestartScene();
+  } else {
+    auto &manager = GetVNManagerRuntime(*this);
+    const int current = manager.getCurrentNodeId();
+    if (current < 0 || manager.isFinished())
+      throw std::logic_error("There is no active scene to restart");
+    manager.debugJumpToNode(current);
+  }
+  resetNodeClock();
+}
+
+void Engine::debugAdvanceScene(double seconds) {
+  if (!std::isfinite(seconds) || seconds <= 0 || seconds > 60)
+    throw std::invalid_argument("Scene step must be within 0..60 seconds");
+  if (runtime.advanceStoryTime(seconds)) {
+    frameClock.reset();
+    return;
+  }
+  if (!timeline->isPlaying())
+    throw std::logic_error("The active scene has no time-based timeline");
+  timeline->setPaused(false);
+  timeline->update(seconds);
+  runtime.update();
+  timeline->setPaused(isStoryPaused());
+  frameClock.reset();
+}
+
+void Engine::debugAdvanceEvent() {
+  if (!runtime.handleAdvanceAction()) {
+    auto &manager = GetVNManagerRuntime(*this);
+    if (manager.getCurrentNodeId() >= 0 && !manager.isFinished())
+      manager.advance();
+    else if (!runtime.advanceStoryTime(1.0 / 24.0))
+      throw std::logic_error("The active runtime cannot advance an event");
+  }
+  frameClock.reset();
+}
+
 void Engine::loadKtrf(const std::string &path) {
   if (settingsMenu->isOpen())
     throw std::logic_error("Close engine settings before loading KTRF");
@@ -110,6 +155,9 @@ std::string EngineOptions::assetOverlayDirectory() const {
   return findAssetOverlayDirectory().string();
 }
 SDLSession::SDLSession(const Runtime &runtime) {
+#if defined(KOTONOHA_DISTRIBUTION_BUILD)
+  SDL_SetLogPriorities(SDL_LOG_PRIORITY_ERROR);
+#endif
   SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
   if (!SDL_SetAppMetadata(runtime.name.c_str(), runtime.version.c_str(),
                           runtime.identify.c_str()) ||
@@ -215,7 +263,11 @@ Engine::Engine(Runtime &run, EngineOptions options)
   audio.setMasterVolume(settings.masterVolume);
   audio.setMasterMuted(settings.masterMuted);
   for (int category : {LogCore, LogConfig, LogMedia, LogUpscaler, LogUI})
+#if defined(KOTONOHA_DISTRIBUTION_BUILD)
+    SDL_SetLogPriority(category, SDL_LOG_PRIORITY_ERROR);
+#else
     SDL_SetLogPriority(category, settings.logPriority);
+#endif
   settingsMenu = std::make_unique<SettingsMenu>(*this);
   ui = std::make_unique<UI>(settings.fontPath);
   ui->setTranslation(&translation);
@@ -226,6 +278,9 @@ Engine::Engine(Runtime &run, EngineOptions options)
   forcedSubtitles = std::make_unique<ForcedSubtitleRenderer>(*this);
 #if !defined(KOTONOHA_DISTRIBUTION_BUILD)
   debug = std::make_unique<DebugOverlay>(*this);
+#endif
+#if defined(KOTONOHA_PLAYER_DUBBING)
+  dubbing = std::make_unique<DubbingOverlay>(*this);
 #endif
   configureRenderSpace(RenderSpace::Novel);
   runtime.init(*this);
@@ -394,7 +449,11 @@ void Engine::applySettings(const EngineSettings &value, bool persist) {
   if (nextVNUI)
     vnUI = std::move(nextVNUI);
   for (int category : {LogCore, LogConfig, LogMedia, LogUpscaler, LogUI})
+#if defined(KOTONOHA_DISTRIBUTION_BUILD)
+    SDL_SetLogPriority(category, SDL_LOG_PRIORITY_ERROR);
+#else
     SDL_SetLogPriority(category, settings.logPriority);
+#endif
   frameClock.reset();
   SDL_LogInfo(LogConfig, "Applied window/render settings");
 }
@@ -415,6 +474,9 @@ bool Engine::isStoryPaused() const {
          (settingsMenu && settingsMenu->isOpen())
 #if !defined(KOTONOHA_DISTRIBUTION_BUILD)
          || (debug && debug->pausesStory())
+#endif
+#if defined(KOTONOHA_PLAYER_DUBBING)
+         || (dubbing && dubbing->visible())
 #endif
       ;
 }
@@ -586,6 +648,24 @@ void Engine::SetAssetProvider(std::shared_ptr<AssetProvider> provider) {
   SDL_LogInfo(LogCore, "Asset provider: %s", assets->name().c_str());
 }
 
+std::filesystem::path Engine::ensureAssetOverlay() {
+  auto root = assets->overlayDirectory();
+  // A game may mount bundled artwork as a read-only input overlay. Dubbing
+  // must not write into that bundle when no user overlay was selected.
+  if (!root.empty() && !settings.assetOverlayPath.empty())
+    return root;
+  root = runtime.debugAssetOverlayDirectory();
+  if (root.empty())
+    root = documentsDirectory(runtime.identify) / "overlay";
+  std::filesystem::create_directories(root);
+  assets->setOverlay(root);
+  settings.assetOverlayPath = root.string();
+  saveSettings();
+  SDL_LogInfo(LogCore, "Created engine asset overlay: %s",
+              root.string().c_str());
+  return assets->overlayDirectory();
+}
+
 SDL_FPoint Engine::screenSize() const {
   int width = 0, height = 0;
   if (!SDL_GetWindowSize(window.get(), &width, &height))
@@ -691,6 +771,12 @@ SDL_AppResult Engine::dispatchEvent(EventPtr event) {
 #if !defined(KOTONOHA_DISTRIBUTION_BUILD)
   const bool debugConsumed = debug->handleEvent(*event);
   if (debugConsumed) {
+    timeline->setPaused(isStoryPaused());
+    return SDL_APP_CONTINUE;
+  }
+#endif
+#if defined(KOTONOHA_PLAYER_DUBBING)
+  if (dubbing->handleEvent(*event)) {
     timeline->setPaused(isStoryPaused());
     return SDL_APP_CONTINUE;
   }
@@ -929,6 +1015,9 @@ SDL_AppResult Engine::Iterate() {
   debug->renderHUD(*renderer);
   debug->renderMenu(*renderer);
   runtime.devControlPump(*renderer);
+#endif
+#if defined(KOTONOHA_PLAYER_DUBBING)
+  dubbing->render(*renderer);
 #endif
   SDL_RenderPresent(renderer.get());
   configureRenderSpace(RenderSpace::Novel);

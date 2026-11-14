@@ -55,15 +55,16 @@ bool SchoolDaysRetailGpksMounted();
 size_t MountedSchoolDaysGpkEntryCount();
 
 SchoolDaysGpkLookupStatus LookupMountedSchoolDaysAsset(
-    std::string_view logicalPath);
+    std::string_view logicalPath, bool ignoreOverlay = false);
 bool ReadMountedSchoolDaysAsset(std::string_view logicalPath,
                                std::vector<uint8_t>* out,
-                               std::string* error = nullptr);
+                               std::string* error = nullptr,
+                               bool ignoreOverlay = false);
 // Opens raw (uncompressed) GPK entries as direct seekable streams. Compressed
 // entries intentionally return null so callers can use the normal decoded
 // memory path instead.
 std::unique_ptr<AssetStream> OpenMountedSchoolDaysAssetStream(
-    std::string_view logicalPath);
+    std::string_view logicalPath, bool ignoreOverlay = false);
 
 // Existing render/audio/video plumbing carries string references.  A mounted
 // GPK resource is represented by an engine-private URI rather than materialized

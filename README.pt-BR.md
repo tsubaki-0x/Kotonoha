@@ -17,14 +17,14 @@ de `lib/include/Kotonoha` espelham os modulos de `lib/src`:
 CMakeLists.txt               Agrega motor e jogos; pode desativar o exemplo
 vcpkg.json                   Dependencias externas, incluindo PlutoSVG
 assets/                      Splash, shaders e fonte compartilhados
-Xcode/Kotonoha.xcodeproj     Projeto iOS nativo e schemes compartilhados
-Android/                    Projeto Gradle; SDL remoto do Git
+buildsystems/xcode/Kotonoha.xcworkspace       Workspace multiprojeto macOS e iOS (gerado via `ruby tools/UpdateGameTargets.rb`)
+buildsystems/android/                    Projeto Gradle; SDL remoto do Git
 lib/
   CMakeLists.txt             Biblioteca independente Kotonoha::Engine
   include/Kotonoha/
     core/                    Engine, Runtime, Scene, Clock, UI, Settings, Log,
                              AssetProvider e DiscImage (.iso/.bin)
-    componentes/             Componentes SDL_ttf, VNManager e VNSave
+    components/             Componentes SDL_ttf, VNManager e VNSave
     debug/                   HUD e inspetor ImGui mantidos pelo motor
     localization/            Dicionario JSON, exportacao e Shift-JIS (iconv)
     media/                   FFmpeg (MediaPlayer, MediaDecoder), saida SDL
@@ -52,7 +52,6 @@ games/zero-no-tsukaima/
   include/ZeroNoTsukaima/    Arquivos .HD/.BIN, LZ, TIM2, VAG, PSS, catalogo e KAG
   src/
     main.cpp                 Callbacks SDL; --zero / ZERO_DISC
-    DiscAssetProvider.*      DiscImageAssetProvider do motor + formatos do jogo
     ZeroSession.*            Interprete, audio nos canais, saves e desenho
     ZeroComponents.*         Subclasses dos componentes do motor
     ZeroRuntime.*            Runtime: estados, 640x448 dentro da novel
@@ -64,13 +63,15 @@ games/snow-radish-vacation/
   include/SnowRadish/        Pacotes .DAT (LZSS), VM .obj e estado do jogo
   src/
     main.cpp                 Callbacks SDL; --snow / SNOW_DIR
-    SnowAssets.*             AssetProvider dos DAT (EVD/CHD/ADPS)
     SnowSession.*            VM, audio nos canais, transicoes, logo e titulo
     SnowComponents.*         Subclasses dos componentes do motor
     SnowRuntime.*            Runtime: estados, 800x600 dentro da novel
   tools/                     SnowExtract e SnowRun (linha de comando)
   tests/                     Formatos e fluxo completo com os DAT
 games/doki-doki-literature-club/
+games/kirikiri/
+games/luca-system/
+games/pmail/
   include/Ddlc/, src/        Leitores RPA/RPYC, CPython, runtime e apresentacao
   assets/                    Dados locais do usuario, ignorados pelo Git
   tests/                     Ponte Python e scripts com dados opcionais
@@ -78,7 +79,7 @@ build/                       Saida gerada (nao faz parte do codigo-fonte)
 ```
 
 Pastas de modulos usam minusculas; arquivos/tipos C++ usam PascalCase.
-`core` e `componentes` preservam os nomes escolhidos para o projeto. Nomes
+`core` e `components` preservam os nomes escolhidos para o projeto. Nomes
 como `DemoGame`, `DemoStory` e `DebugOverlay` indicam a responsabilidade.
 A API CMake para integrar o motor e `Kotonoha::Engine`; o executavel continua
 `Kotonoha`. ImGui e uma dependencia privada do motor; cabecalhos publicos nao
@@ -171,8 +172,8 @@ listando todos os locais procurados.
 
 O fundo padrao do motor e preto transparente (`0,0,0,0`).
 
-Os fontes `VN*.cpp` e seus headers ficam em `componentes`. Inclua, por exemplo,
-`<Kotonoha/componentes/VNManager.hpp>` ou `<Kotonoha/core/Engine.hpp>`.
+Os fontes `VN*.cpp` e seus headers ficam em `components`. Inclua, por exemplo,
+`<Kotonoha/components/VNManager.hpp>` ou `<Kotonoha/core/Engine.hpp>`.
 `clang-format` usa a configuracao versionada em `.clang-format`.
 
 ### Depuracao nativa de cenas e rotas editaveis
@@ -210,13 +211,13 @@ original com a extensao padrao `.ass` e a fonte incluida Noto Sans JP.
 O nome do personagem seleciona o estilo de mesmo nome; sem correspondencia,
 usa `Default` ou o primeiro estilo importado.
 
-A cena compartilhada [SubtitleScene](lib/include/Kotonoha/componentes/SubtitleScene.hpp)
+A cena compartilhada [SubtitleScene](lib/include/Kotonoha/components/SubtitleScene.hpp)
 usa libass e herda o estilo configurado no motor. `setCues` recebe as falas;
 `setPosition` atualiza o tempo e `setStyle` permite substituir o estilo.
 As legendas das timelines tambem usam essa cena. School Days a estende
 para apresentar as falas ORS.
 
-A cena [FadeScene](lib/include/Kotonoha/componentes/FadeScene.hpp), portada do
+A cena [FadeScene](lib/include/Kotonoha/components/FadeScene.hpp), portada do
 Kotonoha, faz fade in/out para uma cor. Use eventos numa timeline externa
 (`add` + `setPosition`) ou o relogio proprio (`play`); `hold` mantem a cor ao
 fim de um fade out. Os jogos a reutilizam em vez de fades proprios.
@@ -264,9 +265,9 @@ launcher, amplia os controles de 1x a 3x alem da escala de DPI e tambem persiste
 ### Abrir imagens ISO
 
 Todo jogo que aceita pasta tambem aceita um arquivo `.iso` no mesmo campo
-de dados ou argumento: `--air`, `--summer`, `--snow`, `--school-days` e `--ddlc`.
+de dados ou argumento: `--reallive`, `--summer`, `--snow`, `--school-days` e `--ddlc`.
 No launcher, use **Folder...** para pasta ou **ISO...** para imagem.
-AIR le os recursos diretamente de ISO9660/Joliet, sem extracao nem copia
+RealLive le os recursos diretamente de ISO9660/Joliet, sem extracao nem copia
 temporaria, incluindo scripts, vozes e substituicoes por overlay.
 Amagami e Zero no Tsukaima mantem a leitura direta de ISO/disco raw.
 
@@ -283,18 +284,18 @@ ou somente UDF, nao sao suportadas. O motor nao executa instaladores.
 
 ### iOS: projeto Xcode nativo
 
-Abra `Xcode/Kotonoha.xcodeproj`: o projeto e seus targets sao mantidos no
+Abra `buildsystems/xcode/Kotonoha.xcodeproj`: o projeto e seus targets sao mantidos no
 Xcode e **nao exigem CMake para compilar**. `KotonohaEngine` e um framework
 estatico; SDL3, SDL3_ttf e Dear ImGui sao frameworks dinamicos. O target SDL3 usa o projeto
 Xcode do proprio submodulo; SDL_ttf compila com HarfBuzz e PlutoSVG.
-Os schemes `Kotonoha`, `ZeroNoTsukaima`, `SnowRadish`, `DokiDoki`, `SchoolDays`, `Air`, `SummerRadish` e `Amagami` geram
+Os schemes `Kotonoha`, `ZeroNoTsukaima`, `SnowRadish`, `DokiDoki`, `SchoolDays`, `RealLive`, `SummerRadish` e `Amagami` geram
 apps separados. `KotonohaIOSSmoke` verifica CP932 e glifos SVG no simulador.
 O executavel demonstrativo chama-se `Kotonoha`; seu namespace C++ e
 `KotonohaExample`, separado do motor. A opcao CMake
 `KOTONOHA_BUILD_SCHOOL_DAYS` controla o port School Days.
-`KOTONOHA_BUILD_AIR` controla o [port inicial de AIR Standard Edition](games/air/README.md), que lê os dados originais com `--air DIRETORIO_OU_ISO`.
+`KOTONOHA_BUILD_REALLIVE` controla o [port inicial de RealLive Standard Edition](games/reallive/README.md), que lê os dados originais com `--reallive DIRETORIO_OU_ISO`.
 Depois de alterar os fontes da biblioteca School Days, execute manualmente
-`ruby Xcode/UpdateGameTargets.rb` para sincronizar o target nativo sem
+`ruby buildsystems/xcode/UpdateGameTargets.rb` para sincronizar o target nativo sem
 remover os recursos e modulos Python existentes.
 `DdlcIOSScriptSmoke` exercita CPython e os scripts reais no simulador.
 O deployment target e iOS 15; MetalFX exige iOS 16 ou superior e nao esta
@@ -309,9 +310,9 @@ export VCPKG_ROOT=/caminho/para/vcpkg
   --x-install-root="$PWD/build/iOS-deps/ios" --triplet=arm64-ios
 "$VCPKG_ROOT/vcpkg" install --x-manifest-root="$PWD" \
   --x-install-root="$PWD/build/iOS-deps/simulator" --triplet=arm64-ios-simulator
-open Xcode/Kotonoha.xcodeproj
+open buildsystems/xcode/Kotonoha.xcodeproj
 # Ou, sem assinatura, apenas para verificar a compilacao:
-xcodebuild -project Xcode/Kotonoha.xcodeproj -scheme Kotonoha \
+xcodebuild -project buildsystems/xcode/Kotonoha.xcodeproj -scheme Kotonoha \
   -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build
 ```
 
@@ -325,7 +326,7 @@ identificadores de bundle quando necessario.
 
 Os IDs nativos dos jogos correspondem aos applicationIds Android:
 `me.hirameki.kotonoha.zeronotsukaima`, `.snowradishvacation`,
-`.dokidokiliteratureclub`, `.schooldays`, `.air`, `.summerradishvacation` e `.amagami`.
+`.dokidokiliteratureclub`, `.schooldays`, `.reallive`, `.summerradishvacation` e `.amagami`.
 O exemplo usa `me.hirameki.kotonoha` no iOS e `me.kotonoha.example` no Android.
 O bundle ID/applicationId selecionado
 na plataforma determina a identidade da instalacao, sandbox, preferencias
@@ -387,12 +388,12 @@ saves e estado persistente usam os documentos, nunca o pacote somente leitura.
 
 ### Android
 
-Abra [Android/](Android/) no Android Studio. Ha APKs separados para exemplo,
+Abra [buildsystems/android/](buildsystems/android/) no Android Studio. Ha APKs separados para exemplo,
 Zero, Snow e DDLC. SDL3 vem de um checkout remoto do Git com revisao fixa;
 SDL_ttf e ImGui continuam nos submodulos. O NDK compila o motor e o jogo como
 shared libraries carregadas pela SDLActivity. FFmpeg, json-c, PlutoSVG e
 CPython de DDLC sao dependencias vcpkg para Android.
-Veja [o guia Android em portugues](Android/README.pt-BR.md).
+Veja [o guia Android em portugues](buildsystems/android/README.pt-BR.md).
 
 ### Shaders MPV e MetalFX
 
@@ -409,7 +410,7 @@ uma instalacao local confiavel com `game/` e `characters/` e copie os arquivos
 para o container isolado do teste:
 
 ```sh
-xcodebuild -project Xcode/Kotonoha.xcodeproj -scheme DdlcIOSScriptSmoke \
+xcodebuild -project buildsystems/xcode/Kotonoha.xcodeproj -scheme DdlcIOSScriptSmoke \
   -configuration Debug -sdk iphonesimulator \
   -destination 'platform=iOS Simulator,name=iPhone 18 Pro Max' \
   -derivedDataPath build/xcode-ios-simulator CODE_SIGNING_ALLOWED=NO build
@@ -442,6 +443,10 @@ cmake -S . -B build/macos -G Ninja \
   -DCMAKE_BUILD_TYPE=Debug -DKOTONOHA_BUILD_MACOS_BUNDLES=ON
 ```
 
+### Build para WebAssembly (Wasm)
+
+Para compilar os ports de jogos para WebAssembly com carregamento assíncrono sob demanda, barra de progresso em tempo real e geração automática de manifesto (`manifest.json` via `tools/generate_manifest.py`), consulte o [guia de build para WebAssembly](docs/WASM_BUILD.md).
+
 Cada configuracao compila seu alvo e depura o executavel dentro do `.app`.
 Os caminhos dos dados em `.vscode/launch.json` sao locais e devem ser ajustados
 conforme a instalacao. School Days usa `--school-days` para a pasta Packs e
@@ -472,6 +477,13 @@ como padrao. `--ktrf` sobrescreve explicitamente a rota lembrada.
 - F8: ativar/desativar no e clock temporal.
 - F5/F6: salvar/carregar o quicksave (separado dos saves manuais).
 - Menus Salvar/Carregar: lista de saves, sem limite fixo de slots.
+
+Na distribuicao Windows do School Days compilada com
+`KOTONOHA_ENABLE_PLAYER_DUBBING=ON`, F10 abre a janela de dublagem do jogador
+em vez do inspetor de desenvolvimento. Selecione uma fala da cena ou informe o
+ID logico do audio, importe ou grave um take, ouca/edite e salve como overlay
+WAV. O audio original nos GPKs continua disponivel para comparacao e
+restauracao. `--documents` tambem isola o overlay nos testes.
 
 ## Jogo demonstrativo
 
@@ -557,7 +569,7 @@ ajuda) e o jogo implementa apenas `checkPath(path, info)`.
 usado quando o jogo inicia sem launcher. Toda a interface do motor e dos jogos
 (launcher, menus, configuracoes, F10) e em ingles.
 
-`DiscAssetProvider` e o `AssetProvider` do motor (`EngineOptions::assets`).
+`Kotonoha::Providers::ZeroDiscAssets` e o `AssetProvider` do motor (`EngineOptions::assets`).
 Ids: `scenedat/<n>`, `normal/<NOME>`, `voice/<n>`, `sound/<NOME>`,
 `movie/<n>` (PSS bruto), `movie/<n>.wav` (PCM SShd/SSbd do PSS),
 `script/<NOME.KS>` e qualquer caminho ISO (`SYSTEM.CNF`, `MOVIE/MOVE00.PSS`);
@@ -615,7 +627,7 @@ Porta de *Snow Radish Vacation!!* (Overflow, ADV3, 800x600) sobre o motor. Os
 cmake -S . -B build -DSNOW_DATA_DIR=/caminho/DATA/PACK  # habilita os testes com os DAT
 ```
 
-`SnowAssets` e o `AssetProvider` do motor: ids `script`, `graphic/<nome>`,
+`Kotonoha::Providers::SnowAssets` e o `AssetProvider` do motor: ids `script`, `graphic/<nome>`,
 `sound/<nome>` e `voice/<nome>`; `loadSurface` decodifica EVD/IMG/CHD. O
 viewport do jogo e 960x720 (800x600 x1.2); o `SnowRuntime` converte as
 coordenadas do mouse. Voz, BGM e efeitos usam `Kotonoha::PcmPlayer` nos canais
@@ -758,7 +770,7 @@ leitura de um pixel e uma espera de GPU, portanto tem custo de sincronizacao.
 ### Splash, viewport e bibliotecas
 
 Nos builds desktop normais, `libkotonoha` (`Kotonoha::Engine`) e
-`kotonoha_imgui` sao bibliotecas compartilhadas. No projeto iOS nativo,
+`imgui` sao bibliotecas compartilhadas. No projeto iOS nativo,
 `KotonohaEngine` e estatico e ImGui e um framework dinamico.
 `kotonoha_copy_assets(alvo)` copia `assets/` (inclusive o `SPLASH.PNG`)
 para o diretorio de recursos do executavel ou bundle.
@@ -1160,7 +1172,7 @@ quando a politica e Pause. Frames longos nao pulam os timeouts.
 
 ## Saves
 
-[VNSave.cpp](src/componentes/VNSave.cpp) grava um formato versionado e substitui
+[VNSave.cpp](src/components/VNSave.cpp) grava um formato versionado e substitui
 o slot por rename de um arquivo temporario no mesmo diretorio.
 
 ```cpp
@@ -1380,9 +1392,9 @@ Shared overlay, gesture and live translation behavior: [documentation](docs/ASSE
 ## Revisão dos portes
 
 Os relatórios de [Amagami](games/amagami/PORT_STATUS.md),
-[AIR](games/air/PORT_STATUS.md) e [School Days](games/school-days/PORT_STATUS.md)
+[RealLive](games/reallive/PORT_STATUS.md) e [School Days](games/school-days/PORT_STATUS.md)
 registram correções verificadas e comandos ainda pendentes. Os inspetores de
-Amagami e AIR aceitam `--opcodes` para gerar inventários reproduzíveis.
+Amagami e RealLive aceitam `--opcodes` para gerar inventários reproduzíveis.
 A [gestão compartilhada de arquivos](docs/ASSET_OVERLAYS.md#shared-file-ownership)
 centraliza leitura, overlays e índices no Kotonoha; formatos próprios ficam nos
 provedores de cada jogo. School Days usa `TextInputDialog` do motor para nomes

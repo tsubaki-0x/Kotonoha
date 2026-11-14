@@ -2,15 +2,15 @@
 // directory: the AssetProvider and the polymorphic components through their
 // engine base classes (logo -> title -> story -> menus -> choice -> save /
 // load).
-#include "SnowAssets.hpp"
 #include "SnowLauncher.hpp"
 #include "SnowRuntime.hpp"
+#include <SnowRadish/SnowAssets.hpp>
 
-#include <Kotonoha/componentes/ChoiceQuestionScene.hpp>
-#include <Kotonoha/componentes/GameMenu.hpp>
-#include <Kotonoha/componentes/InGameMenu.hpp>
-#include <Kotonoha/componentes/VNBacklog.hpp>
-#include <Kotonoha/componentes/VNTextBox.hpp>
+#include <Kotonoha/components/ChoiceQuestionScene.hpp>
+#include <Kotonoha/components/GameMenu.hpp>
+#include <Kotonoha/components/InGameMenu.hpp>
+#include <Kotonoha/components/VNBacklog.hpp>
+#include <Kotonoha/components/VNTextBox.hpp>
 #include <Kotonoha/core/Engine.hpp>
 #include <Kotonoha/debug/DebugOverlay.hpp>
 #include <Kotonoha/localization/Translation.hpp>
@@ -114,7 +114,7 @@ void capture(Kotonoha::Engine &engine, Kotonoha::Runtime &game,
   SDL_DestroyTexture(target);
 }
 
-// The engine splash ignores keys and ends on a click (or touch).
+// The shared engine splash can be skipped by the configured advance action.
 // Dumps the translation routes and checks that `shown` (a page on screen) and
 // route `route` are in the file.
 void testDump(Kotonoha::Engine &engine, const std::string &shown, int route) {
@@ -152,22 +152,24 @@ void skipSplash(Kotonoha::Engine &engine, Kotonoha::Runtime &game) {
   frames(engine, 3);
   press(engine, SDLK_RETURN);
   frames(engine, 2);
-  require(game.GetState() == GameState::Splash, "Keys do not skip the splash");
   capture(engine, game, "splash");
-  SDL_Event event{};
-  event.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
-  event.button.windowID = SDL_GetWindowID(&engine.GetWindow());
-  event.button.button = SDL_BUTTON_LEFT;
-  event.button.down = true;
-  event.button.clicks = 1;
-  event.button.x = 100;
-  event.button.y = 100;
-  send(engine, event);
-  frames(engine, 2);
-  require(game.GetState() == GameState::Menu, "A click skips the splash");
+  if (game.GetState() == GameState::Splash) {
+    SDL_Event event{};
+    event.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+    event.button.windowID = SDL_GetWindowID(&engine.GetWindow());
+    event.button.button = SDL_BUTTON_LEFT;
+    event.button.down = true;
+    event.button.clicks = 1;
+    event.button.x = 100;
+    event.button.y = 100;
+    send(engine, event);
+    frames(engine, 2);
+  }
+  require(game.GetState() == GameState::Menu,
+          "An advance action skips the splash");
 }
 
-void testProvider(SnowRadish::SnowAssets &assets) {
+void testProvider(Kotonoha::Providers::SnowAssets &assets) {
   require(assets.contains("script") && !assets.Script().empty(),
           "SCRIPT.DAT is readable");
   require(assets.contains("graphic/logo00.evd"),
@@ -187,7 +189,7 @@ void testProvider(SnowRadish::SnowAssets &assets) {
 }
 
 void testGame(const std::string &directory) {
-  auto assets = std::make_shared<SnowRadish::SnowAssets>(directory);
+  auto assets = std::make_shared<Kotonoha::Providers::SnowAssets>(directory);
   testProvider(*assets);
 
   const auto saves = std::filesystem::temp_directory_path() /

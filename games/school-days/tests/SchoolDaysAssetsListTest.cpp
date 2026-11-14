@@ -113,6 +113,17 @@ int main() {
     std::string overlayError;
     require(Kotonoha::SetSchoolDaysAssetOverlay(optionOverlay, &overlayError),
             "external option overlay could not be mounted");
+    const std::string voiceId =
+        "Voice03/03-BK/03-BK-H00/03-BK-H00-0410.OGG";
+    const auto voiceOverride = optionOverlay / voiceId;
+    fs::create_directories(voiceOverride.parent_path());
+    {
+      std::ofstream file(voiceOverride, std::ios::binary);
+      file << 'y';
+    }
+    require(assets.read(voiceId, Kotonoha::AssetSource::Original) ==
+                std::vector<Uint8>{'x'},
+            "Dubbing original route must bypass the external overlay");
     Kotonoha::InstallMountedSchoolDaysAssetResolver();
     for (const auto &name : optionArtwork) {
       const auto logical = "System/Option/" + name;

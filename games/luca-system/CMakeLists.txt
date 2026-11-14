@@ -1,0 +1,38 @@
+cmake_minimum_required(VERSION 3.16)
+
+project(LucaSystem VERSION 0.1.0 LANGUAGES CXX)
+
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  include(CTest)
+endif()
+
+# LucaSystem (Visual Art's / Key) archive + script format support.
+# Implemented from the format decoded by wetor/LuckSystem (pak.go / script.go).
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../modules/providers/pak"
+    "${CMAKE_CURRENT_BINARY_DIR}/providers/pak")
+add_library(luca_system_formats STATIC
+  src/LucaSystemScript.cpp
+  src/LucaSystemRuntime.cpp
+)
+target_include_directories(luca_system_formats PUBLIC src include)
+target_link_libraries(luca_system_formats PUBLIC Kotonoha::Engine Kotonoha::ProviderPAK)
+target_compile_features(luca_system_formats PUBLIC cxx_std_17)
+
+if(NOT ANDROID AND NOT EMSCRIPTEN)
+    add_executable(LucaInspect tools/LucaInspect.cpp)
+    target_link_libraries(LucaInspect PRIVATE luca_system_formats)
+endif()
+
+kotonoha_add_app(LucaSystem src/main.cpp)
+target_link_libraries(LucaSystem PRIVATE luca_system_formats)
+set_target_properties(LucaSystem PROPERTIES CXX_EXTENSIONS OFF)
+kotonoha_configure_app(LucaSystem
+    BUNDLE_ID me.hirameki.kotonoha.lucasystem GAME luca-system)
+
+set(LUCA_SYSTEM_TEST_DATA "" CACHE PATH "LucaSystem original data for integration tests")
+
+if(BUILD_TESTING)
+  add_executable(LucaSystemFormatTests tests/LucaSystemTest.cpp)
+  target_link_libraries(LucaSystemFormatTests PRIVATE luca_system_formats)
+  add_test(NAME LucaSystemFormatTests COMMAND LucaSystemFormatTests)
+endif()

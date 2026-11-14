@@ -13,6 +13,7 @@ namespace Kotonoha {
 
 class Engine;
 class AudioChannel;
+class VoiceDubbingApplet;
 struct DebugNode;
 namespace ImGuiTheme {
 class ShaderFilePicker;
@@ -41,6 +42,7 @@ class DebugOverlay {
   int minimumLogPriority = SDL_LOG_PRIORITY_INFO;
   bool followLogs = true;
   std::unique_ptr<ImGuiTheme::ShaderFilePicker> shaderPicker;
+  std::unique_ptr<VoiceDubbingApplet> dubbingApplet;
   char ktrfPath[1024] = "story.ktnroute";
   std::string selectedRuntimeNode;
   // Node lists are expensive (whole KTRF graphs); refreshed on demand only.
@@ -56,6 +58,8 @@ class DebugOverlay {
   std::shared_ptr<AudioChannel> previewChannel;
   std::vector<std::string> browsedAssets;
   bool showTranslationWindow = false;
+  bool showOptionsWindow = false;
+  bool showDubbingWindow = false;
   std::string selectedTransNodeStr;
   bool followActiveTranslation = false;
   bool scrollActiveTranslation = false, scrollActiveTranslationNode = false;
@@ -75,6 +79,7 @@ class DebugOverlay {
   void drawTranslationExport();
   void drawTranslationEditor();
   void drawTranslationWindow();
+  void drawDubbingWindow();
   void drawEngineTools();
   void drawForcedSubtitlesGenerator();
   std::string forcedSubsStatus;
@@ -89,7 +94,10 @@ public:
   void update();
   void renderHUD(RendererRef renderer);
   void renderMenu(RendererRef renderer);
-  bool isVisible() const { return visible || showTranslationWindow; }
+  bool isVisible() const {
+    return visible || showOptionsWindow || showTranslationWindow ||
+           showDubbingWindow;
+  }
   bool pausesStory() const { return isVisible() && !settings.ignorePause; }
   void setVisible(bool value);
   DebugSettings &getSettings() { return settings; }

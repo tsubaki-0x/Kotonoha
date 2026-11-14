@@ -1,8 +1,8 @@
 #include "SnowRuntime.hpp"
-#include <Kotonoha/componentes/SubtitleScene.hpp>
+#include <Kotonoha/components/SubtitleScene.hpp>
 
-#include <Kotonoha/componentes/VNSave.hpp>
-#include <Kotonoha/componentes/VNSaveMenu.hpp>
+#include <Kotonoha/components/VNSave.hpp>
+#include <Kotonoha/components/VNSaveMenu.hpp>
 #include <Kotonoha/core/Engine.hpp>
 #include <Kotonoha/core/UI.hpp>
 #include <Kotonoha/events/ControllerEvent.hpp>
@@ -13,7 +13,8 @@
 #include <stdexcept>
 
 namespace SnowRadish {
-SnowRuntime::SnowRuntime(std::shared_ptr<SnowAssets> assets)
+SnowRuntime::SnowRuntime(
+    std::shared_ptr<Kotonoha::Providers::SnowAssets> assets)
     : Runtime("Snow Radish Vacation!!", "0.1.0",
               "me.hirameki.kotonoha.snowradishvacation"),
       assets_(std::move(assets)) {
@@ -191,6 +192,17 @@ std::string SnowRuntime::debugNode() const {
   std::snprintf(pc, sizeof pc, "0x%04x", unsigned(vm.pc()));
   return object->name + " | route " + std::to_string(object->id & 0xfff) +
          " | pc " + pc;
+}
+std::string SnowRuntime::nodeClockKey() const {
+  if (!session_ || !session_->Playing() || !session_->Story())
+    return {};
+  auto &vm = session_->Story()->vm();
+  const auto object = vm.current();
+  if (!object)
+    return session_->Story()->currentScript();
+  // All positions within the same script object share the node clock; only
+  // the event clock resets between PCs of an object.
+  return object->name;
 }
 
 void SnowRuntime::saveGame(const std::string &path) {

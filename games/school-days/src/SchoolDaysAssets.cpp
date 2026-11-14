@@ -5,6 +5,7 @@
 #include <Kotonoha/routing/SchoolDaysLxhContent.hpp>
 #include <Kotonoha/core/FileSystem.hpp>
 #include <Kotonoha/core/SDL.hpp>
+#include <Kotonoha/media/MediaDecoder.hpp>
 #include <algorithm>
 #include <cctype>
 #include <functional>
@@ -36,6 +37,37 @@ bool HasAsciiCaseInsensitivePrefix(const std::string &value,
                     [](unsigned char a, unsigned char b) {
                       return std::tolower(a) == std::tolower(b);
                     });
+}
+
+std::filesystem::path ResolveLooseOriginal(const std::filesystem::path &root,
+                                           const std::string &logical) {
+  const std::filesystem::path requested(logical);
+  if (requested.empty() || requested.is_absolute()) return {};
+  std::filesystem::path current = root;
+  std::error_code ec;
+  for (const auto &part : requested) {
+    const auto name = part.string();
+    if (name.empty() || name == ".") continue;
+    if (name == "..") return {};
+    std::filesystem::path match;
+    for (const auto &entry : std::filesystem::directory_iterator(current, ec)) {
+      if (ec) return {};
+      if (!Kotonoha::SchoolDaysAsciiCaseEqual(entry.path().filename().string(), name))
+        continue;
+      if (!match.empty()) return {};
+      match = entry.path();
+    }
+    if (match.empty()) return {};
+    current = std::move(match);
+  }
+  if (!std::filesystem::is_regular_file(current, ec) || ec) return {};
+  const auto canonicalRoot = std::filesystem::canonical(root, ec);
+  if (ec) return {};
+  const auto canonicalFile = std::filesystem::canonical(current, ec);
+  if (ec) return {};
+  const auto relative = canonicalFile.lexically_relative(canonicalRoot);
+  return relative.empty() || *relative.begin() == ".."
+             ? std::filesystem::path{} : canonicalFile;
 }
 
 // The user's new Display Options artwork is a separate remaster overlay.
@@ -134,6 +166,62 @@ std::string Assets::resolve(const std::string &logical, bool image) const {
     throw std::runtime_error(std::string(reason) + " School Days asset: " + logical);
   }
   return found.physical;
+}
+
+std::string Assets::resolveOriginal(const std::string &logical) const {
+  if (Kotonoha::IsSchoolDaysGpkUri(logical)) return logical;
+  const std::filesystem::path supplied(logical);
+  if (supplied.is_absolute()) {
+    std::error_code ec;
+    const auto root = std::filesystem::canonical(directory, ec);
+    if (ec) throw std::runtime_error("Invalid original School Days root");
+    const auto file = std::filesystem::canonical(supplied, ec);
+    const auto relative = file.lexically_relative(root);
+    if (!ec && !relative.empty() && *relative.begin() != ".." &&
+        std::filesystem::is_regular_file(file, ec))
+      return file.string();
+    throw std::runtime_error("Invalid original School Days asset: " + logical);
+  }
+  if (mounted) {
+    auto original = logical;
+    if (Kotonoha::LookupMountedSchoolDaysAsset(original, true) !=
+            Kotonoha::SchoolDaysGpkLookupStatus::Present &&
+        original == "Voice03/03-BK/03-BK-H00/03-B K-H00-0410.OGG")
+      original = "Voice03/03-BK/03-BK-H00/03-BK-H00-0410.OGG";
+    if (Kotonoha::LookupMountedSchoolDaysAsset(original, true) ==
+        Kotonoha::SchoolDaysGpkLookupStatus::Present)
+      return Kotonoha::MakeSchoolDaysGpkUri(original);
+  }
+  auto file = ResolveLooseOriginal(directory, logical);
+  if (file.empty() && logical == "Voice03/03-BK/03-BK-H00/03-B K-H00-0410.OGG")
+    file = ResolveLooseOriginal(directory,
+        "Voice03/03-BK/03-BK-H00/03-BK-H00-0410.OGG");
+  if (!file.empty()) return file.string();
+  throw std::runtime_error("Missing original School Days asset: " + logical);
+}
+
+Kotonoha::AudioClip Assets::loadAudioAsset(const std::string &id) const {
+  return Kotonoha::MediaDecoder::decodeAudio(readOriginalAsset(id));
+}
+
+bool Assets::containsOriginalAsset(const std::string &id) const {
+  try {
+    return containsAsset(resolveOriginal(id));
+  } catch (const std::exception &) {
+    return false;
+  }
+}
+
+std::vector<Uint8> Assets::readOriginalAsset(const std::string &id) const {
+  const auto original = resolveOriginal(id);
+  std::string logical;
+  if (!Kotonoha::SchoolDaysLogicalFromGpkUri(original, &logical))
+    return readAsset(original);
+  std::vector<Uint8> bytes;
+  std::string error;
+  if (!Kotonoha::ReadMountedSchoolDaysAsset(logical, &bytes, &error, true))
+    throw std::runtime_error(error + ": " + id);
+  return bytes;
 }
 
 std::string Assets::overlayId(const std::string &id) const {
@@ -303,6 +391,13 @@ std::unique_ptr<Kotonoha::AssetStream> Assets::openStream(const std::string &id)
   std::string logical;
   if (!Kotonoha::SchoolDaysLogicalFromGpkUri(id, &logical)) return {};
   return Kotonoha::OpenMountedSchoolDaysAssetStream(logical);
+}
+
+std::unique_ptr<Kotonoha::AssetStream> Assets::openOriginalStream(const std::string &id) const {
+  const auto original = resolveOriginal(id);
+  std::string logical;
+  if (!Kotonoha::SchoolDaysLogicalFromGpkUri(original, &logical)) return {};
+  return Kotonoha::OpenMountedSchoolDaysAssetStream(logical, true);
 }
 
 bool Assets::checkDirectory(const std::filesystem::path &root, std::string &info) {

@@ -293,6 +293,9 @@ struct App {
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
   *appstate = nullptr;
+#if defined(KOTONOHA_DISTRIBUTION_BUILD)
+  SDL_SetLogPriorities(SDL_LOG_PRIORITY_ERROR);
+#endif
   DevStartupLog("app-init-entered");
   SDL_SetAppMetadata("School Days HQ", "0.1.0", "me.hirameki.kotonoha.schooldays");
   try {
@@ -345,6 +348,9 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     arguments.option("--documents", "DIRECTORY", "Save-game and GlobalFlag directory", app->documents);
     arguments.option("--node", "ID", "Start at an index or scene key", app->startNode);
     arguments.option("--dump-ktrf", "FILE", "Export the active routing graph", app->dump);
+#endif
+#if defined(KOTONOHA_DISTRIBUTION_BUILD)
+    arguments.option("--documents", "DIRECTORY", "Save-game and GlobalFlag directory", app->documents);
 #endif
     arguments.parse(argc, argv);
 #if !defined(KOTONOHA_DISTRIBUTION_BUILD)

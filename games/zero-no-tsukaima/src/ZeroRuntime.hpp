@@ -15,7 +15,8 @@ namespace ZeroNoTsukaima {
 // into the viewport.
 class ZeroRuntime : public Kotonoha::Runtime {
 public:
-  explicit ZeroRuntime(std::shared_ptr<DiscAssetProvider> disc);
+  explicit ZeroRuntime(
+      std::shared_ptr<Kotonoha::Providers::ZeroDiscAssets> disc);
   ~ZeroRuntime() override;
 
   // Releases session textures and audio; call before the Engine is destroyed.
@@ -27,6 +28,7 @@ public:
   void initGameplay(Kotonoha::Engine &engine) override;
 
   SDL_Point viewport() const override { return {kViewWidth, kViewHeight}; }
+  bool continuousTouch() const override { return true; }
   SDL_FPoint sceneSize(const Kotonoha::Scene &scene) const override;
   void render(Kotonoha::RendererRef renderer, float scale) override;
   void update() override;
@@ -37,17 +39,18 @@ public:
   std::vector<int> translationRoutes() const override;
   std::vector<std::string> translationTexts(int route) const override;
   std::string debugNode() const override;
+  std::string nodeClockKey() const override;
   std::vector<Kotonoha::DebugNode> debugNodes() const override;
   void debugJumpToNode(const std::string &id) override;
 
   void saveGame(const std::string &path) override;
   void loadGame(const std::string &path) override;
 
-  static constexpr int kViewWidth = kGameWidth * 3 / 2, kViewHeight = kGameHeight * 3 / 2;
+  static constexpr int kViewWidth = kGameWidth * 3 / 2,
+                       kViewHeight = kGameHeight * 3 / 2;
 
 private:
-
-  std::shared_ptr<DiscAssetProvider> disc_;
+  std::shared_ptr<Kotonoha::Providers::ZeroDiscAssets> disc_;
   Kotonoha::Engine *engine_ = nullptr;
   std::unique_ptr<ZeroSession> session_;
   std::unique_ptr<ZeroTitleMenu> title_;

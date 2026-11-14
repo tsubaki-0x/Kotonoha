@@ -1,13 +1,13 @@
 #pragma once
-#include "SummerAssets.hpp"
 #include <Kotonoha/core/Runtime.hpp>
+#include <SummerRadish/SummerAssets.hpp>
 namespace SummerRadish {
 class SummerRuntime final : public Kotonoha::Runtime {
   struct Impl;
   std::unique_ptr<Impl> impl;
 
 public:
-  explicit SummerRuntime(std::shared_ptr<SummerAssets>);
+  explicit SummerRuntime(std::shared_ptr<Kotonoha::Providers::SummerAssets>);
   ~SummerRuntime() override;
   void shutdown();
   void initMenu(Kotonoha::Engine &) override;
@@ -17,8 +17,9 @@ public:
   void saveGame(const std::string &) override;
   void loadGame(const std::string &) override;
   Kotonoha::Translation::SourceTexts translationSources() const override;
-  int translationRoute()const override;
+  int translationRoute() const override;
   std::string debugNode() const override;
+  std::string nodeClockKey() const override;
   std::vector<Kotonoha::DebugNode> debugNodes() const override;
   void debugJumpToNode(const std::string &) override;
   [[nodiscard]] bool continuousTouch() const override { return true; }

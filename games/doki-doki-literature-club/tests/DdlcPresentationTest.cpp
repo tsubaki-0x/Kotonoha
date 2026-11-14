@@ -1,10 +1,13 @@
 #include "DdlcRuntime.hpp"
 #include "DdlcSession.hpp"
-#include <Kotonoha/componentes/InGameMenu.hpp>
-#include <Kotonoha/componentes/VNTextBox.hpp>
+
+#include <Kotonoha/components/InGameMenu.hpp>
+#include <Kotonoha/components/VNBacklog.hpp>
+#include <Kotonoha/components/VNTextBox.hpp>
 #include <Kotonoha/core/Appearance.hpp>
 #include <Kotonoha/core/Engine.hpp>
 #include <Kotonoha/debug/DebugOverlay.hpp>
+
 #include <SDL3/SDL.h>
 #include <filesystem>
 #include <iostream>
@@ -18,6 +21,13 @@ void key(Engine &engine, SDL_Keycode code) {
   SDL_Event e{};
   e.type = SDL_EVENT_KEY_DOWN;
   e.key.key = code;
+  engine.Event(&e);
+}
+void wheel(Engine &engine, float y) {
+  SDL_Event e{};
+  e.type = SDL_EVENT_MOUSE_WHEEL;
+  e.wheel.y = y;
+  e.wheel.direction = SDL_MOUSEWHEEL_NORMAL;
   engine.Event(&e);
 }
 void finger(Engine &engine, Uint32 type, SDL_FingerID id, float x = .5f,
@@ -74,8 +84,8 @@ int main(int argc, char **argv) {
       cleanup.set = true;
     }
     SDL_setenv_unsafe("DDLC_SAVE_DIR", directory.string().c_str(), 1);
-    auto assets =
-        std::make_shared<Ddlc::GameAssets>(argv[1], argc > 2 ? argv[2] : "");
+    auto assets = std::make_shared<Kotonoha::Providers::DdlcAssets>(
+        argv[1], argc > 2 ? argv[2] : "");
     Ddlc::GameRuntime game(assets);
     game.SetState(GameState::Gameplay);
     EngineOptions options;
@@ -154,11 +164,14 @@ int main(int argc, char **argv) {
     engine.Iterate();
     VNTextBox *box = nullptr;
     InGameMenu *pause = nullptr;
+    VNBacklog *genericBacklog = nullptr;
     for (auto *scene : game.GetActiveScenes()) {
       if (auto *b = dynamic_cast<VNTextBox *>(scene))
         box = b;
       if (auto *p = dynamic_cast<InGameMenu *>(scene))
         pause = p;
+      if (auto *b = dynamic_cast<VNBacklog *>(scene))
+        genericBacklog = b;
     }
     check(box && box->getText() == session->dialogueText(),
           "Native VNTextBox exposes the edited rendered text");
@@ -180,6 +193,13 @@ int main(int argc, char **argv) {
     check(session->paused(), "Back opens native pause");
     key(engine, SDLK_ESCAPE);
     check(!session->paused(), "Back toggles native pause once");
+    wheel(engine, 1);
+    check(session->historyOpen(), "Mouse wheel up opens DDLC native History");
+    check(!genericBacklog,
+          "DDLC runtime never registers a generic VNBacklog scene");
+    key(engine, SDLK_ESCAPE);
+    key(engine, SDLK_ESCAPE);
+    check(!session->paused(), "Back exits wheel-opened native History");
     finger(engine, SDL_EVENT_FINGER_DOWN, 1);
     finger(engine, SDL_EVENT_FINGER_DOWN, 2);
     check(game.debugNode() == node, "Touch down never advances native story");

@@ -491,6 +491,11 @@ public:
   bool usesTimedNodeClock() const override { return true; }
   std::optional<double> debugNodeSeconds() const override { return elapsed; }
   std::vector<Kotonoha::DebugNode> debugNodes() const override;
+  std::vector<Kotonoha::DebugAudioAsset> debugSceneAudio() override;
+  void debugOverlayAssetChanged(const std::string &id) override;
+  std::filesystem::path debugAssetOverlayDirectory() const override {
+    return documents.empty() ? std::filesystem::path{} : documents / "overlay";
+  }
   void debugJumpToNode(const std::string &id) override;
   bool hasCustomKtrf() const override { return true; }
   void loadKtrf(const std::string &path) override;

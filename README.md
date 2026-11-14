@@ -12,10 +12,10 @@ provided by vcpkg.
 
 - [lib/](lib/): public headers, engine implementations, tests and submodules.
 - [assets/](assets/): engine splash, fonts, licenses and bundled GLSL shaders.
-- [games/](games/): example, Zero no Tsukaima, Amagami, AIR, Radish Vacation, DDLC and School Days.
-- [Xcode/Kotonoha.xcodeproj](Xcode/Kotonoha.xcodeproj): native iOS targets.
-- [Android/](Android/): Android Studio/Gradle project with separate game APKs.
-- [cmake/](cmake/): desktop configuration and `.app` packaging.
+- [games/](games/): example, Zero no Tsukaima, Amagami, RealLive, Radish Vacation, DDLC, School Days, Kirikiri, LucaSystem and Pure Mail.
+- [buildsystems/xcode/Kotonoha.xcworkspace](buildsystems/xcode/Kotonoha.xcworkspace): native macOS and iOS multi-project workspace (generated via `ruby tools/UpdateGameTargets.rb`).
+- [buildsystems/android/](buildsystems/android/): Android Studio/Gradle project with separate game APKs.
+- [buildsystems/cmake/](buildsystems/cmake/): desktop configuration and `.app` packaging.
 
 Game assets live in `games/<game>/game-assets/`. Commercial data is local and must
 remain out of Git. Supply your own legally obtained data:
@@ -26,17 +26,20 @@ remain out of Git. Supply your own legally obtained data:
 | Snow Radish Vacation | `games/snow-radish-vacation/game-assets/SCRIPT.DAT` and the other DAT archives |
 | DDLC | `games/doki-doki-literature-club/game-assets/game/*.rpa` and `game-assets/characters/*.chr` |
 | School Days | Original game archives in `games/school-days/game-assets/` |
-| [AIR Standard Edition (initial port)](games/air/README.md) | `Seen.txt`, `Gameexe.ini` and original resource folders; `--air DIRECTORY_OR_ISO` |
+| [RealLive Standard Edition (initial port)](games/reallive/README.md) | `Seen.txt`, `Gameexe.ini` and original resource folders; `--reallive DIRECTORY_OR_ISO` |
 | [Amagami PS2 (playable prologue)](games/amagami/PORT_STATUS.md) | Original Japan ISO (`SLPS_259.18`); `--amagami DISC.iso`. Calendar and later routes are in development. |
+| [LucaSystem (new port)](games/luca-system/README.md) | `PARAM.PAK`, `SCRIPT.PAK` and `SYSSE.PAK`; `--luca-system DIRECTORY_OR_ISO`. Reference test: AIR (`/Volumes/Nero 2TB/SteamLibrary/steamapps/common/AIR/files`). |
+| [Pure Mail](games/pmail/docs/AUDIO_PARITY.md) | PMAILDVD root or data folder; `--pmail DIRECTORY`. |
+| [LucaSystem (new port)](games/luca-system/README.md) | `PARAM.PAK`, `SCRIPT.PAK` and `SYSSE.PAK`; `--luca-system DIRECTORY_OR_ISO`. Reference test: AIR (`/Volumes/Nero 2TB/SteamLibrary/steamapps/common/AIR/files`). |
 
 The port does not download or supply commercial game data.
 
 ### Opening ISO images
 
 Every folder-based game also accepts an `.iso` in the same game-data field or
-command-line option: `--air`, `--summer`, `--snow`, `--school-days` and `--ddlc`.
+command-line option: `--reallive`, `--summer`, `--snow`, `--school-days`, `--ddlc`, `--zero`, `--kirikiri`, `--luca-system` and `--pmail`.
 Use **Folder...** for a folder or **ISO...** for an image in the launcher.
-AIR reads ISO9660/Joliet assets directly, without extraction or temporary
+RealLive reads ISO9660/Joliet assets directly, without extraction or temporary
 files, including scripts, voices and overlay replacements. Amagami and Zero
 no Tsukaima retain their direct ISO/raw-disc readers.
 
@@ -124,6 +127,10 @@ cmake -S . -B build/macos -G Ninja \
   -DCMAKE_BUILD_TYPE=Debug -DKOTONOHA_BUILD_MACOS_BUNDLES=ON
 ```
 
+### WebAssembly (Wasm) build
+
+For compiling game ports to WebAssembly with asynchronous lazy asset loading and automated `manifest.json` generation (via `tools/generate_manifest.py`), see the [WebAssembly build guide](docs/WASM_BUILD.md).
+
 Each configuration builds its own target and debugs the executable inside its
 `.app`. The game-data paths in `.vscode/launch.json` are local examples; adjust
 them for your installation. School Days uses `--school-days` for the retail
@@ -133,20 +140,20 @@ defaults to the bundled one. `--ktrf` explicitly overrides the remembered route.
 
 ## Native iOS Xcode project
 
-Open [Xcode/Kotonoha.xcodeproj](Xcode/Kotonoha.xcodeproj). This project does not
+Open [buildsystems/xcode/Kotonoha.xcodeproj](buildsystems/xcode/Kotonoha.xcodeproj). This project does not
 run CMake or shell scripts during its build. Resources are assigned to each
 target using native Resources phases; frameworks use Embed Frameworks with
 Code Sign on Copy. Each game's `game-assets` directory is copied directly as
 a folder reference, preserving its name without build scripts.
 
-Schemes: `Kotonoha`, `ZeroNoTsukaima`, `SnowRadish`, `DokiDoki`, `SchoolDays`, `Air`, `SummerRadish`, `Amagami`,
+Schemes: `Kotonoha`, `ZeroNoTsukaima`, `SnowRadish`, `DokiDoki`, `SchoolDays`, `RealLive`, `SummerRadish`, `Amagami`,
 `KotonohaIOSSmoke` and `DdlcIOSScriptSmoke`. KotonohaEngine is a static framework;
 apps embed the dynamic KotonohaImGui, SDL3 and SDL3_ttf frameworks.
 
 The example executable/app is `Kotonoha`; its C++ namespace is
 `KotonohaExample`, separate from the engine's `Kotonoha` namespace.
 After changing School Days' library sources, run
-`ruby Xcode/UpdateGameTargets.rb` manually to synchronize its native target.
+`ruby buildsystems/xcode/UpdateGameTargets.rb` manually to synchronize its native target.
 This preserves existing native Python modules and refuses concurrent project edits.
 
 Prepare native dependencies before opening/building:
@@ -170,7 +177,7 @@ mkdir -p build/iOS-deps/python
 curl -fL https://github.com/beeware/Python-Apple-support/releases/download/3.15-b3/Python-3.15-iOS-support.b3.tar.gz \
   -o build/iOS-deps/python/Python-iOS.tar.gz
 python3 tools/PrepareApplePython.py --archive build/iOS-deps/python/Python-iOS.tar.gz
-xcodebuild -project Xcode/Kotonoha.xcodeproj -scheme DokiDoki \
+xcodebuild -project buildsystems/xcode/Kotonoha.xcodeproj -scheme DokiDoki \
   -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
   -derivedDataPath build/xcode-ios CODE_SIGNING_ALLOWED=NO build
 ```
@@ -183,7 +190,7 @@ Choose your signing team for device installation.
 
 The native game bundle IDs match their Android application IDs under
 `me.hirameki.kotonoha`: `.zeronotsukaima`, `.snowradishvacation`,
-`.dokidokiliteratureclub`, `.schooldays`, `.air`, `.summerradishvacation` and
+`.dokidokiliteratureclub`, `.schooldays`, `.reallive`, `.summerradishvacation` and
 `.amagami`. The example uses `me.hirameki.kotonoha` on iOS and
 `me.kotonoha.example` on Android. The platform's selected bundle ID or
 application ID determines the installed app's sandbox, preferences and external
@@ -220,7 +227,7 @@ back to the working directory.
 
 ## Android
 
-See [the Android guide](Android/README.md). SDL3 is fetched from the official
+See [the Android guide](buildsystems/android/README.md). SDL3 is fetched from the official
 Git repository at a pinned revision; the Java SDLActivity and native SDL
 library use that same checkout. Gradle builds separate example, Zero, Snow
 DDLC and School Days flavors, and embeds the engine as shared native libraries.
@@ -260,12 +267,12 @@ from the original style resource using the standard `.ass` extension and
 the bundled Noto Sans JP font. A cue's speaker selects the identically named
 style, falling back to `Default` or the first imported style.
 
-The reusable [SubtitleScene](lib/include/Kotonoha/componentes/SubtitleScene.hpp)
+The reusable [SubtitleScene](lib/include/Kotonoha/components/SubtitleScene.hpp)
 renders cues with libass and inherits the engine's selected style. Use
 `setCues`, `setPosition` and, optionally, `setStyle`. Shared timeline subtitles
 use this scene too; School Days extends it for ORS dialogue.
 
-[FadeScene](lib/include/Kotonoha/componentes/FadeScene.hpp), ported from
+[FadeScene](lib/include/Kotonoha/components/FadeScene.hpp), ported from
 Kotonoha, fades the frame to or from a color. Drive events from an external
 timeline (`add` + `setPosition`) or its own clock (`play`); `hold` keeps the
 color after a fade-out. Games reuse it instead of ad-hoc fades.
@@ -356,6 +363,13 @@ still work. Scale `1.0` turns processing off without losing the selected profile
 - `--translation`, `--dump-translation`: engine translation routes.
 - `--config`, `--no-config`, `--renderer`, `--log`: runtime configuration.
 
+In the School Days Windows distribution built with
+`KOTONOHA_ENABLE_PLAYER_DUBBING=ON`, F10 opens the player dubbing window
+instead of the developer inspector. Choose scene audio or enter its logical
+ID, import or record a take, preview/edit it, then save it as a WAV overlay.
+The original GPK audio remains available for comparison and restoration.
+`--documents` also redirects the dubbing overlay for isolated testing.
+
 The generic settings menu, launcher and debug inspector expose master volume
 and mute. Master gain composes with channel volume/mute and per-stream gain;
 new channels inherit it. In the generic menu, left/right adjusts volume by 5%.
@@ -373,7 +387,7 @@ dialogue translations and DDLC's later acts have not been fully validated.
 Shared overlay, gesture and live translation behavior: [documentation](docs/ASSET_OVERLAYS.md).
 
 Port fidelity, remaining commands and verification are tracked in the
-[Amagami](games/amagami/PORT_STATUS.md), [AIR](games/air/PORT_STATUS.md) and
+[Amagami](games/amagami/PORT_STATUS.md), [RealLive](games/reallive/PORT_STATUS.md) and
 [School Days](games/school-days/PORT_STATUS.md) status documents. Shared file
 ownership and per-game provider extensions are described in
 [asset management](docs/ASSET_OVERLAYS.md#shared-file-ownership).

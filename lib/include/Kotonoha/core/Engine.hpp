@@ -28,6 +28,7 @@ namespace Kotonoha {
 class UI;
 class TimelinePlayer;
 class DebugOverlay;
+class DubbingOverlay;
 class MCPServer;
 class SettingsMenu;
 class ForcedSubtitleRenderer;
@@ -87,6 +88,9 @@ private:
 #if !defined(KOTONOHA_DISTRIBUTION_BUILD)
   std::unique_ptr<DebugOverlay> debug;
   std::unique_ptr<MCPServer> mcp;
+#endif
+#if defined(KOTONOHA_PLAYER_DUBBING)
+  std::unique_ptr<DubbingOverlay> dubbing;
 #endif
   bool agentPaused = false;
   bool translationDumpComplete = false;
@@ -166,6 +170,9 @@ public:
   void dumpTranslation(const std::string &path);
   std::vector<DebugNode> debugNodes();
   void debugJumpToNode(const std::string &id);
+  void debugRestartScene();
+  void debugAdvanceScene(double seconds);
+  void debugAdvanceEvent();
   void loadKtrf(const std::string &path);
   void dumpKtrf(const std::string &path);
 #if !defined(KOTONOHA_DISTRIBUTION_BUILD)
@@ -175,6 +182,7 @@ public:
   AudioMixer &GetAudio() { return audio; }
   AssetProvider &GetAssets() { return *assets; }
   void SetAssetProvider(std::shared_ptr<AssetProvider> provider);
+  std::filesystem::path ensureAssetOverlay();
   const EngineSettings &GetSettings() const { return settings; }
   VisualTransition &GetVisualTransition() { return visualTransition; }
   bool HasStoredSettings() const { return settingsLoadedFromDisk; }

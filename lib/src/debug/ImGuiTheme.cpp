@@ -79,6 +79,12 @@ bool primaryButton(const char *label, ImVec2 size) {
   return pressed;
 }
 
+void sectionHeader(const char *label) { ImGui::SeparatorText(label); }
+
+void badge(const char *label, ImVec4 color) {
+  ImGui::TextColored(color, "%s", label ? label : "");
+}
+
 struct ShaderFilePicker::State {
   std::mutex mutex;
   bool done = false;

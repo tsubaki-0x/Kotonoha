@@ -19,7 +19,7 @@ namespace SnowRadish {
 // dialogs) in the 1280x720 design space, both fitted into the viewport.
 class SnowRuntime : public Kotonoha::Runtime {
 public:
-  explicit SnowRuntime(std::shared_ptr<SnowAssets> assets);
+  explicit SnowRuntime(std::shared_ptr<Kotonoha::Providers::SnowAssets> assets);
   ~SnowRuntime() override;
 
   // Releases session textures and audio; call before the Engine is destroyed.
@@ -31,6 +31,7 @@ public:
   void initGameplay(Kotonoha::Engine &engine) override;
 
   SDL_Point viewport() const override { return {kViewWidth, kViewHeight}; }
+  bool continuousTouch() const override { return true; }
   SDL_FPoint sceneSize(const Kotonoha::Scene &scene) const override;
   void render(Kotonoha::RendererRef renderer, float scale) override;
   void update() override;
@@ -39,20 +40,22 @@ public:
   // Route = 12-bit script object id (texts in Shift-JIS converted to UTF-8).
   Kotonoha::Translation::SourceTexts translationSources() const override;
   std::string debugNode() const override;
+  std::string nodeClockKey() const override;
   std::vector<Kotonoha::DebugNode> debugNodes() const override;
   void debugJumpToNode(const std::string &id) override;
 
   void saveGame(const std::string &path) override;
   void loadGame(const std::string &path) override;
 
-  static constexpr int kViewWidth = kGameWidth * 6 / 5, kViewHeight = kGameHeight * 6 / 5;
+  static constexpr int kViewWidth = kGameWidth * 6 / 5,
+                       kViewHeight = kGameHeight * 6 / 5;
 
 private:
   bool IsGameScene(const Kotonoha::Scene *scene) const;
   bool EngineSceneCaptures() const;
   void OpenSaves(bool load);
 
-  std::shared_ptr<SnowAssets> assets_;
+  std::shared_ptr<Kotonoha::Providers::SnowAssets> assets_;
   Kotonoha::Engine *engine_ = nullptr;
   SnowLinks links_;
   std::unique_ptr<SnowSession> session_;

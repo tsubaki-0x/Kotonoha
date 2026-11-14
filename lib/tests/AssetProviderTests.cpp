@@ -308,9 +308,16 @@ void overlays() {
     std::ofstream file(dir.path / "script.ks");
     file << "translated";
   }
+  auto dubbed = wave();
+  dubbed[44] = 7;
+  {
+    std::ofstream file(dir.path / "voice.OGG", std::ios::binary);
+    file.write(reinterpret_cast<const char *>(dubbed.data()), dubbed.size());
+  }
   MemoryAssetProvider provider;
   provider.files["script.ks"] = {'b', 'a', 's', 'e'};
   provider.files["untouched"] = {'o', 'k'};
+  provider.files["voice.OGG"] = wave();
   provider.setOverlay(dir.path);
   require(provider.contains("images/scene.bmp"),
           "Overlay-only asset is visible");
@@ -323,7 +330,7 @@ void overlays() {
           "Streaming opens the overlay file");
   require(provider.loadSurface("images/scene.bmp")->w == 3,
           "Overlay image decoder");
-  require(provider.list().size() == 3,
+  require(provider.list().size() == 4,
           "Overlay and archive listings merge without duplicates");
   require(provider.overlayPath("../script.ks").empty() &&
               provider.overlayPath((dir.path / "script.ks").string()).empty(),
@@ -332,6 +339,19 @@ void overlays() {
           "Reject missing overlay directory");
   require(provider.read("script.ks") == text,
           "Failed mount preserves active overlay");
+  require(provider.hasOverlay("voice.OGG") &&
+              provider.overlayWriteId("voice.OGG") == "voice.ogg" &&
+              provider.overlayWriteId("../voice.OGG").empty(),
+          "Dubbing overlay IDs must remain within the mount");
+  const auto original = provider.loadAudio("voice.OGG", AssetSource::Original);
+  const auto replacement = provider.loadAudio("voice.OGG");
+  require(original.data != replacement.data &&
+              original.data == provider.loadOriginalAudio("voice.OGG").data,
+          "Dubbing must preserve original archive audio for comparison");
+  require(provider.discardOverlay("voice.OGG") &&
+              !provider.hasOverlay("voice.OGG") &&
+              provider.loadAudio("voice.OGG").data == original.data,
+          "Discarding a dub must restore the original audio");
   provider.setOverlay({});
   require(provider.read("script.ks") ==
               std::vector<Uint8>({'b', 'a', 's', 'e'}),

@@ -23,6 +23,8 @@ option(KOTONOHA_BUILD_SCHOOL_DAYS "Build the School Days port" ON)
 option(KOTONOHA_DEV_CONTROL "Enable local School Days automation bridge" OFF)
 option(KOTONOHA_DISTRIBUTION_BUILD
     "Produce a player-facing build without the developer overlay, MCP or QA controls" OFF)
+option(KOTONOHA_ENABLE_PLAYER_DUBBING
+    "Include the standalone dubbing window in a distribution build" OFF)
 if(KOTONOHA_DISTRIBUTION_BUILD AND KOTONOHA_DEV_CONTROL)
     message(FATAL_ERROR "Distribution builds must disable KOTONOHA_DEV_CONTROL")
 endif()

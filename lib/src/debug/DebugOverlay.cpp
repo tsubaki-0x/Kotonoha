@@ -1,4 +1,5 @@
 #include <Kotonoha/debug/DebugOverlay.hpp>
+#include <Kotonoha/debug/VoiceDubbingApplet.hpp>
 
 #include <Kotonoha/componentes/ChoiceQuestionScene.hpp>
 #include <Kotonoha/componentes/ForcedSubtitleRenderer.hpp>
@@ -52,10 +53,11 @@ const char *nodeTypeName(NodeType type) {
 } // namespace
 
 DebugOverlay::DebugOverlay(Engine &engine) : engine(engine) {
-  const auto ktrf = preferredDocumentsDirectory(engine.GetRuntime().identify) /
-                    "story.ktnroute";
+  const auto ktrf =
+      documentsDirectory(engine.GetRuntime().identify) / "story.ktnroute";
   SDL_strlcpy(ktrfPath, ktrf.string().c_str(), sizeof(ktrfPath));
   shaderPicker = std::make_unique<ImGuiTheme::ShaderFilePicker>();
+  dubbingApplet = std::make_unique<VoiceDubbingApplet>(engine);
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
   ImGui::GetIO().IniFilename = nullptr;
@@ -102,7 +104,7 @@ bool DebugOverlay::handleEvent(EventRef event) {
   }
   if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) {
     if (event.key.key == SDLK_F10) {
-      setVisible(!visible);
+      setVisible(!isVisible());
       return true;
     }
     if (event.key.key == SDLK_F9) {
@@ -119,7 +121,7 @@ bool DebugOverlay::handleEvent(EventRef event) {
         transSourcesStale = true;
       return true;
     }
-    if (visible && event.key.key == SDLK_ESCAPE) {
+    if (isVisible() && event.key.key == SDLK_ESCAPE) {
       setVisible(false);
       return true;
     }
@@ -136,7 +138,7 @@ bool DebugOverlay::handleEvent(EventRef event) {
                       event.type <= SDL_EVENT_FINGER_CANCELED) ||
                      event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN ||
                      event.type == SDL_EVENT_GAMEPAD_BUTTON_UP;
-  return (visible || showTranslationWindow) && input && wantCapture;
+  return isVisible() && input && wantCapture;
 }
 
 void DebugOverlay::update() {
@@ -355,8 +357,13 @@ void DebugOverlay::setVisible(bool value) {
   if (value && !visible)
     nodesStale = true;
   visible = value;
-  if (!visible)
+  if (!value) {
+    showOptionsWindow = false;
+    showTranslationWindow = false;
+    showDubbingWindow = false;
+    dubbingApplet->suspend();
     stopPreviewAudio();
+  }
 }
 
 void DebugOverlay::stopPreviewAudio() {
@@ -647,6 +654,7 @@ void DebugOverlay::refreshTranslationSources() {
     };
     if (auto current = engine.GetRuntime().translationRoute(); current >= 0)
       addKey(std::to_string(current));
+    addKey(engine.GetRuntime().debugNode());
 
     for (int id : GetVNManagerRuntime(engine).getNodeIds())
       addKey(std::to_string(id));
@@ -709,11 +717,11 @@ void DebugOverlay::drawTranslationWindow() {
                                   std::min(600.0f * scale, io.DisplaySize.y)),
                            ImGuiCond_FirstUseEver);
 
-  if (!ImGui::Begin("Live Translation Editor [F7]", &showTranslationWindow)) {
+  if (!ImGui::Begin("Translation Applet [F7]", &showTranslationWindow,
+                    ImGuiWindowFlags_MenuBar)) {
     ImGui::End();
     return;
   }
-
   auto &translation = engine.GetTranslation();
   auto &sections = translation.mutableSections();
   auto &manager = GetVNManagerRuntime(engine);
@@ -939,11 +947,18 @@ void DebugOverlay::drawTranslationWindow() {
         ImGui::PushID(idx++);
         const bool current =
             selectedTransNodeStr == activeNodeKey &&
-            std::any_of(activeKeys.begin(), activeKeys.end(),
-                        [&](const std::string &key) {
-                          return orig == key ||
-                                 translation.text(nodeInt, orig) == key;
-                        });
+            std::any_of(
+                activeKeys.begin(), activeKeys.end(),
+                [&](const std::string &key) {
+                  if (orig == key || translation.text(nodeInt, orig) == key)
+                    return true;
+                  const auto section = sections.find(selectedTransNodeStr);
+                  if (section == sections.end())
+                    return false;
+                  const auto translated = section->second.find(orig);
+                  return translated != section->second.end() &&
+                         translated->second == key;
+                });
         ImGui::BeginGroup();
         if (current) {
           ImGui::PushStyleColor(ImGuiCol_Text, ImGuiTheme::accent());
@@ -1007,7 +1022,7 @@ void DebugOverlay::drawTranslationWindow() {
 }
 
 void DebugOverlay::drawTranslationEditor() {
-  if (ImGui::Button("Open Live Translation Editor Window (F7)")) {
+  if (ImGui::Button("Open Translation Applet (F7)")) {
     showTranslationWindow = true;
   }
 }
@@ -1071,13 +1086,18 @@ void DebugOverlay::renderMenu(RendererRef renderer) {
                                     std::min(650 * scale, io.DisplaySize.y)),
                              ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Kotonoha Debug [F10]", &visible)) {
+      if (ImGuiTheme::primaryButton("Dubbing"))
+        showDubbingWindow = true;
+      ImGui::SameLine();
+      ImGui::TextDisabled("Record and replace voice lines");
       drawInspector();
       drawEngineTools();
     }
     ImGui::End();
   }
   drawTranslationWindow();
-  if (!visible && !showTranslationWindow)
+  drawDubbingWindow();
+  if (!isVisible())
     stopPreviewAudio();
   ImGui::Render();
   // SDLRenderer3 expects vertex scaling through SDL, not just FramebufferScale.
@@ -1088,6 +1108,22 @@ void DebugOverlay::renderMenu(RendererRef renderer) {
                           io.DisplayFramebufferScale.y))
     throw std::runtime_error(SDL_GetError());
   ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), &renderer);
+}
+
+void DebugOverlay::drawDubbingWindow() {
+  if (!showDubbingWindow)
+    return;
+  auto &io = ImGui::GetIO();
+  ImGui::SetNextWindowSize(
+      ImVec2(std::min(760 * contentScale, io.DisplaySize.x),
+             std::min(700 * contentScale, io.DisplaySize.y)),
+      ImGuiCond_FirstUseEver);
+  const bool wasOpen = showDubbingWindow;
+  if (ImGui::Begin("Dubbing Applet", &showDubbingWindow))
+    dubbingApplet->draw();
+  ImGui::End();
+  if (wasOpen && !showDubbingWindow)
+    dubbingApplet->suspend();
 }
 
 void DebugOverlay::drawEngineTools() {

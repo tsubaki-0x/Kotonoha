@@ -1008,8 +1008,8 @@ void splashUpscaling(Engine &engine) {
   auto restored = capture(splash);
   require(equal(*filtered, *restored),
           "Enabling boot upscaling again restores the filtered logo");
-  require(!equal(*native, *filtered),
-          "Enabled boot logo must use the scaled source, not native drawing");
+  require(equal(*native, *filtered),
+          "Boot logo must retain native UI sampling when gameplay upscaling is enabled");
   settings.factor = 1;
   pipeline.configure(settings);
   splash.restart();

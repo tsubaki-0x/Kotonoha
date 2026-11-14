@@ -1,10 +1,10 @@
 #include "DdlcRuntime.hpp"
 #include "DdlcSession.hpp"
 
-#include <Kotonoha/componentes/ChoiceQuestionScene.hpp>
-#include <Kotonoha/componentes/GameMenu.hpp>
-#include <Kotonoha/componentes/InGameMenu.hpp>
-#include <Kotonoha/componentes/VNTextBox.hpp>
+#include <Kotonoha/components/ChoiceQuestionScene.hpp>
+#include <Kotonoha/components/GameMenu.hpp>
+#include <Kotonoha/components/InGameMenu.hpp>
+#include <Kotonoha/components/VNTextBox.hpp>
 #include <Kotonoha/core/Engine.hpp>
 #include <Kotonoha/events/ControllerEvent.hpp>
 
@@ -58,8 +58,10 @@ public:
   }
   void update() override {
     session_.showingDialogue() ? show() : hide();
-    speakerName = session_.dialogueSpeaker();
-    fullDialogue = session_.dialogueText();
+    const auto speaker = session_.dialogueSpeaker();
+    const auto text = session_.dialogueText();
+    speakerName = speaker;
+    fullDialogue = text;
     visibleDialogue = session_.visibleDialogueText();
     isComplete = session_.dialogueComplete();
   }
@@ -69,6 +71,7 @@ public:
   }
 
 protected:
+  void openBacklog() override { session_.openHistory(); }
   void renderFrame(Kotonoha::RendererRef renderer) override {
     session_.drawDialogue(renderer);
   }
@@ -129,7 +132,8 @@ private:
 
 } // namespace
 
-GameRuntime::GameRuntime(std::shared_ptr<GameAssets> assets)
+GameRuntime::GameRuntime(
+    std::shared_ptr<Kotonoha::Providers::DdlcAssets> assets)
     : Runtime("Doki Doki Literature Club!", "0.1.0",
               "me.hirameki.kotonoha.dokidokiliteratureclub"),
       assets_(std::move(assets)) {
@@ -195,7 +199,12 @@ bool GameRuntime::handleBackAction() {
   return session_ && session_->backAction();
 }
 bool GameRuntime::handleBacklogAction() {
-  return session_ && session_->openHistory();
+  // DDLC owns its History screen. Always consume the engine backlog action so
+  // HandleNavigation never falls through to a generic VNBacklog scene when
+  // the native screen is temporarily unavailable (pause, menu or choice).
+  if (session_)
+    session_->openHistory();
+  return true;
 }
 int GameRuntime::translationRoute() const {
   return session_ ? session_->translationRoute() : -1;
@@ -245,6 +254,9 @@ Kotonoha::Translation::SourceTexts GameRuntime::translationSources() const {
 }
 std::string GameRuntime::debugNode() const {
   return session_ ? session_->debugNode() : std::string();
+}
+std::string GameRuntime::nodeClockKey() const {
+  return session_ ? session_->nodeClockKey() : std::string();
 }
 
 std::vector<Kotonoha::DebugNode> GameRuntime::debugNodes() const {

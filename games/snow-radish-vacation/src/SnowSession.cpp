@@ -1,8 +1,8 @@
 #include "SnowSession.hpp"
 #include <Kotonoha/core/UI.hpp>
 
-#include <Kotonoha/componentes/VNSave.hpp>
-#include <Kotonoha/componentes/VNTextBox.hpp>
+#include <Kotonoha/components/VNSave.hpp>
+#include <Kotonoha/components/VNTextBox.hpp>
 #include <Kotonoha/core/Engine.hpp>
 #include <Kotonoha/core/FileSystem.hpp>
 #include <Kotonoha/media/upscaling/Upscaler.hpp>
@@ -68,7 +68,7 @@ size_t NextChar(const std::string &s, size_t i) {
 }
 
 std::string Graphic(const std::string &file) {
-  return "graphic/" + SnowAssets::Lower(file);
+  return "graphic/" + Kotonoha::Providers::SnowAssets::Lower(file);
 }
 
 } // namespace
@@ -79,8 +79,9 @@ bool SnowSession::AlphaHit::hit(float px, float py) const {
          alpha[size_t(iy) * size_t(w) + size_t(ix)] != 0;
 }
 
-SnowSession::SnowSession(Kotonoha::Engine &engine,
-                         std::shared_ptr<SnowAssets> assets)
+SnowSession::SnowSession(
+    Kotonoha::Engine &engine,
+    std::shared_ptr<Kotonoha::Providers::SnowAssets> assets)
     : engine_(engine), assets_(std::move(assets)),
       movie_(std::make_unique<Kotonoha::MediaPlayer>(engine_.GetAudio())) {
   script_ = assets_->Script();
@@ -300,9 +301,19 @@ bool SnowSession::Start() {
   };
   game_->cleared = [this](bool flag) { PersistCleared(flag); };
   game_->transitionPlaying = [this] { return Fading(); };
-  if (!game_->init()) {
+  try {
+    if (!game_->init()) {
+      game_.reset();
+      return false;
+    }
+  } catch (...) {
+    // Pure Mail uses a different script bytecode than Snow Radish: cannot
+    // interpret it. Start without a script so the title menu can still be
+    // shown (the user can reach the menu, but New Game will not run a script).
     game_.reset();
-    return false;
+    playing_ = false;
+    SyncScene();
+    return true;
   }
   game_->setClearFlag(cleared_);
   game_->pump();
@@ -386,9 +397,14 @@ void SnowSession::Frame() {
   if (!playing_ || !game_)
     return;
   Game &g = *game_;
-  if (!g.waitingForClick() && !g.choosing() && !g.finished())
-    g.pump();
-  SyncScene();
+  try {
+    if (!g.waitingForClick() && !g.choosing() && !g.finished())
+      g.pump();
+    SyncScene();
+  } catch (...) {
+    // Pure Mail uses a different script bytecode than Snow Radish: tolerate
+    // frame errors instead of aborting.
+  }
 }
 
 bool SnowSession::Skip() {
@@ -518,6 +534,10 @@ SDL_Texture *SnowSession::Texture(SDL_Renderer *r, const std::string &id,
     missing_.insert(id);
     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[gfx] %s", e.what());
     return nullptr;
+  } catch (...) {
+    missing_.insert(id);
+    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[gfx] %s", id.c_str());
+    return nullptr;
   }
 }
 
@@ -558,7 +578,7 @@ void SnowSession::DrawPicture(SDL_Renderer *r, const std::string &file, float x,
 void SnowSession::DrawSprite(SDL_Renderer *r, const std::string &name, float dx,
                              float dy, const int *tint) {
   std::string file = name;
-  SnowAssets::Placement at = assets_->Sprite(file);
+  Kotonoha::Providers::SnowAssets::Placement at = assets_->Sprite(file);
   if (!at.valid) {
     if (missing_.insert("sprite:" + name).second)
       SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[gfx] missing sprite %s",
@@ -1337,6 +1357,12 @@ void SnowSession::Spawn(Flake &f) {
 // One 48 ms logo frame: fade in after 9 s (then the logo voice), out from 15 s,
 // end at 20 s.
 void SnowSession::LogoFrame() {
+  // Pure Mail and other titles may not have logo00.evd: skip the logo fade
+  // entirely when the asset is missing so the game reaches the title/menu.
+  if (!assets_->HasGraphic("logo00.evd")) {
+    EndLogo();
+    return;
+  }
   if (sec_ > 9 && logoState_ == 0)
     fade_ = std::min(fade_ + 1, kFadeFrames);
   if (sec_ >= 15 && logoState_ == 1)

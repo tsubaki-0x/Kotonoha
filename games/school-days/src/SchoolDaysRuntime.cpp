@@ -6630,6 +6630,38 @@ std::string Runtime::debugNode() const {
   return temporaryPlaybackActive() ? scene.sceneKey : bridge.CurrentScene().sceneKey;
 }
 
+std::vector<Kotonoha::DebugAudioAsset> Runtime::debugSceneAudio() {
+  std::vector<Kotonoha::DebugAudioAsset> result;
+  for (auto *voice = script.data; voice; voice = voice->next) {
+    if (voice->command != PLAY_VOICE || !voice->data.play_voice ||
+        !voice->data.play_voice->path)
+      continue;
+    Kotonoha::DebugAudioAsset audio{
+        std::string(Text(voice->data.play_voice->path)) + ".OGG",
+        Text(voice->data.play_voice->character_short), {}};
+    for (auto *line = script.data; line; line = line->next) {
+      if (line->command != PRINT_TEXT || !line->data.print_text ||
+          line->startTick >= voice->endTick ||
+          line->endTick <= voice->startTick)
+        continue;
+      audio.character = Text(line->data.print_text->character);
+      audio.text = Text(line->data.print_text->text);
+      break;
+    }
+    const auto duplicate = std::find_if(result.begin(), result.end(),
+        [&](const auto &item) { return item.id == audio.id; });
+    if (duplicate == result.end())
+      result.push_back(std::move(audio));
+    else if (duplicate->character.empty() && !audio.character.empty())
+      *duplicate = std::move(audio);
+  }
+  return result;
+}
+
+void Runtime::debugOverlayAssetChanged(const std::string &) {
+  resetPreparedMedia();
+}
+
 #if !defined(KOTONOHA_DISTRIBUTION_BUILD)
 std::vector<Kotonoha::DebugNode> Runtime::debugNodes() const {
   const auto *document = bridge.Session().Adapter()->document;
