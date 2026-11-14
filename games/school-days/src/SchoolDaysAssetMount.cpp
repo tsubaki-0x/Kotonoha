@@ -88,9 +88,14 @@ std::string UnmarkTranslatedLogical(std::string_view logical) {
 
 bool IsHqScriptOrs(std::string_view logical) {
   const auto path = UnmarkTranslatedLogical(logical);
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+  return AsciiStartsWith(path, "Script/English/") &&
+         AsciiEndsWith(path, ".ORS");
+#else
   return AsciiStartsWith(path, "Script/English/") &&
          AsciiEndsWith(path, ".ORS") &&
          !SchoolDaysLxhContent::IsPackResource(path);
+#endif
 }
 
 bool IsMarkedTranslatedScript(std::string_view logical) {
@@ -106,9 +111,14 @@ bool SameSelection(const std::optional<SchoolDaysTranslatedGpkSelection> &a,
 }
 
 bool IsLxhScriptOrs(std::string_view logical) {
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+  (void)logical;
+  return false;
+#else
   const auto path = UnmarkTranslatedLogical(logical);
   return SchoolDaysLxhContent::IsPackResource(path) &&
          AsciiEndsWith(path, ".ORS");
+#endif
 }
 
 std::string ScriptRelative(std::string_view logical) {
@@ -421,6 +431,7 @@ MountedResolverLookup(const std::string &logicalPath, std::string *reference) {
     reference->clear();
   // These authored paths belong exclusively to Packs/LxH.GPK; never a
   // leftover loose overlay or an original commercial archive.
+#if !defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
   if (SchoolDaysLxhContent::IsPackResource(logicalPath)) {
     const auto status = LookupMountedSchoolDaysAsset(logicalPath);
     if (status == SchoolDaysGpkLookupStatus::Present && reference != nullptr)
@@ -431,6 +442,7 @@ MountedResolverLookup(const std::string &logicalPath, std::string *reference) {
                      ? SchoolDaysAssetResolutionStatus::Collision
                      : SchoolDaysAssetResolutionStatus::Invalid;
   }
+#endif
   // The locale's HQ scripts take priority even over leftover loose text
   // overlays. No readable fallback is silently substituted for a missing ORS.
   if (IsHqScriptOrs(logicalPath) && CurrentTranslated().script) {
@@ -488,12 +500,21 @@ bool MountedResolverListDirectory(const std::string &directoryReference,
     return Fail(error, "School Days GPK directory reference is invalid");
   const auto mount = CurrentMount();
   const auto integrated = CurrentIntegratedLxh();
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+  if (mount == nullptr)
+    return Fail(error, "School Days retail GPK set is not mounted");
+#else
   if (mount == nullptr || integrated == nullptr)
     return Fail(error, "School Days integrated GPK set is not mounted");
+#endif
   std::vector<std::string> logicalChildren;
   const auto status = mount->ListDirectory(logical, &logicalChildren);
   std::vector<std::string> integratedChildren;
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+  const auto integratedStatus = SchoolDaysGpkLookupStatus::Missing;
+#else
   const auto integratedStatus = integrated->ListDirectory(logical, &integratedChildren);
+#endif
   if (status == SchoolDaysGpkLookupStatus::Collision ||
       status == SchoolDaysGpkLookupStatus::Invalid ||
       integratedStatus == SchoolDaysGpkLookupStatus::Collision ||
@@ -585,10 +606,17 @@ bool ConfigureSchoolDaysTranslatedGpks(
     return RejectTranslatedConfiguration(
         error, "English HQ scripts must come exclusively from Packs/Script.GPK; "
                "do not select a translated English Script.GPK");
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+  if (!selection.lxhGpk.empty())
+    return RejectTranslatedConfiguration(error, "Retail-only build does not accept LxH translations");
+  if (!english && selection.scriptGpk.empty())
+    return RejectTranslatedConfiguration(error, "Non-English GPK locale requires its complete Script.GPK");
+#else
   if (!english && (selection.scriptGpk.empty() || selection.lxhGpk.empty()))
     return RejectTranslatedConfiguration(
         error, "Non-English GPK locale requires both translated "
                "Script.GPK and LxH GPK; no retail text fallback");
+#endif
   if (selection.locale == "pt-BR" &&
       (selection.scriptGpk.filename().u8string() != "Script - Brazilian.GPK" ||
        selection.lxhGpk.filename().u8string() != "pt-BR-lxh.GPK"))
@@ -658,6 +686,9 @@ bool MountSchoolDaysRetailGpks(const std::filesystem::path &gameOrPacksRoot,
   auto candidate = std::make_shared<SchoolDaysGpkAssetStore>();
   if (!candidate->OpenRetailDirectory(packs, error))
     return false;
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+  std::shared_ptr<SchoolDaysGpkArchive> integrated;
+#else
   auto integrated = std::make_shared<SchoolDaysGpkArchive>();
   std::string integratedError;
   if (!integrated->Open(packs / "LxH.GPK", &integratedError))
@@ -676,6 +707,7 @@ bool MountSchoolDaysRetailGpks(const std::filesystem::path &gameOrPacksRoot,
         entry.storedLength == 0u)
       return Fail(error, "Integrated LxH.GPK must use non-empty seekable raw entry: " + logical);
   }
+#endif
   std::shared_ptr<SchoolDaysGpkArchive> translatedScript;
   std::shared_ptr<SchoolDaysGpkArchive> translatedLxh;
   if (requested) {
@@ -818,16 +850,24 @@ void UninstallMountedSchoolDaysAssetResolver() {
 
 bool SchoolDaysRetailGpksMounted() {
   const auto mount = CurrentMount();
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+  return mount != nullptr && mount->IsOpen();
+#else
   const auto integrated = CurrentIntegratedLxh();
   return mount != nullptr && mount->IsOpen() && integrated != nullptr &&
          integrated->IsOpen();
+#endif
 }
 
 size_t MountedSchoolDaysGpkEntryCount() {
   const auto mount = CurrentMount();
   const auto integrated = CurrentIntegratedLxh();
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+  return mount != nullptr ? mount->EntryCount() : 0u;
+#else
   return mount != nullptr && integrated != nullptr
              ? mount->EntryCount() + integrated->EntryCount() : 0u;
+#endif
 }
 
 SchoolDaysGpkLookupStatus
@@ -838,11 +878,13 @@ LookupMountedSchoolDaysAsset(std::string_view logicalPath, bool ignoreOverlay) {
     return SchoolDaysGpkLookupStatus::Missing;
   if (IsLxhScriptOrs(logical) && translation.lxh)
     return translation.lxh->Lookup(CanonicalGpkLogical(logical));
+#if !defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
   if (SchoolDaysLxhContent::IsPackResource(logical)) {
     const auto integrated = CurrentIntegratedLxh();
     return integrated ? integrated->Lookup(CanonicalGpkLogical(logical))
                       : SchoolDaysGpkLookupStatus::Missing;
   }
+#endif
   if (IsHqScriptOrs(logical) && translation.script)
     return translation.script->Lookup(ScriptRelative(logical));
   if (IsMarkedTranslatedScript(logicalPath))
@@ -863,11 +905,13 @@ bool ReadMountedSchoolDaysAsset(std::string_view logicalPath,
     return Fail(error, "Translated Script.GPK is unavailable; no retail fallback");
   if (IsLxhScriptOrs(logical) && translation.lxh)
     return translation.lxh->Read(CanonicalGpkLogical(logical), out, error);
+#if !defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
   if (SchoolDaysLxhContent::IsPackResource(logical)) {
     const auto integrated = CurrentIntegratedLxh();
     return integrated ? integrated->Read(CanonicalGpkLogical(logical), out, error)
                       : Fail(error, "Mandatory integrated LxH.GPK not mounted");
   }
+#endif
   if (IsHqScriptOrs(logical) && translation.script)
     return translation.script->Read(ScriptRelative(logical), out, error);
   if (IsMarkedTranslatedScript(logicalPath))
@@ -905,8 +949,10 @@ std::unique_ptr<AssetStream> OpenMountedSchoolDaysAssetStream(
     if (IsMarkedTranslatedScript(logicalPath) && !translation.script) return {};
     if (IsLxhScriptOrs(logical) && translation.lxh)
       return openRaw(translation.lxh, CanonicalGpkLogical(logical));
+#if !defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
     if (SchoolDaysLxhContent::IsPackResource(logical))
       return openRaw(CurrentIntegratedLxh(), CanonicalGpkLogical(logical));
+#endif
     if (IsHqScriptOrs(logical) && translation.script)
       return openRaw(translation.script, ScriptRelative(logical));
     if (IsMarkedTranslatedScript(logicalPath) ||

@@ -25,6 +25,8 @@ option(KOTONOHA_DISTRIBUTION_BUILD
     "Produce a player-facing build without the developer overlay, MCP or QA controls" OFF)
 option(KOTONOHA_ENABLE_PLAYER_DUBBING
     "Include the standalone dubbing window in a distribution build" OFF)
+option(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY
+    "Build School Days HQ against the 29 original GPKs without LxH content or translations" OFF)
 if(KOTONOHA_DISTRIBUTION_BUILD AND KOTONOHA_DEV_CONTROL)
     message(FATAL_ERROR "Distribution builds must disable KOTONOHA_DEV_CONTROL")
 endif()

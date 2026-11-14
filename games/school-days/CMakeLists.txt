@@ -74,6 +74,9 @@ add_library(school_days STATIC
 target_include_directories(school_days PUBLIC include src)
 target_link_libraries(school_days PUBLIC Kotonoha::Engine PRIVATE ZLIB::ZLIB)
 target_compile_features(school_days PUBLIC cxx_std_17)
+if(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+    target_compile_definitions(school_days PUBLIC KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY=1)
+endif()
 set_target_properties(school_days PROPERTIES CXX_EXTENSIONS OFF)
 
 kotonoha_add_app(SchoolDays src/main.cpp)

@@ -265,9 +265,11 @@ SchoolDaysTranslationGate::DetailedSources SchoolDaysTranslationGate::CollectDet
       throw std::runtime_error("Cannot parse translated scene NODE " +
                                std::to_string(index));
     const auto lxhStart = LxhFirstEvent(ors.get(), scene.sceneKey);
+#if !defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
     if (assets.usesPackedResources() && LxhEnding(scene.sceneKey) && !lxhStart)
       throw std::runtime_error("Integrated LxH ORS marker is missing at NODE " +
                                std::to_string(index));
+#endif
     std::size_t ordinal = 0;
     for (const auto *event = ors.get().data; event;
          event = event->next, ++ordinal) {

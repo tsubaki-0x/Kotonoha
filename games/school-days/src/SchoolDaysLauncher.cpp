@@ -271,6 +271,12 @@ int nearestRetailVolume(const Kotonoha::SchoolDaysRetailConfigPolicy::State &sta
 bool checkIntegratedLxhContent(const Assets &assets, bool *present,
                                std::string &error) {
   if (present == nullptr) return false;
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+  (void)assets;
+  error.clear();
+  *present = false;
+  return true;
+#else
   std::size_t found = 0;
   std::size_t expected = 0;
   for (const auto &logical : Kotonoha::SchoolDaysLxhContent::PackEntries()) {
@@ -291,6 +297,7 @@ bool checkIntegratedLxhContent(const Assets &assets, bool *present,
   }
   *present = found == expected;
   return true;
+#endif
 }
 } // namespace
 
@@ -350,11 +357,13 @@ Launcher::Launcher(std::string settingsPath, std::string directory,
       selectedLocaleBaseJsonPath = settings().translationPath;
     } else if (!settings().translationPath.empty())
       selectedLanguage = Language::CustomJson;
+#if !defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
     if (!savedLanguage.lxhJsonPath.empty()) {
       selectedManualLxhJsonPath =
           resolveInstalledJson(getSettingsPath(), savedLanguage.lxhJsonPath);
       manualLxhBaseJsonPath = settings().translationPath;
     }
+#endif
     // Explicit opt-in GPK profiles are separate from legacy JSON selections.
     // The existing chinese/zh-CN.json preference is kept untouched until the
     // player explicitly selects the GPK version in this launcher.
@@ -968,8 +977,12 @@ void Launcher::setCustomJsonPath(std::string path) {
 }
 
 void Launcher::setLxhJsonPath(std::string path) {
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+  (void)path;
+#else
   selectedManualLxhJsonPath = std::move(path);
   manualLxhBaseJsonPath = settings().translationPath;
+#endif
 }
 
 std::string Launcher::manualLxhJsonPath() const {
@@ -978,6 +991,9 @@ std::string Launcher::manualLxhJsonPath() const {
 }
 
 std::string Launcher::lxhJsonPath() const {
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+  return {};
+#else
   if (auto manual = manualLxhJsonPath(); !manual.empty()) return manual;
   try {
     const auto &base = translationPath();
@@ -987,6 +1003,7 @@ std::string Launcher::lxhJsonPath() const {
     // Invalid base paths are explained by validate(), not an ImGui render.
     return {};
   }
+#endif
 }
 
 const std::string &Launcher::translationPath() const {
@@ -1446,25 +1463,37 @@ void Launcher::drawLanguageOptions() {
     std::error_code spanishError;
     const bool spanishPackReady = !getSettingsPath().empty() &&
         fs::is_regular_file(Kotonoha::SchoolDaysGpkLanguageProfile::ScriptPath(
-            getSettingsPath(), "es"), spanishError) &&
+            getSettingsPath(), "es"), spanishError)
+#if !defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+        &&
         fs::is_regular_file(Kotonoha::SchoolDaysGpkLanguageProfile::LxhPath(
-            getSettingsPath(), "es"), spanishError);
+            getSettingsPath(), "es"), spanishError)
+#endif
+        ;
     ImGui::BeginDisabled(!spanishPackReady);
     if (ImGui::Selectable("Español (Script.GPK)",
                           beforeSelection == Language::SpanishGpk))
       setLanguage(Language::SpanishGpk);
     ImGui::EndDisabled();
     if (!spanishPackReady)
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+      ImGui::TextDisabled("Spanish GPK requires a compatible original HQ script archive.");
+#else
       ImGui::TextDisabled("Spanish GPK requires certified HQ and LxH archives.");
+#endif
     // The downloaded Chinese GPK is an older, incompatible ORS dialect.
     // Present the native choice only when a separately validated compatible
     // archive AND seven translated LxH scenes have actually been installed.
     std::error_code chineseError;
     const bool chinesePackReady = !getSettingsPath().empty() &&
         fs::is_regular_file(Kotonoha::SchoolDaysGpkLanguageProfile::ScriptPath(
-            getSettingsPath(), "zh-CN"), chineseError) &&
+            getSettingsPath(), "zh-CN"), chineseError)
+#if !defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+        &&
         fs::is_regular_file(Kotonoha::SchoolDaysGpkLanguageProfile::LxhPath(
-            getSettingsPath(), "zh-CN"), chineseError);
+            getSettingsPath(), "zh-CN"), chineseError)
+#endif
+        ;
     ImGui::BeginDisabled(!chinesePackReady);
     if (ImGui::Selectable("Chinese - Simplified (Script.GPK)",
                           beforeSelection == Language::ChineseGpk))
@@ -1490,21 +1519,36 @@ void Launcher::drawLanguageOptions() {
     if (!getSettingsPath().empty()) {
       const auto script = Kotonoha::SchoolDaysGpkLanguageProfile::ScriptPath(
           getSettingsPath(), locale);
+#if !defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
       const auto epilogue = Kotonoha::SchoolDaysGpkLanguageProfile::LxhPath(
           getSettingsPath(), locale);
+#endif
       if (locale == "en")
         ImGui::TextDisabled("HQ: original Packs/Script.GPK (never duplicated).");
       else
         ImGui::TextWrapped("Base HQ GPK: %s", script.string().c_str());
+#if !defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
       ImGui::TextWrapped("Seven LxH endings GPK: %s", epilogue.string().c_str());
+#endif
       std::error_code ec;
-      if ((locale != "en" && !fs::is_regular_file(script, ec)) ||
-          !fs::is_regular_file(epilogue, ec))
+      if ((locale != "en" && !fs::is_regular_file(script, ec))
+#if !defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+          || !fs::is_regular_file(epilogue, ec)
+#endif
+         )
         ImGui::TextWrapped(
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+            "Missing original HQ language script in translations/scripts.");
+#else
             "Missing locale scripts in translations/scripts. This is separate "
             "from the original Packs/LxH.GPK containing video/audio/cards.");
+#endif
     }
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+    ImGui::TextDisabled("Retail-only edition: original 29 GPKs; no LxH epilogues or translations.");
+#else
     ImGui::TextDisabled("Original 29 retail GPKs and LxH media stay untouched.");
+#endif
     ImGui::TextDisabled("Language texts are read from scripts, not converted to JSON.");
     return;
   }
@@ -1559,6 +1603,7 @@ void Launcher::drawLanguageOptions() {
 #endif
   }
 
+ #if !defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
   ImGui::Spacing();
   ImGui::SeparatorText("LxH epilogue translation (7 endings)");
   const auto manual = manualLxhJsonPath();
@@ -1598,6 +1643,7 @@ void Launcher::drawLanguageOptions() {
   ImGui::TextWrapped(
       "The LxH videos remain in Packs/LxH.GPK. Only subtitle JSON changes; "
       "the base and LxH JSON are validated together before Play.");
+#endif
 }
 
 bool Launcher::loadLauncherArtwork() {
@@ -1891,7 +1937,11 @@ void Launcher::drawOptionsScreen() {
             "IMPORTANT: Do NOT select this new distribution folder or add "
             "\\Packs to its path. That folder contains no retail packs. "
             "Click Folder... and select the ORIGINAL School Days HQ game "
-            "installation containing 29 GPKs and LxH.GPK. "
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+            "installation containing the 29 original GPKs. "
+#else
+          "installation containing 29 GPKs and LxH.GPK. "
+#endif
             "No save files are required.");
       drawPrimaryGamePath();
       ImGui::EndTabItem();
@@ -2061,7 +2111,7 @@ bool Launcher::validate(std::string &error) {
         Kotonoha::SchoolDaysGpkLanguageProfile::ScriptPath(getSettingsPath(), locale);
     const auto lxhPath =
         Kotonoha::SchoolDaysGpkLanguageProfile::LxhPath(getSettingsPath(), locale);
-    Kotonoha::SchoolDaysGpkArchive base, epilogue;
+    Kotonoha::SchoolDaysGpkArchive base;
     std::string reason;
     if (locale != "en") {
       if (!base.Open(scriptPath, &reason)) {
@@ -2076,6 +2126,8 @@ bool Launcher::validate(std::string &error) {
         return false;
       }
     }
+#if !defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+    Kotonoha::SchoolDaysGpkArchive epilogue;
     if (!epilogue.Open(lxhPath, &reason)) {
       error = "Missing or invalid " + locale + " LxH *language* script GPK at " +
               lxhPath.string() + ": " + reason +
@@ -2112,6 +2164,7 @@ bool Launcher::validate(std::string &error) {
       error = std::string("Cannot validate unchanged retail data: ") + e.what();
       return false;
     }
+#endif
     return true;
   }
   if (language() != Language::English &&
@@ -2261,10 +2314,12 @@ void Launcher::save() {
     std::string payload = std::string(value) + "\n";
     if (language() != Language::English && !isGpkLanguage(language()))
       payload += settings().translationPath + "\n";
+#if !defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
     if (!isGpkLanguage(language()) && !manualLxhJsonPath().empty()) {
       if (language() == Language::English) payload += "\n";
       payload += "lxh-json=" + manualLxhJsonPath() + "\n";
     }
+#endif
     Kotonoha::writeTextFileAtomically(languagePreferenceFile.string(),
                                       payload);
   }

@@ -330,7 +330,9 @@ std::vector<std::string> Assets::listAsset(const std::string &prefix) const {
     } else if (normalized.empty()) {
       for (const auto &spec : Kotonoha::SchoolDaysRetailGpkSpecs())
         appendVirtualTree(Kotonoha::MakeSchoolDaysGpkUri(spec.logicalPrefix), normalized);
+#if !defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
       appendVirtualTree(Kotonoha::MakeSchoolDaysGpkUri("LxH"), normalized);
+#endif
     }
   }
 
@@ -422,12 +424,16 @@ bool Assets::checkDirectory(const std::filesystem::path &root, std::string &info
                  spec.filename;
           return false;
         }
+#if !defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
       if (!Kotonoha::ResolveSchoolDaysAssetPath(candidate.string().c_str(),
                                                "LxH.GPK").present) {
         info = "Incomplete integrated School Days pack set: missing LxH.GPK";
         return false;
       }
       info = "School Days HQ 29 retail GPK + mandatory LxH.GPK found";
+#else
+      info = "School Days HQ 29 original retail GPKs found (no LxH)";
+#endif
       return true;
     }
   }

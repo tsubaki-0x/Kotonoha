@@ -121,9 +121,13 @@ struct Application {
     // ORS without the seven grafts; this is not a user-selectable DLC mode.
     const auto sources =
         Kotonoha::SchoolDaysTranslationGate::CollectDetailed(*assets, route);
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+    const bool integratedContent = false;
+#else
     const bool integratedContent = assets->usesPackedResources() ||
         std::any_of(sources.begin(), sources.end(),
                     [](const auto &slot) { return slot.lxh; });
+#endif
     if (integratedContent) {
       dlcFile = lxhJsonOverride.empty()
           ? Kotonoha::SchoolDaysTranslationGate::DlcJsonPath(locale, translationFile)
@@ -233,10 +237,12 @@ struct App {
             "Non-English language is selected but its HQ JSON is missing; "
             "refusing English fallback. Select a valid base translation.");
     }
+#if !defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
     if (gpkLocale.empty() && lxhJsonOverride.empty() && options.persistSettings &&
         !options.settingsPath.empty())
       lxhJsonOverride = SchoolDays::Launcher::rememberedLxhJsonPath(
           options.settingsPath, options.translationPath);
+#endif
     if (!gpkLocale.empty()) {
       if (!options.translationPath.empty())
         throw std::runtime_error(
@@ -244,8 +250,12 @@ struct App {
             "Re-select the language in the launcher.");
       const auto script = Kotonoha::SchoolDaysGpkLanguageProfile::ScriptPath(
           options.settingsPath, gpkLocale);
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+      const std::filesystem::path lxh;
+#else
       const auto lxh = Kotonoha::SchoolDaysGpkLanguageProfile::LxhPath(
           options.settingsPath, gpkLocale);
+#endif
       const Kotonoha::SchoolDaysTranslatedGpkSelection selection{
           gpkLocale, script, lxh};
       std::string error;
@@ -263,8 +273,13 @@ struct App {
     auto assets = std::make_shared<SchoolDays::Assets>(
         Kotonoha::gameDataDirectory(directory),
         scripts.empty() ? options.assetOverlayDirectory() : scripts);
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "School Days HQ retail-only: 29 original GPKs, dubbing supported");
+#else
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "School Days LxH integrated: mandatory Packs/LxH.GPK (7 original endings)");
+#endif
     DevStartupLog("assets-ready");
     application = std::make_unique<Application>(std::move(assets), route, options,
                                                 documents, lxhJsonOverride,
