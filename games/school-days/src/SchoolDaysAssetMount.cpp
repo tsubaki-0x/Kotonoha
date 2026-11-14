@@ -618,15 +618,31 @@ bool ConfigureSchoolDaysTranslatedGpks(
                "Script.GPK and LxH GPK; no retail text fallback");
 #endif
   if (selection.locale == "pt-BR" &&
-      (selection.scriptGpk.filename().u8string() != "Script - Brazilian.GPK" ||
-       selection.lxhGpk.filename().u8string() != "pt-BR-lxh.GPK"))
+      (selection.scriptGpk.filename().u8string() != "Script - Brazilian.GPK"
+#if !defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+       || selection.lxhGpk.filename().u8string() != "pt-BR-lxh.GPK"
+#endif
+       ))
     return RejectTranslatedConfiguration(
-        error, "pt-BR requires Script - Brazilian.GPK and pt-BR-lxh.GPK");
+        error,
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+        "pt-BR requires Script - Brazilian.GPK");
+#else
+        "pt-BR requires Script - Brazilian.GPK and pt-BR-lxh.GPK");
+#endif
   if (selection.locale == "es" &&
-      (selection.scriptGpk.filename().u8string() != "Script - Spanish.GPK" ||
-       selection.lxhGpk.filename().u8string() != "es-lxh.GPK"))
+      (selection.scriptGpk.filename().u8string() != "Script - Spanish.GPK"
+#if !defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+       || selection.lxhGpk.filename().u8string() != "es-lxh.GPK"
+#endif
+       ))
     return RejectTranslatedConfiguration(
-        error, "es requires certified Script - Spanish.GPK and es-lxh.GPK");
+        error,
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+        "es requires certified Script - Spanish.GPK");
+#else
+        "es requires certified Script - Spanish.GPK and es-lxh.GPK");
+#endif
   const auto validatePath = [&](const std::filesystem::path &path,
                                 const char *kind) {
     if (path.empty()) return true;

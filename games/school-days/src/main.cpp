@@ -604,6 +604,14 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
   } catch (const std::exception &error) {
     DevStartupLog("frame-error", error.what());
     SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "SchoolDays frame: %s", error.what());
+#if defined(_WIN32) && !defined(__ANDROID__)
+    // Starting the game from the launcher happens in SDL_AppIterate, not
+    // SDL_AppInit. A GUI-subsystem distribution has no visible stderr, so a
+    // failed language/GPK mount otherwise looks like Play simply closed it.
+    (void)SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
+                                   "School Days HQ could not start",
+                                   error.what(), nullptr);
+#endif
     return SDL_APP_FAILURE;
   }
 }

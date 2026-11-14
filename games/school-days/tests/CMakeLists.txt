@@ -34,6 +34,13 @@ add_test(NAME SchoolDays.TranslationLayout COMMAND SchoolDaysTranslationLayoutTe
 add_executable(SchoolDaysTranslatedGpkMountTest SchoolDaysTranslatedGpkMountTest.cpp)
 target_link_libraries(SchoolDaysTranslatedGpkMountTest PRIVATE school_days ZLIB::ZLIB)
 add_test(NAME SchoolDays.TranslatedGpkMount COMMAND SchoolDaysTranslatedGpkMountTest)
+if(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+    add_executable(SchoolDaysRetailOnlyGpkProfileTest
+        SchoolDaysRetailOnlyGpkProfileTest.cpp)
+    target_link_libraries(SchoolDaysRetailOnlyGpkProfileTest PRIVATE school_days)
+    add_test(NAME SchoolDays.RetailOnlyGpkProfile
+        COMMAND SchoolDaysRetailOnlyGpkProfileTest)
+endif()
 add_executable(SchoolDaysLxhRetailSaveProbe SchoolDaysLxhRetailSaveProbe.cpp)
 target_link_libraries(SchoolDaysLxhRetailSaveProbe PRIVATE school_days)
 # Not registered in CTest: opt-in only for private retail packs and saves.
