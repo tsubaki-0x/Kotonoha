@@ -52,6 +52,11 @@ int main() {
               "Script - Spanish.GPK", "Spanish GPK path mismatch");
     Check(Profile::ScriptPath(settings, "zh-CN").filename() ==
               "Script - chinese-compatible.GPK", "Incompatible raw Chinese GPK selected");
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+    Check(Profile::Supported("ru") &&
+          Profile::ScriptPath(settings, "ru").filename() == "Script - Russian.GPK",
+          "Retail-only Russian GPK path mismatch");
+#endif
     Check(Profile::LxhPath(settings, "en").filename() == "en-lxh.GPK" &&
               Profile::LxhPath(settings, "pt-BR").filename() == "pt-BR-lxh.GPK" &&
               Profile::LxhPath(settings, "es").filename() == "es-lxh.GPK",
@@ -62,6 +67,12 @@ int main() {
     Check(Profile::Read(settings) == "en", "Original English profile did not parse");
     scratch.Write("SchoolDaysTranslationPack.v1\nes\n");
     Check(Profile::Read(settings) == "es", "Spanish native profile did not parse");
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+    scratch.Write("SchoolDaysTranslationPack.v1\nzh-CN\n");
+    Check(Profile::Read(settings) == "zh-CN", "Chinese native profile did not parse");
+    scratch.Write("SchoolDaysTranslationPack.v1\nru\n");
+    Check(Profile::Read(settings) == "ru", "Russian native profile did not parse");
+#endif
     scratch.Write("SchoolDaysTranslationPack.v1\nunknown\n");
     ExpectReject(settings);
     scratch.Write("SchoolDaysTranslationPack.v1\nzh-CN\nforeign-path\n");

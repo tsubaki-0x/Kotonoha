@@ -1,4 +1,5 @@
 #include <Kotonoha/SchoolDaysAssetMount.hpp>
+#include <Kotonoha/routing/SchoolDaysDisplayNarrativeMarkup.hpp>
 
 #include <filesystem>
 #include <fstream>
@@ -32,6 +33,8 @@ int main() {
     fs::create_directories(root);
     const auto brazilian = root / "Script - Brazilian.GPK";
     const auto spanish = root / "Script - Spanish.GPK";
+    const auto chinese = root / "Script - chinese-compatible.GPK";
+    const auto russian = root / "Script - Russian.GPK";
     {
       std::ofstream file(brazilian, std::ios::binary | std::ios::trunc);
       file << 'x';
@@ -40,11 +43,27 @@ int main() {
       std::ofstream file(spanish, std::ios::binary | std::ios::trunc);
       file << 'x';
     }
+    {
+      std::ofstream file(chinese, std::ios::binary | std::ios::trunc);
+      file << 'x';
+    }
+    {
+      std::ofstream file(russian, std::ios::binary | std::ios::trunc);
+      file << 'x';
+    }
     // The selection gate checks identity and file existence; actual GPK
     // structure is verified later during mount against Script.GPK retail.
     assertProfile("en", {});
     assertProfile("pt-BR", brazilian);
     assertProfile("es", spanish);
+    assertProfile("zh-CN", chinese);
+    assertProfile("ru", russian);
+
+    using Markup = Kotonoha::SchoolDaysDisplayNarrativeMarkup;
+    require(Markup::Project(u8"Выбор?^") == u8"Выбор?",
+            "Russian choice display marker was not removed");
+    require(Markup::Project(u8"你好^") == u8"你好",
+            "Chinese choice display marker was not removed");
 
     std::string error;
     require(!Kotonoha::ConfigureSchoolDaysTranslatedGpks(
@@ -53,10 +72,18 @@ int main() {
     require(!Kotonoha::ConfigureSchoolDaysTranslatedGpks(
                 {"es", brazilian, {}}, &error),
             "Spanish mode incorrectly accepts the Brazilian GPK name");
+    require(!Kotonoha::ConfigureSchoolDaysTranslatedGpks(
+                {"zh-CN", russian, {}}, &error),
+            "Chinese mode incorrectly accepts a Russian archive");
+    require(!Kotonoha::ConfigureSchoolDaysTranslatedGpks(
+                {"ru", chinese, {}}, &error),
+            "Russian mode incorrectly accepts a Chinese archive");
     fs::remove(brazilian);
     fs::remove(spanish);
+    fs::remove(chinese);
+    fs::remove(russian);
     fs::remove(root);
-    std::cout << "Retail-only EN/PT-BR/ES selection requires no LxH.\n";
+    std::cout << "Retail-only EN/PT-BR/ES/ZH-CN/RU selection requires no LxH.\n";
     return 0;
   } catch (const std::exception &error) {
     std::cerr << "Retail-only GPK profile test: " << error.what() << '\n';

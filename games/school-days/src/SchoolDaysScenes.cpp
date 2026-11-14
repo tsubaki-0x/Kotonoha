@@ -325,8 +325,15 @@ bool GameScene::ensureChoiceScratch(Kotonoha::RendererRef renderer,
                 runtime.script, runtime.choice);
   for (const int index : visible) {
     const char *original = runtime.choice->data.set_select->options[index];
-    localizedTexts.push_back(runtime.translateText(
-        ordinal, static_cast<std::size_t>(index), original ? original : ""));
+    auto translated = runtime.translateText(
+        ordinal, static_cast<std::size_t>(index), original ? original : "");
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+    // Native Russian and Chinese GPK choices may contain the same display-only
+    // terminal caret as dialogue. Remove it only from the rendered text, not
+    // from the authored ORS or the choice's event timing/identity.
+    translated = Kotonoha::SchoolDaysDisplayNarrativeMarkup::Project(translated);
+#endif
+    localizedTexts.push_back(std::move(translated));
   }
   // Rebuild the atlas when changing the JSON in the live editor or when
   // visible choices change, even if the ORS event pointer stays the same.

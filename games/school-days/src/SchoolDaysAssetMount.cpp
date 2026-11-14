@@ -592,13 +592,19 @@ bool ConfigureSchoolDaysTranslatedGpks(
       selection.locale.find('\0') != std::string::npos)
     return RejectTranslatedConfiguration(
         error, "School Days GPK translation locale is invalid");
+#if !defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
   if (selection.locale == "zh-CN" || selection.locale == "zh-cn" ||
       selection.locale == "zh_CN")
     return RejectTranslatedConfiguration(
         error, "zh-CN raw Script.GPK is incompatible (different scene "
                "names, GB18030 and event structure); certified conversion required");
+#endif
   if (selection.locale != "en" && selection.locale != "pt-BR" &&
-      selection.locale != "es")
+      selection.locale != "es" && selection.locale != "zh-CN"
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+      && selection.locale != "ru"
+#endif
+      )
     return RejectTranslatedConfiguration(
         error, "Unknown or unverified translated GPK locale");
   const bool english = selection.locale == "en";
@@ -642,6 +648,16 @@ bool ConfigureSchoolDaysTranslatedGpks(
         "es requires certified Script - Spanish.GPK");
 #else
         "es requires certified Script - Spanish.GPK and es-lxh.GPK");
+#endif
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+  if (selection.locale == "zh-CN" &&
+      selection.scriptGpk.filename().u8string() !=
+          "Script - chinese-compatible.GPK")
+    return RejectTranslatedConfiguration(
+        error, "zh-CN requires Script - chinese-compatible.GPK; raw Chinese archive is unsupported");
+  if (selection.locale == "ru" &&
+      selection.scriptGpk.filename().u8string() != "Script - Russian.GPK")
+    return RejectTranslatedConfiguration(error, "ru requires Script - Russian.GPK");
 #endif
   const auto validatePath = [&](const std::filesystem::path &path,
                                 const char *kind) {

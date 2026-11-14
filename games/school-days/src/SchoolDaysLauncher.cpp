@@ -132,7 +132,11 @@ bool isGpkLanguage(SchoolDays::Launcher::Language language) {
   return language == Language::EnglishGpk ||
          language == Language::BrazilianGpk ||
          language == Language::SpanishGpk ||
-         language == Language::ChineseGpk;
+         language == Language::ChineseGpk
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+         || language == Language::RussianGpk
+#endif
+         ;
 }
 
 std::string gpkLocale(SchoolDays::Launcher::Language language) {
@@ -142,6 +146,9 @@ std::string gpkLocale(SchoolDays::Launcher::Language language) {
   case Language::BrazilianGpk: return "pt-BR";
   case Language::SpanishGpk: return "es";
   case Language::ChineseGpk: return "zh-CN";
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+  case Language::RussianGpk: return "ru";
+#endif
   default: return {};
   }
 }
@@ -372,6 +379,9 @@ Launcher::Launcher(std::string settingsPath, std::string directory,
       selectedLanguage = nativeLocale == "en" ? Language::EnglishGpk
           : nativeLocale == "pt-BR" ? Language::BrazilianGpk
           : nativeLocale == "es" ? Language::SpanishGpk
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+          : nativeLocale == "ru" ? Language::RussianGpk
+#endif
                                   : Language::ChineseGpk;
       settings().translationPath.clear();
       selectedLocaleBaseJsonPath.clear();
@@ -1446,6 +1456,9 @@ void Launcher::drawLanguageOptions() {
   case Language::BrazilianGpk: current = "Português (Brasil) (Script.GPK)"; break;
   case Language::SpanishGpk: current = "Español (Script.GPK)"; break;
   case Language::ChineseGpk: current = "Chinese - Simplified (Script.GPK)"; break;
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+  case Language::RussianGpk: current = "Russian (Script.GPK - community translation)"; break;
+#endif
   case Language::Spanish: current = "Spanish (legacy JSON)"; break;
   case Language::ChineseSimplified: current = "Chinese (legacy JSON)"; break;
   case Language::CustomJson: current = "Custom JSON (legacy)"; break;
@@ -1481,9 +1494,9 @@ void Launcher::drawLanguageOptions() {
 #else
       ImGui::TextDisabled("Spanish GPK requires certified HQ and LxH archives.");
 #endif
-    // The downloaded Chinese GPK is an older, incompatible ORS dialect.
-    // Present the native choice only when a separately validated compatible
-    // archive AND seven translated LxH scenes have actually been installed.
+    // The original legacy Chinese GPK is incompatible. Use only the
+    // retail-aligned UTF-8 derivative; full structural parity is verified
+    // again by the mount before playback.
     std::error_code chineseError;
     const bool chinesePackReady = !getSettingsPath().empty() &&
         fs::is_regular_file(Kotonoha::SchoolDaysGpkLanguageProfile::ScriptPath(
@@ -1500,7 +1513,20 @@ void Launcher::drawLanguageOptions() {
       setLanguage(Language::ChineseGpk);
     ImGui::EndDisabled();
     if (!chinesePackReady)
-      ImGui::TextDisabled("Chinese GPK needs format conversion; legacy JSON still works.");
+      ImGui::TextDisabled("Chinese GPK requires Script - chinese-compatible.GPK.");
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+    std::error_code russianError;
+    const bool russianPackReady = !getSettingsPath().empty() &&
+        fs::is_regular_file(Kotonoha::SchoolDaysGpkLanguageProfile::ScriptPath(
+            getSettingsPath(), "ru"), russianError);
+    ImGui::BeginDisabled(!russianPackReady);
+    if (ImGui::Selectable("Russian (Script.GPK - community translation)",
+                          beforeSelection == Language::RussianGpk))
+      setLanguage(Language::RussianGpk);
+    ImGui::EndDisabled();
+    if (!russianPackReady)
+      ImGui::TextDisabled("Russian GPK requires Script - Russian.GPK.");
+#endif
     ImGui::SeparatorText("Compatibility / original");
     if (ImGui::Selectable("English (retail original)", beforeSelection == Language::English))
       setLanguage(Language::English);
@@ -2310,6 +2336,9 @@ void Launcher::save() {
                         : language() == Language::BrazilianGpk ? "brazilian-gpk"
                         : language() == Language::SpanishGpk ? "spanish-gpk"
                         : language() == Language::ChineseGpk ? "chinese-gpk"
+#if defined(KOTONOHA_SCHOOL_DAYS_RETAIL_ONLY)
+                        : language() == Language::RussianGpk ? "russian-gpk"
+#endif
                         : "custom";
     std::string payload = std::string(value) + "\n";
     if (language() != Language::English && !isGpkLanguage(language()))
