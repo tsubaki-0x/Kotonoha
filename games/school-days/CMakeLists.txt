@@ -84,6 +84,14 @@ target_link_libraries(SchoolDays PRIVATE school_days)
 kotonoha_configure_app(SchoolDays
     BUNDLE_ID me.hirameki.kotonoha.schooldays GAME school-days)
 
+# The engine's DEV_CONTROL definition is PRIVATE, so propagate it explicitly
+# to the School Days entry point as well. Otherwise its dev-startup.log trace
+# is silently compiled out even when the developer bridge is enabled.
+if(WIN32 AND NOT ANDROID AND KOTONOHA_DEV_CONTROL AND
+   NOT KOTONOHA_DISTRIBUTION_BUILD)
+    target_compile_definitions(SchoolDays PRIVATE KOTONOHA_DEV_CONTROL=1)
+endif()
+
 # A player-facing Windows build is a GUI application: the SDL callback entry
 # point opens our launcher directly. Never attach a second console window just
 # to display SDL logging. Keep the development executable's console for QA.
