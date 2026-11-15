@@ -1,15 +1,16 @@
 # School Days HQ v1.02 — documentation index (Kotonoha v3)
 
+**English (US)** | [Português (Brasil)](README.pt-BR.md)
+
 **Target:** Windows L4. Android is deferred until Windows is ready. The
 School Days implementation is in `games/school-days/`, while generic engine
 functionality belongs to `lib/`. This index is navigational, not a claim of
 full retail parity or QA completion.
 
-The 11 previously published/tracked documents retain their original paths to
-avoid breaking external links. The 18 local, *untracked* dated notes were
-grouped into topical folders. Their contents are preserved (except necessary
-relative-path updates); these files are **not approved for public Git
-publication** merely because this index links to them.
+The previously published documents retain their original paths to avoid
+breaking external links. Dated investigation records are historical snapshots,
+not up-to-date build instructions. Referencing a file here does not grant
+permission to publish private art, retail packs, saves or translations.
 
 ## Stable project documents (unchanged filenames)
 
@@ -20,10 +21,11 @@ publication** merely because this index links to them.
 | UI and parity | [Exit transition](EXIT_TRANSITION_PORT.md), [Menu SFX and hover](MENU_SFX_AND_ROUTE_MAP_HOVER_2026-11-05.md), [Title AC/CHIP](TITLE_AC_CHIP.md) |
 | QA | [Clean-profile pilot](CLEAN_PROFILE_PILOT.md) |
 
-## Local notes by topic (not yet tracked)
+## Research notes by topic (historical snapshots)
 
 ### Configuration and launcher
 
+- [Current Display Options metadata and private-art staging](configuration/display-options/README.md)
 - [Display options art](configuration/DISPLAY_OPTIONS_USER_ART_2026-11-05.md)
 - [Revised General/Display contract](configuration/GENERAL_DISPLAY_REVISED_USER_CONTRACT_2026-11-05.md)
 - [Earlier General/Sound/Display investigation](configuration/GENERAL_SOUND_DISPLAY_SYNC_2026-11-05.md) — historical; later requirements may supersede it
@@ -57,11 +59,14 @@ publication** merely because this index links to them.
 
 ## Do not relocate without updating dependencies
 
-The `src/`, `include/`, `game-assets/`, `display-options/`, `windows/`,
-`launcher-art/` and `tests/fixtures/` folders have hardcoded paths in CMake,
-runtime code and test harnesses. Moving them requires auditing and updating
-all consumers, followed by compilation and CTest. The optional QA tools in
-`games/school-days/tools/` and `tools/schooldays_parity/` also embed paths.
+The `src/`, `include/`, `game-assets/`, `windows/` and `tests/fixtures/` folders
+have paths referenced in CMake, runtime code and test harnesses. The private
+artwork lives under `game-assets/display-options/` and
+`game-assets/launcher-art/`, but its *installed* locations are still
+`display-options/` and `assets/SchoolDaysHQ-Launcher.png` beside the Windows
+executable. Public Display Options metadata is in
+`docs/configuration/display-options/`. Moving these directories requires
+updating consumers, building and running CTest.
 
 Commercial packs, local L×H media, real saves and private translation JSONs
 must remain outside the Git history. The `build/` tree contains active L4

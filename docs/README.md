@@ -1,5 +1,7 @@
 # Documentation index — Kotonoha v3
 
+**English (US)** | [Português (Brasil)](README.pt-BR.md)
+
 The repository's root README files describe the project, supported games, and
 basic build workflows. These guides cover the shared engine and tooling; they
 remain at their published locations so existing links do not break.
@@ -13,6 +15,7 @@ remain at their published locations so existing links do not break.
 | Platform file paths | [Directories.pt-BR.md](Directories.pt-BR.md) | Directories by platform |
 | Android | [Android README](../Android/README.md) / [PT-BR](../Android/README.pt-BR.md) | Deferred mobile target |
 | School Days HQ | [School Days docs index](../games/school-days/docs/README.md) | Windows L4 implementation, parity, localization and QA |
+| Architecture follow-ups | [Maintenance backlog](MAINTENANCE_BACKLOG.md) | Deferred CMake consolidation, SDL callbacks, RAII and StoragePaths |
 | Historical upstream sync | [RUANERI_SYNC_FOLLOWUP_2026-11-04.md](RUANERI_SYNC_FOLLOWUP_2026-11-04.md) | Dated integration notes, not a current change log |
 | Repository hygiene | [REPOSITORY_HYGIENE_2026-11-09.md](REPOSITORY_HYGIENE_2026-11-09.md) | Safe cleanup, protected data, and local rollback |
 
@@ -20,6 +23,8 @@ remain at their published locations so existing links do not break.
 
 - `lib/`, `cmake/`, `games/` and the tracked contents of `assets/` are source
   or build inputs; do **not** remove them as generated clutter.
+- Both `cmake/` and `buildsystems/cmake/` are presently used; they have not been
+  consolidated. The active Windows L4 project still includes `cmake/` modules.
 - `build/`, `vcpkg_installed/` and Android build outputs are generated, but
   **local `build/` also contains commercial GPKs, preserved saves, reports,
   junctions to a retail install and a handoff ZIP**. Never delete it wholesale.
