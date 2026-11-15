@@ -123,49 +123,60 @@ endif()
 # from the source tree to the binary folder, including asset-only rebuilds.
 # The single SchoolDays.exe loads this PNG; no separate launcher EXE is needed.
 if(WIN32 AND NOT ANDROID)
-    set(SCHOOL_DAYS_LAUNCHER_HERO
-        "${CMAKE_CURRENT_SOURCE_DIR}/game-assets/launcher-art/SchoolDaysHQ-Launcher.png")
-    if(EXISTS "${SCHOOL_DAYS_LAUNCHER_HERO}")
-        get_property(_school_days_hero_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
-        if(_school_days_hero_multi_config)
-            set(_school_days_hero_out "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/assets")
-        else()
-            set(_school_days_hero_out "${CMAKE_CURRENT_BINARY_DIR}/assets")
-        endif()
-        add_custom_target(SchoolDaysLauncherArtwork
-            COMMAND ${CMAKE_COMMAND} -E make_directory
-                "${_school_days_hero_out}"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${SCHOOL_DAYS_LAUNCHER_HERO}"
-                "${_school_days_hero_out}/SchoolDaysHQ-Launcher.png"
-            COMMENT "Sync School Days HQ launcher image (no retail GPK changes)"
-            VERBATIM)
-        add_dependencies(SchoolDays SchoolDaysLauncherArtwork)
+    set(KOTONOHA_SCHOOL_DAYS_LAUNCHER_ART_SOURCE
+        "${CMAKE_CURRENT_SOURCE_DIR}/game-assets/launcher-art/SchoolDaysHQ-Launcher.png"
+        CACHE FILEPATH "Private School Days HQ launcher artwork source")
+    set(SCHOOL_DAYS_LAUNCHER_HERO "${KOTONOHA_SCHOOL_DAYS_LAUNCHER_ART_SOURCE}")
+    if(NOT EXISTS "${SCHOOL_DAYS_LAUNCHER_HERO}")
+        message(WARNING "School Days HQ launcher artwork missing: ${SCHOOL_DAYS_LAUNCHER_HERO}")
     endif()
+    get_property(_school_days_hero_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    if(_school_days_hero_multi_config)
+        set(_school_days_hero_out "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/assets")
+    else()
+        set(_school_days_hero_out "${CMAKE_CURRENT_BINARY_DIR}/assets")
+    endif()
+    # Keep this target even when optional art is currently missing, so a new
+    # file can be supplied and staged by the next build without reconfiguring.
+    add_custom_target(SchoolDaysLauncherArtwork
+        COMMAND "${CMAKE_COMMAND}"
+            "-DKOTONOHA_ASSET_KIND=launcher"
+            "-DKOTONOHA_ASSET_SOURCE=${SCHOOL_DAYS_LAUNCHER_HERO}"
+            "-DKOTONOHA_ASSET_DESTINATION=${_school_days_hero_out}/SchoolDaysHQ-Launcher.png"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/windows/StageOptionalAssets.cmake"
+        COMMENT "Sync School Days HQ launcher image (no retail GPK changes)"
+        VERBATIM)
+    add_dependencies(SchoolDays SchoolDaysLauncherArtwork)
 endif()
 
 # Ship the user's replacement General, Sound and Display Options artwork outside
 # the commercial System.GPK. The School Days-only overlay is mounted by default
 # when no explicit --asset-overlay is selected. Other games are unaffected.
 if(WIN32 AND NOT ANDROID)
-    set(SCHOOL_DAYS_DISPLAY_OVERLAY "${CMAKE_CURRENT_SOURCE_DIR}/game-assets/display-options")
-    if(EXISTS "${SCHOOL_DAYS_DISPLAY_OVERLAY}/System/Option/Option_Display.png")
-        get_property(_school_days_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
-        if(_school_days_multi_config)
-            set(_school_days_overlay_output "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/display-options")
-        else()
-            set(_school_days_overlay_output "${CMAKE_CURRENT_BINARY_DIR}/display-options")
-        endif()
-        # Always sync assets, including edits made without recompiling C++.
-        # POST_BUILD alone does not run when the executable is already current.
-        add_custom_target(SchoolDaysOptionAssets
-            COMMAND ${CMAKE_COMMAND} -E copy_directory
-                "${SCHOOL_DAYS_DISPLAY_OVERLAY}"
-                "${_school_days_overlay_output}"
-            COMMENT "Syncing School Days option artwork (retail System.GPK unchanged)"
-            VERBATIM)
-        add_dependencies(SchoolDays SchoolDaysOptionAssets)
+    set(KOTONOHA_SCHOOL_DAYS_DISPLAY_OVERLAY_SOURCE
+        "${CMAKE_CURRENT_SOURCE_DIR}/game-assets/display-options"
+        CACHE PATH "Private School Days HQ option artwork source")
+    set(SCHOOL_DAYS_DISPLAY_OVERLAY "${KOTONOHA_SCHOOL_DAYS_DISPLAY_OVERLAY_SOURCE}")
+    if(NOT EXISTS "${SCHOOL_DAYS_DISPLAY_OVERLAY}/System/Option/Option_Display.png" OR
+       NOT EXISTS "${SCHOOL_DAYS_DISPLAY_OVERLAY}/System/Option/Option_Display.cmap")
+        message(WARNING "School Days HQ Display Options PNG/CMAP missing under: ${SCHOOL_DAYS_DISPLAY_OVERLAY}")
     endif()
+    get_property(_school_days_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    if(_school_days_multi_config)
+        set(_school_days_overlay_output "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/display-options")
+    else()
+        set(_school_days_overlay_output "${CMAKE_CURRENT_BINARY_DIR}/display-options")
+    endif()
+    # Always sync assets, including edits made without recompiling C++.
+    add_custom_target(SchoolDaysOptionAssets
+        COMMAND "${CMAKE_COMMAND}"
+            "-DKOTONOHA_ASSET_KIND=display-options"
+            "-DKOTONOHA_ASSET_SOURCE=${SCHOOL_DAYS_DISPLAY_OVERLAY}"
+            "-DKOTONOHA_ASSET_DESTINATION=${_school_days_overlay_output}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/windows/StageOptionalAssets.cmake"
+        COMMENT "Syncing School Days option artwork (retail System.GPK unchanged)"
+        VERBATIM)
+    add_dependencies(SchoolDays SchoolDaysOptionAssets)
 endif()
 
 if(BUILD_TESTING AND NOT ANDROID)
