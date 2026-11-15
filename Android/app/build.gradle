@@ -190,7 +190,7 @@ android.applicationVariants.all { variant ->
                 include 'school-days-hq.ktnroute', 'styles.ass'
                 into 'game-assets'
             }
-            from(new File(engineRoot, 'games/school-days/launcher-art')) {
+            from(new File(engineRoot, 'games/school-days/game-assets/launcher-art')) {
                 include 'SchoolDaysHQ-Launcher.png'
                 into 'launcher-art'
             }
@@ -235,7 +235,7 @@ android.applicationVariants.all { variant ->
             }
             if (variant.flavorName == 'schoolDays' &&
                     !new File(engineRoot,
-                            'games/school-days/launcher-art/SchoolDaysHQ-Launcher.png').isFile()) {
+                            'games/school-days/game-assets/launcher-art/SchoolDaysHQ-Launcher.png').isFile()) {
                 throw new GradleException('School Days Android launcher artwork is missing')
             }
             if (variant.flavorName == 'schoolDays') {

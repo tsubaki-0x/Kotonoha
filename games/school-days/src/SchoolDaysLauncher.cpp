@@ -1686,6 +1686,9 @@ bool Launcher::loadLauncherArtwork() {
   if (const auto found = Kotonoha::FileResolver::findGameAsset(
           "school-days", std::string("launcher-art/") + filename))
     choices.push_back(*found);
+  choices.emplace_back(fs::path("games/school-days/game-assets/launcher-art") /
+                       filename);
+  // Also recognize the older source layout for developer checkouts.
   choices.emplace_back(fs::path("games/school-days/launcher-art") / filename);
   for (const auto &candidate : choices) {
     std::error_code ec;
