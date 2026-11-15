@@ -124,7 +124,7 @@ endif()
 # The single SchoolDays.exe loads this PNG; no separate launcher EXE is needed.
 if(WIN32 AND NOT ANDROID)
     set(SCHOOL_DAYS_LAUNCHER_HERO
-        "${CMAKE_CURRENT_SOURCE_DIR}/launcher-art/SchoolDaysHQ-Launcher.png")
+        "${CMAKE_CURRENT_SOURCE_DIR}/game-assets/launcher-art/SchoolDaysHQ-Launcher.png")
     if(EXISTS "${SCHOOL_DAYS_LAUNCHER_HERO}")
         get_property(_school_days_hero_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
         if(_school_days_hero_multi_config)
@@ -148,7 +148,7 @@ endif()
 # the commercial System.GPK. The School Days-only overlay is mounted by default
 # when no explicit --asset-overlay is selected. Other games are unaffected.
 if(WIN32 AND NOT ANDROID)
-    set(SCHOOL_DAYS_DISPLAY_OVERLAY "${CMAKE_CURRENT_SOURCE_DIR}/display-options")
+    set(SCHOOL_DAYS_DISPLAY_OVERLAY "${CMAKE_CURRENT_SOURCE_DIR}/game-assets/display-options")
     if(EXISTS "${SCHOOL_DAYS_DISPLAY_OVERLAY}/System/Option/Option_Display.png")
         get_property(_school_days_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
         if(_school_days_multi_config)
