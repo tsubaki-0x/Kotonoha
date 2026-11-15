@@ -1,15 +1,15 @@
-#include <Kotonoha/componentes/FadeScene.hpp>
-#include <Kotonoha/componentes/ForcedSubtitleRenderer.hpp>
-#include <Kotonoha/componentes/InGameMenu.hpp>
-#include <Kotonoha/componentes/SettingsMenu.hpp>
-#include <Kotonoha/componentes/SplashScreen.hpp>
-#include <Kotonoha/componentes/SubtitleScene.hpp>
-#include <Kotonoha/componentes/VNBacklog.hpp>
-#include <Kotonoha/componentes/VNManager.hpp>
-#include <Kotonoha/componentes/VNTextBox.hpp>
+#include <Kotonoha/components/FadeScene.hpp>
+#include <Kotonoha/components/ForcedSubtitleRenderer.hpp>
+#include <Kotonoha/components/InGameMenu.hpp>
+#include <Kotonoha/components/SettingsMenu.hpp>
+#include <Kotonoha/components/SplashScreen.hpp>
+#include <Kotonoha/components/SubtitleScene.hpp>
+#include <Kotonoha/components/VNBacklog.hpp>
+#include <Kotonoha/components/VNManager.hpp>
+#include <Kotonoha/components/VNTextBox.hpp>
 #include <Kotonoha/core/CommandLine.hpp>
 #include <Kotonoha/core/Engine.hpp>
-#include <Kotonoha/core/FileSystem.hpp>
+#include <Kotonoha/Filesystem/StoragePaths.hpp>
 #include <Kotonoha/core/TransformTween.hpp>
 #include <Kotonoha/core/UI.hpp>
 #include <Kotonoha/debug/DebugOverlay.hpp>
@@ -822,8 +822,8 @@ void controls(Engine &engine, TestRuntime &runtime) {
   menu.open();
   press(SDLK_TAB); // Audio.
   press(SDLK_LEFT);
-  require(engine.GetAudio().getMasterVolume() == 0.35f,
-          "Volume draft does not apply early");
+  require(engine.GetAudio().getMasterVolume() == 0.30f,
+          "Volume changes apply immediately");
   press(SDLK_ESCAPE);
   menu.open();
   press(SDLK_TAB);
@@ -832,9 +832,9 @@ void controls(Engine &engine, TestRuntime &runtime) {
   press(SDLK_RETURN);
   press(SDLK_END);
   press(SDLK_RETURN);
-  require(!menu.isOpen() && engine.GetAudio().getMasterVolume() == 0.30f &&
+  require(!menu.isOpen() && engine.GetAudio().getMasterVolume() == 0.25f &&
               engine.GetAudio().isMasterMuted(),
-          "Generic menu applies volume and master mute");
+          "Audio menu applies volume and mute live and closes");
   engine.applySettings(settings, false);
   menu.open();
   for (int i = 0; i < 6; ++i)

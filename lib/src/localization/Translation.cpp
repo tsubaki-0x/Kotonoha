@@ -1,10 +1,10 @@
-#include <Kotonoha/core/FileSystem.hpp>
+#include <Kotonoha/Filesystem/StoragePaths.hpp>
 #include <Kotonoha/localization/Translation.hpp>
 
 #include <json-c/json.h>
 
 #include <charconv>
-#include <fstream>
+#include <Kotonoha/Filesystem/Adapters/StreamAdapter.hpp>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -28,7 +28,7 @@ bool validSection(const std::string &name) {
 } // namespace
 
 void Translation::load(const std::string &path) {
-  std::ifstream input(FileResolver::findAsset(path).value_or(path),
+  Kotonoha::Filesystem::InputFile input(FileResolver::findAsset(path).value_or(path),
                       std::ios::binary);
   if (!input)
     throw std::runtime_error("Cannot open translation: " + path);
@@ -99,6 +99,21 @@ std::string Translation::text(int nodeId, const std::string &original) const {
       continue;
     const auto entry = section->second.find(original);
     if (entry != section->second.end())
+      return entry->second;
+  }
+  return original;
+}
+
+std::string Translation::text(const std::string &section,
+                              const std::string &original) const {
+  if (section.empty() && !original.empty())
+    globalSources.insert(original);
+  for (const auto &name : {section, std::string("nodo")}) {
+    const auto foundSection = sections.find(name);
+    if (foundSection == sections.end())
+      continue;
+    const auto entry = foundSection->second.find(original);
+    if (entry != foundSection->second.end())
       return entry->second;
   }
   return original;

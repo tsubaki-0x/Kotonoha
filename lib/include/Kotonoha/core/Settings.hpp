@@ -22,6 +22,10 @@ struct EngineSettings {
   bool masterMuted = false;
   std::map<std::string, float> channelVolumes;
   std::string vnFontPath;
+  // Zero preserves the game's own pacing. Positive values override it in
+  // characters/second.
+  float vnTextSpeed = 0;
+  bool vnTextInstant = false;
   bool vnTextColorOverride = false;
   SDL_Color vnTextColor{255, 255, 255, 255};
   SDL_Color vnSpeakerColor{255, 215, 100, 255};
@@ -33,6 +37,10 @@ struct EngineSettings {
   UpscaleSettings upscaling;
   SDL_LogPriority logPriority = SDL_LOG_PRIORITY_INFO;
   std::string translationPath;
+  // Upstream named overlays keep their stored paths, while the L4-compatible
+  // assetOverlayPath still describes the active resolved selection.
+  std::map<std::string, std::string> assetOverlays;
+  std::string assetOverlayName;
   std::string assetOverlayPath;
   std::string fontPath;
   bool enableForcedSubtitles = true;  // Toggle for forced subtitles system
@@ -43,6 +51,7 @@ struct EngineSettings {
   // <pref path>/Kotonoha/<identify>/settings.json, as used by the Engine.
   static std::string defaultPath(const std::string &identify = {});
   void save(const std::string &path) const;
+  std::string resolvedOverlayPath() const;
 };
 
 } // namespace Kotonoha
