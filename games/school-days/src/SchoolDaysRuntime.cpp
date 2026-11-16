@@ -1134,7 +1134,16 @@ void Runtime::init(Kotonoha::Engine &owner) {
 
     std::vector<uint8_t> bytes;
     bool present = false;
-    if (storage.IsInitialized() && !storage.LoadGlobalFlag(&bytes, &present, &failure)) present = false;
+    const auto globalPath =
+        (documents / std::filesystem::u8path(profile.flagFileName))
+            .lexically_normal();
+    if (storage.IsInitialized() &&
+        !storage.LoadGlobalFlag(&bytes, &present, &failure)) {
+      throw std::runtime_error(
+          "School Days cannot read GlobalFlag.DAT at " +
+          globalPath.u8string() +
+          "; the existing file was not modified. Reason: " + failure);
+    }
     const auto legacy = documents / "GlobalFlag";
     if (!present && std::filesystem::is_regular_file(legacy)) {
       bytes = assets->read(legacy.string());
@@ -1150,7 +1159,13 @@ void Runtime::init(Kotonoha::Engine &owner) {
     }
     if (present) {
       Kotonoha_KtrfError error{};
-      Check(bridge.Session().LoadGlobalFlag(bytes, &error), error);
+      if (!bridge.Session().LoadGlobalFlag(bytes, &error)) {
+        throw std::runtime_error(
+            "School Days cannot load GlobalFlag.DAT at " +
+            globalPath.u8string() +
+            "; the existing file was not modified. Reason: " +
+            error.message);
+      }
     }
     loadConfig();
     applyConfig();
@@ -1665,7 +1680,10 @@ void Runtime::openTitle(bool startBgm) {
   Kotonoha_KtrfError error{};
   int64_t endClear = 0;
   Check(bridge.Session().State().ReadGlobalInt("EndClear", &endClear, &error), error);
-  host.endClearReplay = endClear != 0;
+  bool hSceneUnlocked = false;
+  Check(Kotonoha::SchoolDaysReplayModel::AnyHSceneUnlocked(
+            bridge.Session().State(), &hSceneUnlocked, &error), error);
+  host.endClearReplay = endClear != 0 || hSceneUnlocked;
   std::string ignored;
   if (Kotonoha::SchoolDaysTitleProfile::Load(assets->root().string(), &titleProfile, &ignored)) {
     host.endClearVisual = titleProfile.endBgView && endClear != 0;
