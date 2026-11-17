@@ -7,6 +7,17 @@ add_test(NAME SchoolDaysPortTest COMMAND SchoolDaysPortTest
     "${CMAKE_CURRENT_BINARY_DIR}/fixtures")
 set_tests_properties(SchoolDaysPortTest PROPERTIES FIXTURES_SETUP school_days_assets)
 
+if(KOTONOHA_DISTRIBUTION_BUILD)
+    # Counterpart to the engine's DEV MCP command-line positive test. Never
+    # skip that original test: this separate DIST negative test detects any
+    # accidental return of developer MCP/log controls to public builds.
+    add_executable(SchoolDaysDistDebugAbsenceTest
+        SchoolDaysDistDebugAbsenceTest.cpp)
+    target_link_libraries(SchoolDaysDistDebugAbsenceTest PRIVATE school_days)
+    add_test(NAME SchoolDays.DistDebugAbsence
+        COMMAND SchoolDaysDistDebugAbsenceTest)
+endif()
+
 add_executable(SchoolDaysSessionTest KtrfSchoolDaysSessionTest.cpp)
 target_link_libraries(SchoolDaysSessionTest PRIVATE school_days)
 add_test(NAME SchoolDaysSessionTest COMMAND SchoolDaysSessionTest
@@ -166,6 +177,15 @@ add_executable(SchoolDaysGlobalFlagAtomicTest
 target_link_libraries(SchoolDaysGlobalFlagAtomicTest PRIVATE school_days)
 add_test(NAME SchoolDays.GlobalFlagAtomic COMMAND SchoolDaysGlobalFlagAtomicTest)
 
+# Complete synthetic end-count boundary with an isolated FlgH restart; depends
+# on the normal synthetic route fixture, never on retail files or saves.
+add_executable(SchoolDaysAllClearSyntheticTest SchoolDaysAllClearSyntheticTest.cpp)
+target_link_libraries(SchoolDaysAllClearSyntheticTest PRIVATE school_days)
+add_test(NAME SchoolDays.AllClearSynthetic COMMAND SchoolDaysAllClearSyntheticTest
+    "${SCHOOL_DAYS_ROUTE}" "${CMAKE_CURRENT_BINARY_DIR}/fixtures/Script/English")
+set_tests_properties(SchoolDays.AllClearSynthetic PROPERTIES
+    FIXTURES_REQUIRED school_days_assets)
+
 # Pure, private CMAP regression: clicking the currently selected Save/Load tab
 # must not clear the occupancy latch and disable an otherwise valid LOAD row.
 add_executable(SchoolDaysSaveLoadSamePageTest SchoolDaysSaveLoadSamePageTest.cpp)
@@ -280,11 +300,21 @@ add_test(NAME SchoolDaysReplayRuntimeUiTest COMMAND SchoolDaysReplayRuntimeUiTes
 set_tests_properties(SchoolDaysReplayRuntimeUiTest PROPERTIES
     ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy")
 
-add_test(NAME SchoolDaysRuntimeSmoke COMMAND SchoolDays
-    --school-days "${CMAKE_CURRENT_BINARY_DIR}/fixtures"
-    --documents "${CMAKE_CURRENT_BINARY_DIR}/documents"
-    --no-config --renderer software --frames 4 --node 0
-    --dump-ktrf "${CMAKE_CURRENT_BINARY_DIR}/smoke.ktnroute")
+if(KOTONOHA_DISTRIBUTION_BUILD)
+    # Public build: exercise the real headless game loop, without scene-jump
+    # or KTRF export options that correctly do not exist in this variant.
+    # DEV keeps the stronger original route/export assertions below.
+    add_test(NAME SchoolDaysRuntimeSmoke COMMAND SchoolDays
+        --school-days "${CMAKE_CURRENT_BINARY_DIR}/fixtures"
+        --documents "${CMAKE_CURRENT_BINARY_DIR}/documents"
+        --no-config --no-launcher --renderer software --frames 4)
+else()
+    add_test(NAME SchoolDaysRuntimeSmoke COMMAND SchoolDays
+        --school-days "${CMAKE_CURRENT_BINARY_DIR}/fixtures"
+        --documents "${CMAKE_CURRENT_BINARY_DIR}/documents"
+        --no-config --renderer software --frames 4 --node 0
+        --dump-ktrf "${CMAKE_CURRENT_BINARY_DIR}/smoke.ktnroute")
+endif()
 set_tests_properties(SchoolDaysRuntimeSmoke PROPERTIES
     FIXTURES_REQUIRED school_days_assets
     ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy")
@@ -369,6 +399,7 @@ if(WIN32)
         SchoolDaysReplayRuntimeIsolationTest
         SchoolDaysReplayRuntimeUiTest
         SchoolDays.GlobalFlagAtomic
+        SchoolDays.AllClearSynthetic
         SchoolDaysRuntimeSmoke
         SchoolDaysLauncherTest
         ${_school_days_dev_only_ctests}

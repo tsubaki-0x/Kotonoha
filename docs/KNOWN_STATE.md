@@ -67,8 +67,46 @@ the local namespaced test.
 
 | Subtitle styles / colors | **Not visually verified**; `styles.ass` now contains design-only speaker colors and a Setsuna correction, with synthetic tests only | Color selection is tested headlessly, not validated against real rendered scenes |
 
+### Independent atomic GlobalFlag POSIX verification — 2026-11-17
+
+The game-specific `SchoolDaysAtomicFile` helper was extracted into a C++17
+implementation with no dependency on SDL, vcpkg or the engine. Its standalone
+test compiled and passed on local Windows, and on **GitHub Actions** hosted
+POSIX runners for the fork (not on a local Linux installation):
+
+| Runner | Image and version from CI log | Result |
+| --- | --- | --- |
+| `ubuntu-latest` | `ubuntu-26.04`, `20261111.196.1` | Native C++17 and ASan/UBSan **PASS** |
+| `macos-latest` | `macos-26-arm64`, `20261102.0473.1` | Native C++17 **PASS** |
+
+Runs: <https://github.com/tsubaki-0x/Kotonoha/actions/runs/44013431802>
+and <https://github.com/tsubaki-0x/Kotonoha/actions/runs/44014281654>
+(2026-11-17 UTC). Tests cover 1,000 replacements, injected write/flush/rename/
+directory-sync failures, old orphan cleanup, and 220 randomized SIGKILL crash
+attempts on each POSIX runner. The macOS helper uses `F_FULLFSYNC` where
+available, falling back to `fsync` only on `ENOTSUP`, and handles `EINTR` and
+partial writes. This confirms the **standalone storage helper**, not an entire
+School Days macOS/Linux build, real physical power-loss durability, or
+commercial gameplay on those operating systems. The workflow lives only on
+a temporary fork CI branch and must not be merged into release branches.
+
 This ledger is intentionally conservative: a passing Release compilation and
 synthetic CTest suite do not certify commercial-game behavior, real saves, or
 untested platforms. Preserve historical `PORT_STATUS.md` and investigation
 notes. No commercial GPK, EXE, translation, real save or optional ICO should
 be added to a public Git commit.
+
+### Known DIST MCP command-line test mismatch — 2026-11-17
+
+`Kotonoha.MCPCommandLine` is registered in the shared-engine
+`lib/tests/CMakeLists.txt:20-22`, outside the permitted game-specific edit
+scope. The unchanged positive test at `lib/tests/MCPCommandLineTests.cpp:39-60`
+expects `--mcp` / `--mcp-port` to be available, but the DIST parser
+intentionally excludes those options in `lib/src/core/CommandLine.cpp:24-42`.
+It therefore **fails in DIST** as a known incompatible positive assertion,
+not as evidence that the public binary enables MCP. The test remains
+registered, runnable and unmodified; it has not been skipped or weakened.
+The separate `SchoolDays.DistDebugAbsence` test passes in DIST and explicitly
+rejects MCP, MCP port/root and debug logging options. Final Windows Release
+CTest for this feature: DEV **80/81** (only known software MetalFX failure),
+DIST **74/75** (only this registered MCP positive test).
