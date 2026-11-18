@@ -1,0 +1,26 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+    // The generic CI project can use the cached AGP module in offline QA,
+    // without depending on its separate plugin-marker artifact. Keep the
+    // same resolution policy as the independent hybrid Android project.
+    resolutionStrategy {
+        eachPlugin {
+            if (requested.id.id == 'com.android.application') {
+                useModule("com.android.tools.build:gradle:${requested.version}")
+            }
+        }
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+rootProject.name = 'KotonohaAndroid'
+include ':app'

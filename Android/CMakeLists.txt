@@ -62,6 +62,12 @@ elseif(ANDROID_NDK)
 endif()
 
 set(KOTONOHA_ANDROID_GAME "example" CACHE STRING "Game built by this APK")
+# The shared root CMake now selects Android ports through KOTONOHA_BUILD_GAME.
+# Keep the hybrid Gradle's established KOTONOHA_ANDROID_GAME interface while
+# forwarding its chosen flavor to the canonical engine selector before the
+# root project is configured (including when reusing an existing CMake cache).
+set(KOTONOHA_BUILD_GAME "${KOTONOHA_ANDROID_GAME}"
+    CACHE STRING "Game selected by the hybrid Android APK" FORCE)
 if(KOTONOHA_ANDROID_GAME STREQUAL "doki-doki-literature-club")
     list(APPEND VCPKG_MANIFEST_FEATURES android-python)
 endif()
@@ -97,5 +103,5 @@ set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 add_subdirectory(.. kotonoha)
 
 if(TARGET DdlcFormats)
-    target_link_libraries(DdlcFormats PRIVATE Kotonoha::Engine)
+    target_link_libraries(DdlcFormats PRIVATE KotonohaEngine)
 endif()

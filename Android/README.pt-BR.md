@@ -2,23 +2,24 @@
 
 [English](README.md) | Portugues (Brasil)
 
-Abra esta pasta no Android Studio. Requisitos: JDK 17 ou mais recente
-compativel com Gradle 8.14.6 (o JDK do Android Studio funciona), SDK 36,
-CMake 3.22.1, NDK 28.2.13676358, Git e um checkout vcpkg.
+Este projeto Android personalizado da hibrida conserva as edicoes School Days
+DEV, DIST e DIST-TEST. O projeto generico upstream de CI em
+`../buildsystems/android/` tambem e preservado.
+Abra esta pasta no Android Studio. Requisitos: JDK 17 ou mais recente,
+Gradle 8.14.6, SDK 37 (minor 0), CMake 3.22.1, NDK 27.0.12077973,
+Git e um checkout vcpkg.
 
 ```sh
 export VCPKG_ROOT=/caminho/para/vcpkg
 export ANDROID_HOME=/caminho/para/Android/sdk
-export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
+export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
 export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
-./gradlew :app:assembleExampleDebug
-./gradlew :app:assembleAmagamiDebug
-./gradlew :app:assembleZeroNoTsukaimaDebug
-./gradlew :app:assembleSnowRadishDebug
-./gradlew :app:assembleDokiDokiDebug -Pabis=arm64-v8a
-./gradlew :app:assembleSchoolDaysDebug
-./gradlew :app:assembleAirDebug
-./gradlew :app:assembleSummerRadishDebug
+gradle :app:assembleExampleDebug -Pabis=arm64-v8a
+gradle :app:assembleZeroNoTsukaimaDebug -Pabis=arm64-v8a
+gradle :app:assembleSnowRadishDebug -Pabis=arm64-v8a
+gradle :app:assembleDokiDokiDebug -Pabis=arm64-v8a
+gradle :app:assembleSchoolDaysDistTest -Pabis=arm64-v8a \
+  -PschoolDaysTranslationsDir=/traducoes/externas/autorizadas
 ```
 
 No Windows, use PowerShell na pasta `Android`:
@@ -26,7 +27,7 @@ No Windows, use PowerShell na pasta `Android`:
 ```powershell
 $env:VCPKG_ROOT = 'C:\caminho\para\vcpkg'
 $env:JAVA_HOME = 'C:\Program Files\Android\Android Studio\jbr'
-.\gradlew.bat :app:assembleExampleDebug
+gradle :app:assembleExampleDebug -Pabis=arm64-v8a
 ```
 
 O vcpkg instalado com o Visual Studio tambem pode ser usado. Ao abrir o
@@ -36,7 +37,14 @@ ambiente do usuario e reinicie o Studio. O SDK vem de `local.properties`
 Nao e necessario definir `ANDROID_NDK_HOME` separadamente.
 
 Cada flavor tem applicationId e APK proprios em `app/build/outputs/apk/`.
-As ABIs padrão são `arm64-v8a` e `x86_64`; use `-Pabis=x86_64` para compilar somente para o emulador.
+Selecione **uma unica ABI** por compilacao: `arm64-v8a` (padrao) ou
+`x86_64` (emulador). Listas com virgulas sao rejeitadas.
+School Days exige `-PschoolDaysTranslationsDir=...` com traducoes fora do
+repositorio; DEV exige ainda `-PschoolDaysDevSavesDir=...` com os oito hashes
+autorizados, nunca uma pasta de saves pessoais. DIST-TEST possui assinatura de
+teste; DIST de producao exige assinatura release. Os scripts de wrapper nao
+incluem o JAR, portanto use Gradle instalado ou Android Studio ate fornecer um
+wrapper JAR de origem confiavel.
 Execute as invocacoes Gradle sequencialmente: builds simultaneos compartilham
 os diretorios nativos `.cxx`. Uma invocacao pode receber varios targets assemble.
 Compile DDLC com uma ABI por APK. As dependencias ficam em `build/vcpkg/<ABI>`; DDLC usa CPython fornecido pelo vcpkg. Nenhuma biblioteca Python macOS/iOS e usada no Android.

@@ -68,10 +68,14 @@ android {
             cmake {
                 arguments "-DCMAKE_TOOLCHAIN_FILE=${vcpkgRoot}/scripts/buildsystems/vcpkg.cmake",
                           "-DVCPKG_MANIFEST_DIR=${engineRoot}",
-                          "-DVCPKG_OVERLAY_PORTS=${new File(engineRoot, 'vcpkg-overlays')}",
+                          "-DVCPKG_OVERLAY_PORTS=${new File(engineRoot, 'vcpkg-overlays/ports')}",
                           "-DVCPKG_TARGET_TRIPLET=${vcpkgTriplet}",
                           "-DVCPKG_CHAINLOAD_TOOLCHAIN_FILE=${android.ndkDirectory}/build/cmake/android.toolchain.cmake",
                           "-DKOTONOHA_SDL_SOURCE_DIR=${sdlRoot}",
+                          // Android needs the SDL Java glue from the matching
+                          // vendored native sources, not the vcpkg SDL/ImGui.
+                          '-DKOTONOHA_SDL_FROM_VCPKG=OFF',
+                          '-DKOTONOHA_IMGUI_FROM_VCPKG=OFF',
                           '-DANDROID_PLATFORM=android-28',
                           '-DANDROID_STL=c++_shared'
             }

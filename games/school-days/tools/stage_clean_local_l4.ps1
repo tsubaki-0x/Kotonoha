@@ -10,7 +10,12 @@ param(
     [Parameter(Mandatory = $true)] [string] $Destination,
     [switch] $Create,
     [string] $ApprovedExeSha256 = '',
-    [switch] $QuickDryRun
+    [switch] $QuickDryRun,
+    [string] $ApprovedBrazilianScriptSha256 = '',
+    [string] $ApprovedBrazilianLxhSha256 = '',
+    [switch] $IncludeRussian,
+    [string] $ApprovedRussianScriptSha256 = '',
+    [string] $ApprovedRussianLxhSha256 = ''
 )
 
 Set-StrictMode -Version Latest
@@ -103,6 +108,44 @@ function Add-PayloadTree([string] $name, [string] $role) {
     }
 }
 
+function Resolve-TranslationFile([string] $root, [string] $subfolder, [string] $name) {
+    # Match the launcher's organized layout and its flat legacy fallback, but
+    # reject wrong-case names and ambiguous copies before producing a package.
+    $found = @()
+    foreach ($folder in @((Join-Path $root $subfolder), $root)) {
+        if (-not (Test-Path -LiteralPath $folder -PathType Container)) { continue }
+        Ensure-NotReparse (Get-Item -LiteralPath $folder)
+        foreach ($file in @(Get-ChildItem -LiteralPath $folder -File -Force)) {
+            if ($file.Name -ieq $name) {
+                if ($file.Name -cne $name) { throw "Translation filename casing mismatch: $($file.FullName)" }
+                Ensure-NotReparse $file
+                $found += $file
+            }
+        }
+    }
+    if ($found.Count -ne 1) {
+        throw "Expected exactly one $name under translations/$subfolder or translations/; found $($found.Count). No language fallback is permitted."
+    }
+    $relative = if ($found[0].DirectoryName.Equals((Join-Path $root $subfolder),
+                                                   [StringComparison]::OrdinalIgnoreCase)) {
+        "translations/$subfolder/$name"
+    } else { "translations/$name" }
+    return [pscustomobject]@{ file = $found[0].FullName; relative = $relative }
+}
+
+function Add-ApprovedNativeTranslation([string] $root, [string] $name,
+                                       [string] $approvedHash, [string] $locale) {
+    if ($approvedHash -notmatch '^[0-9a-fA-F]{64}$') {
+        throw "$locale native GPK needs the explicitly approved SHA256 of $name; filenames alone do not certify a complete translation."
+    }
+    $item = Resolve-TranslationFile $root 'scripts' $name
+    Add-PayloadFile $item.file $item.relative "native-$locale-gpk"
+    $actual = $entries[$entries.Count - 1].sha256
+    if ($actual -ne $approvedHash.ToUpperInvariant()) {
+        throw "$locale native translation SHA256 mismatch for ${name}: $actual"
+    }
+}
+
 Require-Directory $source
 Ensure-NotReparse (Get-Item -LiteralPath $source)
 if (Test-Path -LiteralPath $destinationPath) {
@@ -188,15 +231,41 @@ foreach ($name in @('school-days-hq.ktnroute', 'styles.ass')) {
 }
 $translationRoot = Join-Path $source 'translations'
 Require-Directory $translationRoot
-$translationNames = @(Get-ChildItem -LiteralPath $translationRoot -File -Force | Where-Object { $_.Extension -ieq '.json' } | ForEach-Object { $_.Name } | Sort-Object)
-if (($translationNames -join '|') -ine ((@($expectedTranslations | Sort-Object)) -join '|')) {
-    throw "Unexpected or missing translation JSON (protect private locales): $($translationNames -join ', ')"
+# This 07/11 inventory remains the approved EN/ES/zh-CN JSON baseline. The
+# current runtime also supports native PT-BR Script + LxH packs. PT-BR is now
+# authorized for distribution, and both certified archives are mandatory for
+# new staging; silently emitting the old three-language package is unsafe.
+$jsonFiles = @(
+    @(Get-ChildItem -LiteralPath $translationRoot -File -Force | Where-Object { $_.Extension -ieq '.json' })
+    $jsonFolder = Join-Path $translationRoot 'jsons'
+    if (Test-Path -LiteralPath $jsonFolder -PathType Container) {
+        Ensure-NotReparse (Get-Item -LiteralPath $jsonFolder)
+        @(Get-ChildItem -LiteralPath $jsonFolder -File -Force | Where-Object { $_.Extension -ieq '.json' })
+    }
+)
+$translationNames = @($jsonFiles | ForEach-Object { $_.Name } | Sort-Object -CaseSensitive)
+if (($translationNames -join '|') -cne ((@($expectedTranslations | Sort-Object -CaseSensitive)) -join '|')) {
+    throw "Unexpected or missing EN/ES/zh-CN JSONs (protect private/uncertified locales): $($translationNames -join ', ')"
 }
-if (@(Get-ChildItem -LiteralPath $translationRoot -Directory -Force).Count -ne 0) {
-    throw 'Unexpected translations subdirectory; review before packaging.'
+foreach ($directory in @(Get-ChildItem -LiteralPath $translationRoot -Directory -Force)) {
+    if ($directory.Name -cnotin @('jsons', 'scripts')) {
+        throw "Unexpected translations subdirectory: $($directory.FullName)"
+    }
+    Ensure-NotReparse $directory
 }
 foreach ($name in $expectedTranslations) {
-    Add-PayloadFile (Join-Path $translationRoot $name) "translations/$name" 'translation-and-review-metadata'
+    $item = Resolve-TranslationFile $translationRoot 'jsons' $name
+    Add-PayloadFile $item.file $item.relative 'translation-and-review-metadata'
+}
+# Both native PT-BR archives must be approved by content hash. The English
+# base remains the authenticated retail Packs/Script.GPK; no English copy from
+# translations/scripts is used. RU stays opt-in until its script + LxH pair
+# have independently approved digests, never an unfinished mixed-language pack.
+Add-ApprovedNativeTranslation $translationRoot 'Script - Brazilian.GPK' $ApprovedBrazilianScriptSha256 'pt-BR'
+Add-ApprovedNativeTranslation $translationRoot 'pt-BR-lxh.GPK' $ApprovedBrazilianLxhSha256 'pt-BR'
+if ($IncludeRussian) {
+    Add-ApprovedNativeTranslation $translationRoot 'Script - Russian.GPK' $ApprovedRussianScriptSha256 'ru'
+    Add-ApprovedNativeTranslation $translationRoot 'ru-lxh.GPK' $ApprovedRussianLxhSha256 'ru'
 }
 
 if ($Create) {
@@ -216,6 +285,7 @@ $totalBytes = ($entries | Measure-Object -Property bytes -Sum).Sum
 Write-Output "PREFLIGHT_PASS mode=$(if($Create){'CREATE'}elseif($QuickDryRun){'QUICK_DRY_RUN'}else{'FULL_DRY_RUN'})"
 Write-Output "EXE_SHA256=$exeSha"
 Write-Output "GPK_COUNT=$($expectedPackNames.Count) (29 retail + mandatory LxH.GPK)"
+Write-Output "NATIVE_TRANSLATIONS=pt-BR$(if($IncludeRussian){',ru'}) (two approved GPKs per locale)"
 Write-Output "LOCAL_DLLS=$($localDllNames -join ', ')"
 Write-Output "PAYLOAD_FILES=$($entries.Count) PAYLOAD_BYTES=$totalBytes"
 Write-Output "DESTINATION_NEW=$destinationPath"

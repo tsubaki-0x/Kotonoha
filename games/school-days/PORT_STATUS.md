@@ -1,5 +1,22 @@
 # School Days HQ on Kotonoha
 
+> **2026-11-05 consolidated update:** The historical sections below include
+> older behavior descriptions. The current Windows third tab is the custom
+> **Display Options** (Resolution/Hz, Resizable, VSync, upscaler, shader,
+> external GLSL, factor and Apply/Default), not the obsolete SOMCON screen or
+> a direct shortcut to the generic SettingsMenu. It uses external user-authored
+> PNGs and four non-retail CMAP variants; General retains WINDOW/FULL and
+> STANDARD/WIDE. General/Sound may load external PNGs while keeping their retail
+> CMAPs. Required filenames and installation are in
+> [`display-options/README.md`](display-options/README.md) and
+> [`docs/DISPLAY_OPTIONS_USER_ART_2026-11-05.md`](docs/DISPLAY_OPTIONS_USER_ART_2026-11-05.md).
+> The current GPK media path supports seekable streaming for **raw** packed
+> entries with fallback for compressed/in-memory entries; it is no longer
+> accurate to say every packed media entry is always materialized in memory.
+> See the later `docs/PARITY_TEN_ITEMS_2026-11-05.md` and its linked evidence
+> for gameplay, audio, fades, replay and settings improvements. No full
+> clean-profile playthrough is claimed.
+
 `SchoolDays` extends the Kotonoha `Runtime` rather than embedding the original
 game engine. It uses Kotonoha's renderer, audio mixer, media decoders, settings,
 launcher and debug APIs. Its UI is drawn natively from the retail System assets; the engine's debug
