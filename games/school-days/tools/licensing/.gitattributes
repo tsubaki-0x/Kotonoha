@@ -1,0 +1,3 @@
+# Preserve the canonical SIL OFL 1.1 text byte-for-byte, including a
+# historical space at the end of a PREAMBLE line in the upstream license.
+SIL-OFL-1.1.txt text eol=lf whitespace=-blank-at-eol
