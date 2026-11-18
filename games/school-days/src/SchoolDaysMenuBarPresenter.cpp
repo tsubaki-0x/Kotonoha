@@ -66,8 +66,12 @@ bool SchoolDaysMenuBarPresenter::Open(SDL_Renderer* renderer,
     // Initialize() mirrors native callback_30(0): no update cycle is active
     // until a feeling writer raises the host latch again.
     feelingLatch_ = false;
+    feelingDeltaDetected_ = false;
+    suppressChoiceOriginFeel_ = false;
     pendingFeelingDirectionCode_ = 0;
     pointerInsideBar_ = false;
+    suppressedPointerKnown_ = false;
+    suppressedPointerInsideBar_ = false;
     fadeTargetVisible_ = false;
     fadeStartAlpha_ = 0;
     fadeStartMs_ = 0;
@@ -82,6 +86,8 @@ bool SchoolDaysMenuBarPresenter::Open(SDL_Renderer* renderer,
     actionInhibit_ = false;
     fullBarSuppressed_ = false;
     meterOnly_ = false;
+    choiceTailFrozen_ = false;
+    choiceTailFeelingVisible_ = false;
     speedIndex_ = 0;
     replayIndicatorAvailable_ = false;
     replayIndicatorControl_ = 24;
@@ -97,9 +103,13 @@ void SchoolDaysMenuBarPresenter::Close() {
     chip_ = nullptr;
     assets_ = nullptr;
     feelingLatch_ = false;
+    feelingDeltaDetected_ = false;
+    suppressChoiceOriginFeel_ = false;
     pendingFeelingDirectionCode_ = 0;
     selection_ = -1;
     pointerInsideBar_ = false;
+    suppressedPointerKnown_ = false;
+    suppressedPointerInsideBar_ = false;
     fadeTargetVisible_ = false;
     fadeStartAlpha_ = 0;
     fadeStartMs_ = 0;
@@ -109,17 +119,54 @@ void SchoolDaysMenuBarPresenter::Close() {
     autoLightRecord_ = 43;
     opened_ = false;
     meterOnly_ = false;
+    choiceTailFrozen_ = false;
+    choiceTailFeelingVisible_ = false;
     replayIndicatorAvailable_ = false;
     replayIndicatorControl_ = 24;
     replayIndicatorAlpha_ = 255;
+}
+
+void SchoolDaysMenuBarPresenter::ResetHoverChrome() {
+    selection_ = -1;
+    pointerInsideBar_ = false;
+    fadeTargetVisible_ = false;
+    fadeStartAlpha_ = 0;
+    fadeStartMs_ = 0;
+    barAlpha_ = 0;
+}
+
+void SchoolDaysMenuBarPresenter::ResumePhysicalHoverAfterChoice() {
+    if (fullBarSuppressed_ || meterOnly_ || choiceTailFrozen_ ||
+        !suppressedPointerKnown_) return;
+    const bool inside = suppressedPointerInsideBar_;
+    suppressedPointerKnown_ = false;
+    suppressedPointerInsideBar_ = false;
+    if (!inside) return;
+    // The cursor is still physically in the top strip: native chrome may
+    // return when the result gate releases, without a *new* motion event.
+    // Unlike stale alpha, this probe was recorded while the choice was owned.
+    pointerInsideBar_ = true;
+    fadeStartAlpha_ = barAlpha_;
+    fadeStartMs_ = static_cast<uint32_t>(SDL_GetTicks());
+    fadeTargetVisible_ = true;
+    selection_ = -1; // a future real hover must select an actionable control
 }
 
 bool SchoolDaysMenuBarPresenter::HandleEvent(SDL_Renderer* renderer,
                                              const SDL_Event* event,
                                              Action* action) {
     if (action != nullptr) *action = {};
-    if (!opened_ || meterOnly_ || renderer == nullptr ||
-        event == nullptr || action == nullptr) {
+    // The choice owns *actions* entirely. We may still record a physical
+    // position during its result animation without showing chrome or changing
+    // actionable hover; this lets an already-hovering cursor reveal the menu
+    // once the input gate finally releases, as observed in retail A03.
+    if (!opened_ || renderer == nullptr || event == nullptr || action == nullptr) {
+        return false;
+    }
+    const bool suppressed = meterOnly_ || fullBarSuppressed_ || choiceTailFrozen_;
+    if (suppressed && event->type == SDL_EVENT_WINDOW_MOUSE_LEAVE) {
+        suppressedPointerKnown_ = true;
+        suppressedPointerInsideBar_ = false;
         return false;
     }
     if (event->type != SDL_EVENT_MOUSE_MOTION &&
@@ -156,7 +203,6 @@ bool SchoolDaysMenuBarPresenter::HandleEvent(SDL_Renderer* renderer,
     const float y = (wy - viewport.y) / viewport.scale;
     const int hit = HitTest(x, y, variant_);
     const bool availableNow =
-        !fullBarSuppressed_ &&
         ControlAvailable(hit, transportLocked_, actionInhibit_,
                          speedControlsEnabled_, superSkipEnabled_,
                          replayIndicatorAvailable_);
@@ -164,6 +210,13 @@ bool SchoolDaysMenuBarPresenter::HandleEvent(SDL_Renderer* renderer,
 
     const bool inside = x >= 0.0f && x < layout_.barWidth &&
                         y >= 0.0f && y < layout_.barHeight;
+    if (suppressed) {
+        if (event->type == SDL_EVENT_MOUSE_MOTION) {
+            suppressedPointerKnown_ = true;
+            suppressedPointerInsideBar_ = inside;
+        }
+        return false;
+    }
     if (event->type == SDL_EVENT_MOUSE_MOTION) {
         if (inside != pointerInsideBar_) {
             pointerInsideBar_ = inside;
@@ -204,6 +257,8 @@ void SchoolDaysMenuBarPresenter::RestoreFeelingState(int feeling001,
     if (!opened_) return;
     (void)meter_.Initialize(feeling001, feeling002);
     feelingLatch_ = false;
+    feelingDeltaDetected_ = false;
+    suppressChoiceOriginFeel_ = false;
     pendingFeelingDirectionCode_ = 0;
 }
 
@@ -225,8 +280,10 @@ void SchoolDaysMenuBarPresenter::Update(uint32_t nowMs, int feeling001,
 
     if (feelingLatch_) {
         const auto tick = meter_.Tick(nowMs, feeling001, feeling002);
-        if (tick.hostDirectionCode == 3 || tick.hostDirectionCode == 4)
+        if (tick.hostDirectionCode == 3 || tick.hostDirectionCode == 4) {
+            feelingDeltaDetected_ = true;
             pendingFeelingDirectionCode_ = tick.hostDirectionCode;
+        }
         if (tick.clearFeelingLatch) feelingLatch_ = false;
     }
 }
@@ -253,7 +310,13 @@ void SchoolDaysMenuBarPresenter::SetRuntimeState(bool autoMode, bool paused,
     speedControlsEnabled_ = speedControlsEnabled;
     transportLocked_ = transportLocked;
     actionInhibit_ = actionInhibit;
+    if (fullBarSuppressed && !fullBarSuppressed_) {
+        ResetHoverChrome();
+        suppressedPointerKnown_ = false;
+        suppressedPointerInsideBar_ = false;
+    }
     fullBarSuppressed_ = fullBarSuppressed;
+    if (!fullBarSuppressed) ResumePhysicalHoverAfterChoice();
 }
 
 SDL_FRect SchoolDaysMenuBarPresenter::Transform(const SDL_FRect& logical,
@@ -338,20 +401,33 @@ bool SchoolDaysMenuBarPresenter::Render(SDL_Renderer* renderer,
     // Native persistent AUTO ON, selected x2..x32 and the Replay Data status
     // label survive the ordinary hover-bar fade. A replay-opacity selector
     // controls that label independently; only chrome obeys barAlpha_.
-    const RenderVisibility visibility =
-        VisibilityForState(barAlpha_, fullBarSuppressed_, meterOnly_);
+    const RenderVisibility visibility = meterOnly_
+        ? VisibilityForState(barAlpha_, fullBarSuppressed_, true)
+        : (choiceTailFrozen_
+             ? VisibilityForFrozenChoiceTail(barAlpha_, fullBarSuppressed_,
+                                             choiceTailFeelingVisible_)
+             : VisibilityForState(barAlpha_, fullBarSuppressed_, false,
+                                  feelingLatch_ && feelingDeltaDetected_ &&
+                                      !suppressChoiceOriginFeel_));
+    // AUTO ON is a persistent, independent sprite, including through the
+    // choice prompt, its frozen exit, and the next-scene handoff. The selected
+    // speed highlight is not projected during those suppressed phases.
     const PersistentTransport persistent = PersistentTransportForState(
         autoMode_, speedIndex_, speedControlsEnabled_, transportLocked_,
-        fullBarSuppressed_, meterOnly_);
+        fullBarSuppressed_ || choiceTailFrozen_, meterOnly_);
     const uint8_t replayAlpha = ReplayIndicatorAlphaForState(
         replayIndicatorAvailable_, replayIndicatorAlpha_, fullBarSuppressed_,
         meterOnly_);
-    if (!visibility.meter && !persistent.selectedSpeed && !persistent.autoOn &&
-        replayAlpha == 0)
+    const uint8_t chromeChipAlpha = visibility.chrome ? barAlpha_ : 255;
+    const uint8_t meterAlpha = MeterAlphaForState(
+        barAlpha_, visibility.chrome, feelingLatch_, meterOnly_,
+        choiceTailFrozen_ && choiceTailFeelingVisible_);
+    if (!visibility.chrome && !visibility.meter &&
+        !persistent.selectedSpeed && !persistent.autoOn && replayAlpha == 0)
         return true;
 
     SDL_SetTextureAlphaMod(base_, barAlpha_);
-    SDL_SetTextureAlphaMod(chip_, visibility.chrome ? barAlpha_ : 255);
+    SDL_SetTextureAlphaMod(chip_, chromeChipAlpha);
 
     // The persistent artwork has an independent full-opacity composition;
     // restoring chrome alpha matters for the subsequent hover/help sprites.
@@ -359,7 +435,7 @@ bool SchoolDaysMenuBarPresenter::Render(SDL_Renderer* renderer,
         SDL_SetTextureAlphaMod(chip_, 255);
         const bool ok = RenderClipped(renderer, chip_, record.source,
                                       record.destination, viewport, error);
-        SDL_SetTextureAlphaMod(chip_, visibility.chrome ? barAlpha_ : 255);
+        SDL_SetTextureAlphaMod(chip_, chromeChipAlpha);
         return ok;
     };
     const auto drawPersistentSpeed = [&]() {
@@ -386,7 +462,7 @@ bool SchoolDaysMenuBarPresenter::Render(SDL_Renderer* renderer,
         const ChipRecord label = FixedChipRecord(68, variant_);
         const bool ok = RenderClipped(renderer, chip_, label.source,
                                       label.destination, viewport, error);
-        SDL_SetTextureAlphaMod(chip_, visibility.chrome ? barAlpha_ : 255);
+        SDL_SetTextureAlphaMod(chip_, chromeChipAlpha);
         return ok;
     };
 
@@ -407,10 +483,12 @@ bool SchoolDaysMenuBarPresenter::Render(SDL_Renderer* renderer,
     // KOTONOHA/SEKAI labels/frame that are not part of MenuBar.PNG.
     if (visibility.meter) {
         const ChipRecord meterFrame = FixedChipRecord(67, variant_);
+        SDL_SetTextureAlphaMod(chip_, meterAlpha);
         if (!RenderClipped(renderer, chip_, meterFrame.source,
                            meterFrame.destination, viewport, error)) {
             return false;
         }
+        SDL_SetTextureAlphaMod(chip_, chromeChipAlpha);
     }
 
     if (visibility.chrome) {
@@ -520,7 +598,11 @@ bool SchoolDaysMenuBarPresenter::Render(SDL_Renderer* renderer,
                            plan.source.w, plan.source.h};
     const SDL_FRect destination{plan.destination.x, plan.destination.y,
                                 plan.destination.w, plan.destination.h};
-    return RenderClipped(renderer, chip_, source, destination, viewport, error);
+    SDL_SetTextureAlphaMod(chip_, meterAlpha);
+    const bool rendered = RenderClipped(renderer, chip_, source, destination,
+                                        viewport, error);
+    SDL_SetTextureAlphaMod(chip_, chromeChipAlpha);
+    return rendered;
 }
 
 } // namespace Kotonoha

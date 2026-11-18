@@ -110,3 +110,120 @@ The separate `SchoolDays.DistDebugAbsence` test passes in DIST and explicitly
 rejects MCP, MCP port/root and debug logging options. Final Windows Release
 CTest for this feature: DEV **80/81** (only known software MetalFX failure),
 DIST **74/75** (only this registered MCP positive test).
+
+### Pending choice is a transport barrier — 2026-11-17
+
+School Days `SkipToEnd` can no longer seek across an unresolved `SetSELECT`.
+Its game-specific runtime identifies an unresolved authored prompt even before
+its input window appears, computes one protected destination, captures it when
+the upper menu initiates a black fade, and revalidates the same destination
+before navigating. A late prompt, stale scene or advanced clock cancels the
+transport without a seek, fade continuation or choice commit. In particular,
+the first permitted jump remains `SkipFRAME - 24` ticks; ordinary no-choice
+scenes and pre-choice `SkipToNextChoice` keep their existing behavior.
+
+The safeguard also applies to gameplay RIGHT, the LEFT/Back input while a
+prompt is actively waiting, direct menu control 3, mouse/touch and synthetic
+gamepad skip input; replay-owned transports retain their recorded-choice
+semantics. The upper MenuBar **controls, background chrome and Feel meter**
+are suppressed while an uncommitted choice owns input, but an enabled
+**AUTO ON status sprite remains independently visible**. Legitimate player clicks, timed-out prompts, AUTO mode,
+pause and selected playback speed remain separate from this transport barrier.
+
+**Post-choice menu correction (user's direct observation, November 17, extended
+November 18):** after the player confirms or omits a choice, the upper bar
+must not automatically reappear due to inherited hover alpha; its controls
+remain frozen during the choice exit. If the pointer actually moves into the
+upper strip **during** the frozen result and is still there at release, the
+ordinary MenuBar can return without another mouse movement. A pointer outside
+the top never reveals chrome just because the scene advances. AUTO ON remains
+visible throughout. This refinement is grounded in the user's supplied A03
+manual-choice retail video (November 18, ~7.5–11.0 s).
+The isolated feeling meter appears without hover **only if a real raw feeling
+change was detected after a selected choice**. An unanswered `SetSELECT`
+displays options only (not the meter); omission/unchanged feelings do not
+invent a standalone meter. The menu becomes interactive
+again only after the next physical scene is associated **and** the feeling
+meter has finished its animation and any directional `SeUp` / `SeDown` effect.
+Existing audited resource lengths are 3.924172 s / 4.022857 s respectively;
+the game-specific release gate uses their ceiling in milliseconds. When the
+choice does not change feelings, no second sound or artificial four-second
+delay is introduced. `SeSelect` remains the immediate choice-confirmation cue;
+ESC / keyboard configuration keeps its existing behavior.
+
+Deterministic synthetic C++ tests on Windows exercise visible choices,
+black-fade races, repeated inputs (2/3/10/50), RIGHT/LEFT, direct control 3,
+`SkipToNextChoice`, manual selection, choice-free scripts, timed choice expiry,
+post-choice inert buttons, hover/meter projection, `SeUp` and `SeDown` unlock
+boundaries and soundless confirmation,
+and fixed-seed randomized sequences (**256 sequences, 12 actions each,
+seed `0x5EEDBEEF`**). The old test suite for Replay Data and H-scene playback
+is preserved unchanged. The barrier failures were recorded before any
+production fix in the ignored `build/_skip-choice-log.md`; no retail script,
+real save or commercial GPK was used.
+
+**Not verified:** GUI/manual playthrough with real School Days media, real GPU
+behavior, timing fidelity against the original commercial binary where the
+existing documentation does not establish it (the top-menu description above
+was observed by the user, not independently captured in retail; arrow-key
+behavior at an open prompt remains unverified), mobile gamepad/touch
+hardware, Linux/macOS/Android/iOS builds. Synthetic tests and a successful
+Windows build cannot substitute for the user's manual gameplay QA. The
+untracked `build/CHECKLIST-QA-SKIP-CHOICE.md` records the manual procedure.
+
+Windows Release verification for this local choice-barrier feature, with
+synthetic fixtures only: full DEV build **PASS**, DEV CTest **80/81** (only
+the historical `Kotonoha.Infrastructure` software MetalFX failure), full
+DIST build **PASS**, and DIST CTest **74/75** (only the existing positive
+`Kotonoha.MCPCommandLine` mismatch detailed above). Both variants passed the
+`SchoolDaysNextChoiceRuntimeTest` randomized barrier cases. The separately
+run headless DEV stress passed **36/36** isolated `--documents`/`--config`
+smoke cases; `ValidateBuildMetadata.py` passed. The DIST MCP mismatch does
+**not** satisfy a strict acceptance gate permitting only the MetalFX failure.
+No `lib/` test was changed or suppressed to conceal it. DIST-specific stress
+is not verified because `stress_l4.py` currently invokes DEV-only `--node` /
+`--ktrf` controls.
+
+**Normal Back feeling regression (REA 2026-11-18):** original static EXE
+callsite inspection distinguishes RouteMap `SP>=100` checkpoint restore/prune
+(`0x004331A0`) from ordinary `RouteProcSDHQ` reverse navigation. The old port
+incorrectly restored the type-3 checkpoint *after* applying the inverse
+feeling on ordinary Back, causing A03 → A04 → Back to retain `002=5` instead
+of returning to `002=0`. The correction leaves RouteMap checkpoint restoration
+intact and applies only the ordinary reverse effect for Back. New regression
+tests cover same-branch replay, alternate choice A05 and pending-choice
+save/load. See
+`games/school-days/docs/parity/BACK_FEEL_CHECKPOINT_REA_2026-11-18.md`.
+The post-choice bar's precise original action-unlock timing still lacks
+independent retail frame/video confirmation.
+
+**Top Menu / Feel rendering (REA 2026-11-18; revised after gameplay report):** original `SysMenuSDHQ.dll`
+draws the feeling frame/fills separately from the hover MenuBar, with the
+meter in the central `x=116..654, y=3..25` region. `0x10025690` explicitly
+does not apply the chrome fade alpha to meter sprites while a feeling update
+is active; `0x10026B40` initializes those sprites at full opacity. In the
+port, the initial correction erroneously presented the Feel meter **while the
+choice was still pending**, and forced the meter visible after confirmations
+that changed no feelings. The corrected runtime shows **only choices plus
+SeView (sound code5)** at prompt entry, then plays `SeSelect` for a confirmed
+option or `SeCancel` for omission; only a genuine changed-feeling event
+(`SeUp`/`SeDown`, codes3/4) activates standalone Feel. The additional
+November 18 correction clears stale pointer/fade state on entering SetSELECT,
+does not show frozen choice chrome automatically, and preserves AUTO ON as a
+standalone sprite during the pending prompt, chosen/omitted result and handoff.
+A late unchanged feeling refresh cannot resurrect Feel. Even if an omitted
+choice's route executes a nonzero raw `001`/`002` delta, its choice-origin
+refresh cannot leak into the generic Feel renderer after the frozen exit.
+The meter retains
+independent alpha during an actual feeling effect. This does **not**
+unfreeze Top Menu actions or permit SkipToEnd/SuperSkip to bypass choices.
+An SDL software pixel-readback regression now checks that a pending choice
+draws neither Feel nor chrome, an omitted/unchanged choice never draws an
+isolated meter (even after a delayed no-delta refresh), and a genuine
+changed-Feel display stays full-alpha without waking chrome. The AUTO ON
+chip remains visible in all these phases. Original skip dispatch and the
+`SkipFRAME == SetSELECT < Next` ordering in
+287/287 authored choice scenes were verified statically. See
+`games/school-days/docs/parity/TOP_MENU_FEEL_COMPOSITION_REA_2026-11-18.md`.
+Precise native post-choice input unlock remains an open verification item,
+not a proven consequence of the OGG cue's duration.

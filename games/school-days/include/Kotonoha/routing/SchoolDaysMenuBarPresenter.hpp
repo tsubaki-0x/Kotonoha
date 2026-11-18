@@ -109,7 +109,19 @@ public:
                              uint32_t elapsedMs);
     static RenderVisibility VisibilityForState(uint8_t barAlpha,
                                                bool fullBarSuppressed,
-                                               bool meterOnly);
+                                               bool meterOnly,
+                                               bool feelingLatch = false);
+    static RenderVisibility VisibilityForFrozenChoiceTail(
+        uint8_t barAlpha, bool fullBarSuppressed, bool showMeter);
+    // Retail SysMenu 0x10025690 does not apply the surrounding MenuBar fade
+    // to meter sprites while host +0x154 reports an active feeling update.
+    // During a *changed post-choice* feeling effect, meter-only composition
+    // likewise preserves full alpha. Pending SetSELECT never shows Feel.
+    static uint8_t MeterAlphaForState(uint8_t barAlpha,
+                                      bool chromeVisible,
+                                      bool feelingLatch,
+                                      bool meterOnly,
+                                      bool choiceTailFrozen);
     // The retail x2..x32 selection and AUTO ON remain visible at full opacity
     // after ordinary hover chrome fades completely out.
     static PersistentTransport PersistentTransportForState(
@@ -137,7 +149,15 @@ public:
               std::string* error = nullptr);
     void Close();
 
-    void RequestFeelingRefresh() { feelingLatch_ = true; }
+    void RequestFeelingRefresh() {
+        // Once a result tail has finished, a fresh ordinary gameplay writer
+        // may again drive standalone Feel. A refresh raised while exiting a
+        // choice stays choice-originated, even if its raw values changed.
+        if (!choiceTailFrozen_ && !fullBarSuppressed_ && !meterOnly_)
+            suppressChoiceOriginFeel_ = false;
+        if (!feelingLatch_) feelingDeltaDetected_ = false;
+        feelingLatch_ = true;
+    }
     // Loading a different save replaces the KTRF feeling state without a
     // normal SET_FLAG writer notification. Keep the MenuBar textures/chrome,
     // but rebase its visual value and clear any old choice animation/cue.
@@ -155,15 +175,35 @@ public:
                          bool superSkipEnabled, bool speedControlsEnabled,
                          bool transportLocked, bool actionInhibit,
                          bool fullBarSuppressed);
-    // During the outgoing choice tail retail keeps only the feeling meter.
-    // This survives an invisible/suppressed MenuBar and uses full opacity.
+    // Used only for a detected, changed-feeling post-choice effect, never for
+    // the unanswered SETSELECT itself or an unchanged/omitted choice.
     void SetMeterOnly(bool enabled) {
+        if (enabled && !meterOnly_) ResetHoverChrome();
         meterOnly_ = enabled;
-        if (enabled) {
-            selection_ = -1;
-            pointerInsideBar_ = false;
-        }
+        if (!enabled) ResumePhysicalHoverAfterChoice();
     }
+    // Post-choice: controls remain frozen whether or not any feeling changed;
+    // the separately gated meter may appear on actual detected change only.
+    void SetChoiceTailFrozen(bool enabled) {
+        if (enabled && !choiceTailFrozen_) {
+            ResetHoverChrome();
+            suppressedPointerKnown_ = false;
+            // Omissions may still execute RouteProc SetFeeling. The result's
+            // raw delta must not emerge as a generic standalone Feel after
+            // the frozen visual phase ends.
+            suppressChoiceOriginFeel_ = true;
+        }
+        choiceTailFrozen_ = enabled;
+        if (enabled) selection_ = -1;
+        else ResumePhysicalHoverAfterChoice();
+    }
+    // Confirmation freezes transport regardless of whether feelings change.
+    // Only an actual post-choice SeUp/SeDown detector event may reveal the
+    // otherwise hidden standalone feeling bar.
+    void SetChoiceTailFeelingVisible(bool visible) {
+        choiceTailFeelingVisible_ = visible;
+    }
+    bool ChoiceTailFrozen() const { return choiceTailFrozen_; }
     void SetReplayIndicatorState(bool available, int control = -1) {
         replayIndicatorAvailable_ = available;
         if (control >= 15 && control <= 24)
@@ -187,6 +227,12 @@ public:
     const SchoolDaysTopMeterModel& Meter() const { return meter_; }
 
 private:
+    // The native input gate prevents mouse hover from generating chrome.
+    // Discard any pre-choice fade/selection when the game takes ownership.
+    // A pointer actually moved into the bar while the result is frozen may
+    // reveal chrome *after* release; an old hover alpha may never do so.
+    void ResetHoverChrome();
+    void ResumePhysicalHoverAfterChoice();
     static SDL_FRect Transform(const SDL_FRect& logical,
                                const Viewport& viewport);
     static bool RenderClipped(SDL_Renderer* renderer, SDL_Texture* texture,
@@ -202,9 +248,17 @@ private:
     SchoolDaysTopMeterModel meter_;
     int pendingFeelingDirectionCode_ = 0;
     bool feelingLatch_ = false;
+    // A refresh request is not proof of changed raw 001/002. Only the meter's
+    // Detect phase may reveal a standalone feeling animation.
+    bool feelingDeltaDetected_ = false;
+    bool suppressChoiceOriginFeel_ = false;
     bool opened_ = false;
     int selection_ = -1;
     bool pointerInsideBar_ = false;
+    // Last real pointer motion during a suppressed choice result, not a stale
+    // pre-choice hover or a synthetic visibility latch.
+    bool suppressedPointerKnown_ = false;
+    bool suppressedPointerInsideBar_ = false;
     bool autoMode_ = false;
     uint32_t autoOnAtMs_ = 0;
     int autoLightRecord_ = 43;
@@ -215,6 +269,8 @@ private:
     bool actionInhibit_ = false;
     bool fullBarSuppressed_ = false;
     bool meterOnly_ = false;
+    bool choiceTailFrozen_ = false;
+    bool choiceTailFeelingVisible_ = false;
     int speedIndex_ = 0;
     bool replayIndicatorAvailable_ = false;
     int replayIndicatorControl_ = 24;
