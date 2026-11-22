@@ -427,8 +427,10 @@ class Checker:
         generic = f"{UPSTREAM}/app/build.gradle"
         self.require(
             generic,
-            r"def\s+includeThisGame\s*=\s*includeGameAssets\s*\|\|\s*"
-            r"variant\.flavorName\s*==\s*'example'",
+            r"def\s+includeThisGame\s*=\s*"
+            r"(?:variant\.flavorName\s*!=\s*'schoolDays'\s*&&\s*\(\s*)?"
+            r"includeGameAssets\s*\|\|\s*"
+            r"variant\.flavorName\s*==\s*'example'\s*\)?",
             "generic game assets must honor -PbundleGameAssets=false",
             "includeThisGame",
         )
