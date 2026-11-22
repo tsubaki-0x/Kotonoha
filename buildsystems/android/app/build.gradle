@@ -138,6 +138,11 @@ android {
   buildTypes {
     debug {
       buildConfigField 'boolean', 'IS_DISTRIBUTION_BUILD', 'false'
+      externalNativeBuild {
+        cmake {
+          arguments '-DKOTONOHA_DISTRIBUTION_BUILD=OFF'
+        }
+      }
     }
     release {
       buildConfigField 'boolean', 'IS_DISTRIBUTION_BUILD', 'false'
@@ -160,7 +165,9 @@ android {
       externalNativeBuild {
         cmake {
           arguments '-DKOTONOHA_DISTRIBUTION_BUILD=ON',
+            '-DKOTONOHA_DEV_CONTROL=OFF',
             '-DKOTONOHA_ENABLE_MCP=OFF',
+            '-DKOTONOHA_ENABLE_PLAYER_DUBBING=OFF',
             '-DCMAKE_BUILD_TYPE=Release'
         }
       }
