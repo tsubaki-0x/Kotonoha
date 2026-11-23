@@ -20,6 +20,9 @@ gradle :app:assembleSnowRadishDebug -Pabis=arm64-v8a
 gradle :app:assembleDokiDokiDebug -Pabis=arm64-v8a
 gradle :app:assembleSchoolDaysDistTest -Pabis=arm64-v8a \
   -PschoolDaysTranslationsDir=/traducoes/externas/autorizadas
+gradle :app:assembleSchoolDaysDistTest -Pabis=armeabi-v7a \
+  -PschoolDaysTranslationsDir=/traducoes/externas/autorizadas \
+  -PbundleGameAssets=false
 ```
 
 No Windows, use PowerShell na pasta `Android`:
@@ -37,8 +40,11 @@ ambiente do usuario e reinicie o Studio. O SDK vem de `local.properties`
 Nao e necessario definir `ANDROID_NDK_HOME` separadamente.
 
 Cada flavor tem applicationId e APK proprios em `app/build/outputs/apk/`.
-Selecione **uma unica ABI** por compilacao: `arm64-v8a` (padrao) ou
-`x86_64` (emulador). Listas com virgulas sao rejeitadas.
+Selecione **uma unica ABI** por compilacao: `arm64-v8a` (padrao),
+`armeabi-v7a` (ARM 32 bits com NEON) ou `x86_64` (emulador).
+Listas com virgulas sao rejeitadas; os triplets sao `arm64-android`,
+`arm-neon-android` e `x64-android`. O ARMv7 exige NEON no dispositivo,
+e `ANDROID_ARM_NEON=ON` e aplicado antes de configurar as dependencias.
 School Days exige `-PschoolDaysTranslationsDir=...` com traducoes fora do
 repositorio; DEV exige ainda `-PschoolDaysDevSavesDir=...` com os oito hashes
 autorizados, nunca uma pasta de saves pessoais. DIST-TEST possui assinatura de

@@ -40,6 +40,27 @@ def check() -> None:
         "docs/BUILD_ANDROID.pt-BR.md",
     ):
         assert "armeabi-v7a" in read(doc), f"Missing ARMv7 instructions: {doc}"
+    # The hybrid branch retains its own School Days DEV/DIST Gradle project.
+    # Unlike the shared project, this project intentionally builds one ABI at a time.
+    if (ROOT / "Android/app/build.gradle").is_file():
+        legacy_gradle = read("Android/app/build.gradle")
+        legacy_cmake = read("Android/CMakeLists.txt")
+        for expected in (
+            "'armeabi-v7a': 'arm-neon-android'",
+            "'arm64-v8a': 'arm64-android'",
+            "'x86_64': 'x64-android'",
+            "abis.size() != 1",
+            "'-DANDROID_ARM_NEON=ON'",
+        ):
+            assert expected in legacy_gradle, f"Missing hybrid ABI contract: {expected}"
+        for expected in (
+            'set(ANDROID_ARM_NEON ON CACHE BOOL',
+            'set(_VCPKG_ANDROID_TRIPLET "arm-neon-android")',
+        ):
+            assert expected in legacy_cmake, f"Missing hybrid CMake contract: {expected}"
+        assert 'set(_VCPKG_ANDROID_TRIPLET "arm-android")' not in legacy_cmake
+        assert "armeabi-v7a" in read("Android/README.md")
+        assert "armeabi-v7a" in read("Android/README.pt-BR.md")
     print("[Kotonoha] Android ARMv7 NEON + ARM64/x86_64 contracts passed")
 
 

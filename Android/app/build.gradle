@@ -33,11 +33,14 @@ def schoolDaysDevExpectedSaveHashes = [
         'SaveFile005.DAT': '67e4ba94729086805a8c2467045fdb1ca8b7c31035e1e8ae5a548180a77657e6',
         'SaveFile006.DAT': '8a604b43819a51d281be3c08a3dd51ee13dba2b8b709f35e81c49bfdd3d10af6'
 ]
-def abis = providers.gradleProperty('abis').orElse('arm64-v8a').get().split(',').toList()
-if (abis.size() != 1 || !(abis[0] in ['arm64-v8a', 'x86_64'])) {
-    throw new GradleException('Android builds must select exactly one supported ABI: -Pabis=arm64-v8a or -Pabis=x86_64.')
+def abis = providers.gradleProperty('abis').orElse('arm64-v8a').get().split(',').collect { it.trim() }
+def tripletsByAbi = ['arm64-v8a': 'arm64-android',
+                    'armeabi-v7a': 'arm-neon-android',
+                    'x86_64': 'x64-android']
+if (abis.size() != 1 || !tripletsByAbi.containsKey(abis[0])) {
+    throw new GradleException('Android builds must select one ABI: -Pabis=arm64-v8a, -Pabis=armeabi-v7a or -Pabis=x86_64.')
 }
-def vcpkgTriplet = abis[0] == 'arm64-v8a' ? 'arm64-android' : 'x64-android'
+def vcpkgTriplet = tripletsByAbi[abis[0]]
 def games = [
     example: ['example', 'Kotonoha', 'me.kotonoha.example', 'Kotonoha'],
     zeroNoTsukaima: ['zero-no-tsukaima', 'ZeroNoTsukaima', 'me.hirameki.kotonoha.zeronotsukaima', 'Zero no Tsukaima'],
@@ -76,6 +79,8 @@ android {
                           // vendored native sources, not the vcpkg SDL/ImGui.
                           '-DKOTONOHA_SDL_FROM_VCPKG=OFF',
                           '-DKOTONOHA_IMGUI_FROM_VCPKG=OFF',
+                          // Match ARMv7 vcpkg arm-neon-android with NDK NEON.
+                          '-DANDROID_ARM_NEON=ON',
                           '-DANDROID_PLATFORM=android-28',
                           '-DANDROID_STL=c++_shared'
             }
@@ -345,7 +350,7 @@ android.applicationVariants.all { variant ->
             if (variant.flavorName == 'dokiDoki') {
                 def foundStdlib = false
                 abis.each { abi ->
-                    def triplet = abi == 'arm64-v8a' ? 'arm64-android' : (abi == 'x86_64' ? 'x64-android' : null)
+                    def triplet = tripletsByAbi[abi]
                     if (triplet != null) {
                         def prefix = new File(rootProject.projectDir, "build/vcpkg-python/${abi}/${triplet}")
                         def libraryRoot = new File(prefix, variant.buildType.name == 'debug' ? 'debug/lib' : 'lib')
