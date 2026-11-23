@@ -435,12 +435,6 @@ android.applicationVariants.all { variant ->
       }
     }
 
-    if (stageSchoolDaysLauncherArt) {
-      from(schoolDaysLauncherArt) {
-        into 'assets'
-      }
-    }
-
     if (includeThisGame) {
       from(gameAssets) {
         into 'game-assets'
