@@ -23,7 +23,8 @@ DEV_FIXTURE = (
     "app/src/schoolDaysDev/java/org/kotonoha/android/"
     "SchoolDaysDevSaveFixtures.java"
 )
-SHARED_COPY = "buildsystems/cmake/KotonohaApp.cmake"
+SHARED_COPY = "buildsystems/cmake/packaging/KotonohaAppPackaging.cmake"
+IMGUI_HELPER = "buildsystems/cmake/dependencies/KotonohaImGui.cmake"
 WORKFLOW = ".github/workflows/android.yml"
 REQUIRED = (
     "CMakeLists.txt",
@@ -31,6 +32,7 @@ REQUIRED = (
     "buildsystems/cmake/KotonohaAndroid.cmake",
     "buildsystems/cmake/KotonohaOptions.cmake",
     SHARED_COPY,
+    IMGUI_HELPER,
     WORKFLOW,
     f"{UPSTREAM}/build.gradle",
     f"{UPSTREAM}/settings.gradle",
@@ -425,12 +427,15 @@ class Checker:
                 "function(kotonoha_copy_assets",
             )
         generic = f"{UPSTREAM}/app/build.gradle"
+        # The unified launcher and School Days never embed proprietary
+        # game data; other DIST variants also force game-assets off.
         self.require(
             generic,
-            r"def\s+includeThisGame\s*=\s*"
-            r"(?:variant\.flavorName\s*!=\s*'schoolDays'\s*&&\s*\(\s*)?"
-            r"includeGameAssets\s*\|\|\s*"
-            r"variant\.flavorName\s*==\s*'example'\s*\)?",
+            r"def\s+includeThisGame\s*=\s*!isLauncher\s*&&\s*"
+            r"variant\.flavorName\s*!=\s*'schoolDays'\s*&&\s*"
+            r"\(\s*variant\.flavorName\s*==\s*'example'\s*\|\|\s*"
+            r"\(\s*includeGameAssets\s*&&\s*"
+            r"variant\.buildType\.name\s*!=\s*'dist'\s*\)\s*\)",
             "generic game assets must honor -PbundleGameAssets=false",
             "includeThisGame",
         )
@@ -525,10 +530,17 @@ class Checker:
         if len(names) != len(DEV_SAVES) or set(names) != DEV_SAVES:
             self.fail(custom, "DEV save fixtures need eight distinct pinned "
                       "SHA-256 identities", "schoolDaysDevExpectedSaveHashes")
+        # Upstream moved ImGui from lib/CMakeLists.txt to a standalone
+        # CMake helper; confirm the shared JNI library still uses imgui.
         self.require(
-            "lib/CMakeLists.txt", r"add_library\s*\(\s*imgui\s+",
+            IMGUI_HELPER, r"add_library\s*\(\s*imgui\s+",
             "native imgui target name must match getLibraries()",
             "add_library(imgui",
+        )
+        self.require(
+            "lib/CMakeLists.txt", r"KotonohaImGui\.cmake",
+            "lib must include the shared ImGui helper",
+            "KotonohaImGui.cmake",
         )
         self.require(
             WORKFLOW, r"python3\s+tools/check_hybrid_android_contracts\.py",
@@ -540,7 +552,8 @@ class Checker:
         )
         self.require(
             WORKFLOW, r"gradle\s+:app:assembleDebug\s+\\\s*"
-            r"-Pabis=arm64-v8a\s+-PbundleGameAssets=false",
+            r"-Pabis=arm64-v8a(?:,armeabi-v7a)?\s+"
+            r"-PbundleGameAssets=false",
             "CI must keep commercial assets out of generic APK builds",
             "assembleDebug",
         )
