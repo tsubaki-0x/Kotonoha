@@ -25,8 +25,11 @@ if(KOTONOHA_DISTRIBUTION_BUILD)
     # accidental return of developer MCP/log controls to public builds.
     add_executable(SchoolDaysDistDebugAbsenceTest
         SchoolDaysDistDebugAbsenceTest.cpp)
-    # This contract only exercises the shared engine CLI; linking the game
-    # runtime would introduce unrelated retail presentation dependencies.
+    # Inspect game Runtime compile-time flags without linking the full game
+    # runtime. The CLI checks themselves only depend on the shared engine.
+    target_include_directories(SchoolDaysDistDebugAbsenceTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../include")
     target_link_libraries(SchoolDaysDistDebugAbsenceTest PRIVATE KotonohaEngine)
     add_test(NAME SchoolDays.DistDebugAbsence
         COMMAND SchoolDaysDistDebugAbsenceTest)
