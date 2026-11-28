@@ -176,7 +176,7 @@ android {
         // This upstream matrix is for generic CI smoke APKs, not the hybrid
         // School Days retail DEV/DIST package. Keep separate install/data
         // roots even when both Android projects are present in one checkout.
-        if (flavor == 'schoolDays') {
+        if (flavor == 'schoolDays' && !schoolDaysEmbeddedAssets) {
           applicationIdSuffix '.upstream'
         }
         manifestPlaceholders.appName = game[3]
