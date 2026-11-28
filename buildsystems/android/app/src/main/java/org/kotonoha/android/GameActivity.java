@@ -49,8 +49,12 @@ public final class GameActivity extends SDLActivity {
 
     @Override
     protected String[] getArguments() {
-        String[] args = getIntent().getStringArrayExtra(LAUNCH_ARGUMENTS);
-        return args == null ? super.getArguments() : args;
+        if (getIntent() != null) {
+            String[] args = getIntent().getStringArrayExtra(LAUNCH_ARGUMENTS);
+            if (args == null) args = getIntent().getStringArrayExtra("kotonoha_args");
+            if (args != null) return args;
+        }
+        return super.getArguments();
     }
 
     @Override
@@ -190,14 +194,6 @@ public final class GameActivity extends SDLActivity {
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) runOnUiThread(this::applyKotonohaDisplayPreference);
-    }
-
-    @Override
-    protected String[] getArguments() {
-        String[] extraArgs = getIntent() != null
-                ? getIntent().getStringArrayExtra("kotonoha_args")
-                : null;
-        return extraArgs != null ? extraArgs : new String[0];
     }
 
     @Override
